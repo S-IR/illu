@@ -1,0 +1,4 @@
+build-dir/
+diskimg/
+build-test.
+ovmf/

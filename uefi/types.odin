@@ -13,11 +13,12 @@ UINT64 :: u64
 UINTN :: u64
 CHAR16 :: u16 // UTF-16, but should use UCS-2 code points 0x0000-0xFFFF
 VOID :: rawptr
-EFI_STATUS :: UINTN
+EFI_STATUS :: enum u64 {
+	SUCCESS = 0,
+}
 EFI_HANDLE :: ^VOID
 
 // UEFI 2.10 Appendix D https://uefi.org/specifications
-EFI_SUCCESS :: 0
 
 // UEFI 2.10 §12.4.7 https://uefi.org/specifications
 EFI_BLACK :: 0x00
@@ -391,4 +392,172 @@ EFI_DEVICE_PATH_UTILITIES_PROTOCOL :: struct {
 		DeviceNode: ^EFI_DEVICE_PATH_PROTOCOL,
 	) -> ^EFI_DEVICE_PATH_PROTOCOL,
 	// Other fields omitted
+}
+GOP_GUID := EFI_GUID{0x9042a9de, 0x23dc, 0x4a38, {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}}
+FS_GUID := EFI_GUID{0x964e5b22, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}}
+LIP_GUID := EFI_GUID{0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}}
+ACPI2_GUID := EFI_GUID {
+	0x8868e871,
+	0xe4f1,
+	0x11d3,
+	{0xbc, 0x22, 0x00, 0x80, 0xc7, 0x73, 0xc8, 0x81},
+}
+ACPI1_GUID := EFI_GUID {
+	0xeb9d2d30,
+	0x2d88,
+	0x11d3,
+	{0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d},
+}
+
+errGop := [?]u16{'n', 'o', ' ', 'G', 'O', 'P', '\r', '\n', 0}
+errLip := [?]u16 {
+	'n',
+	'o',
+	' ',
+	'l',
+	'o',
+	'a',
+	'd',
+	'e',
+	'd',
+	' ',
+	'i',
+	'm',
+	'a',
+	'g',
+	'e',
+	'\r',
+	'\n',
+	0,
+}
+errFs := [?]u16 {
+	'f',
+	'i',
+	'l',
+	'e',
+	' ',
+	'r',
+	'e',
+	'a',
+	'd',
+	'i',
+	'n',
+	'g',
+	' ',
+	'e',
+	'r',
+	'r',
+	'o',
+	'r',
+	'\r',
+	'\n',
+	0,
+}
+
+errOOM := [?]u16{'o', 'u', 't', ' ', 'o', 'f', ' ', 'm', 'e', 'm', 'o', 'r', 'y', '\r', '\n', 0}
+errKernel := [?]u16 {
+	'k',
+	'e',
+	'r',
+	'n',
+	'e',
+	'l',
+	' ',
+	'l',
+	'o',
+	'a',
+	'd',
+	' ',
+	'f',
+	'a',
+	'i',
+	'l',
+	'e',
+	'd',
+	'\r',
+	'\n',
+	0,
+}
+errDaemon := [?]u16 {
+	'f',
+	's',
+	'_',
+	'd',
+	'a',
+	'e',
+	'm',
+	'o',
+	'n',
+	' ',
+	'l',
+	'o',
+	'a',
+	'd',
+	' ',
+	'f',
+	'a',
+	'i',
+	'l',
+	'e',
+	'd',
+	'\r',
+	'\n',
+	0,
+}
+errMmap := [?]u16 {
+	'G',
+	'e',
+	't',
+	'M',
+	'e',
+	'm',
+	'o',
+	'r',
+	'y',
+	'M',
+	'a',
+	'p',
+	' ',
+	'f',
+	'a',
+	'i',
+	'l',
+	'e',
+	'd',
+	'\r',
+	'\n',
+	0,
+}
+errRsdp := [?]u16{'n', 'o', ' ', 'A', 'C', 'P', 'I', ' ', 'R', 'S', 'D', 'P', '\r', '\n', 0}
+@(export, link_name = "_fltused")
+_fltused: i32 = 1
+
+@(export, link_name = "_tls_index")
+_tls_index: u32 = 0
+
+@(export, link_name = "memcpy")
+memcpy :: proc "c" (dst, src: rawptr, n: uint) -> rawptr {
+	d := ([^]u8)(dst)
+	s := ([^]u8)(src)
+	for i in 0 ..< n do d[i] = s[i]
+	return dst
+}
+
+@(export, link_name = "memset")
+memset :: proc "c" (dst: rawptr, val: i32, n: uint) -> rawptr {
+	d := ([^]u8)(dst)
+	for i in 0 ..< n do d[i] = u8(val)
+	return dst
+}
+
+@(export, link_name = "memmove")
+memmove :: proc "c" (dst, src: rawptr, n: uint) -> rawptr {
+	d := ([^]u8)(dst)
+	s := ([^]u8)(src)
+	if uintptr(dst) < uintptr(src) {
+		for i in 0 ..< n do d[i] = s[i]
+	} else {
+		for i := n; i > 0; i -= 1 do d[i - 1] = s[i - 1]
+	}
+	return dst
 }
