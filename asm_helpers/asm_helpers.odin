@@ -28,6 +28,13 @@ when !ODIN_TEST {
 		read_cr2 :: proc() -> u64 ---
 		read_cr3 :: proc() -> u64 ---
 		write_cr3 :: proc(addr: u64) ---
+
+		wrmsr_asm :: proc(msr: u32, value: u64) ---
+		rdmsr_asm :: proc(msr: u32) -> u64 ---
+
+
+		apic_stub_table: [5]uintptr
+
 	}
 
 }

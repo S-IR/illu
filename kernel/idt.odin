@@ -154,5 +154,22 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 	ah.halt()
 }
 irq_handler :: proc(frame: ^InterruptFrame) {
+	defer lapic_send_eoi()
 	v := int(frame.interruptNumber)
+	switch v {
+	case VECTOR_APIC_TIMER:
+	// scheduler tick goes here later
+	case VECTOR_APIC_ERROR:
+		print.serial_writeln("lapic: error fired")
+	case VECTOR_APIC_THERMAL:
+		print.serial_writeln("lapic: thermal fired")
+	case VECTOR_APIC_LINT0:
+		print.serial_writeln("lapic: lint0 fired")
+	case VECTOR_APIC_LINT1:
+		print.serial_writeln("lapic: lint1 fired")
+	case:
+		print.serial_write("lapic: unhandled irq=")
+		print.serial_write_hex(u64(v))
+		print.serial_writeln("")
+	}
 }

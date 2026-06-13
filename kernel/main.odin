@@ -18,5 +18,6 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	context = runtime.default_context()
 	idt_init()
 
+	lapic_init()
 	for {}
 }

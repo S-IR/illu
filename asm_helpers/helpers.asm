@@ -266,3 +266,49 @@ read_cr3:
 write_cr3:
     mov %rdi, %cr3
     ret
+
+
+.global wrmsr_asm
+wrmsr_asm:
+    movl   %edi, %ecx
+    movl   %esi, %eax
+    movq   %rsi, %rdx
+    shrq   $32, %rdx
+    wrmsr
+    ret
+
+.global rdmsr_asm
+rdmsr_asm:
+    movl   %edi, %ecx
+    rdmsr
+    shlq   $32, %rdx
+    orq    %rdx, %rax
+    ret
+
+
+.global cpuid_asm
+cpuid_asm:
+    push   %rbx
+    push   %rdx
+    movl   %edi, %eax
+    movl   %esi, %ecx
+    cpuid
+    pop    %rdi
+    movl   %eax, (%rdi)
+    movl   %ebx, 4(%rdi)
+    movl   %ecx, 8(%rdi)
+    movl   %edx, 12(%rdi)
+    pop    %rbx
+    ret
+
+.section .data
+.global apic_stub_table
+apic_stub_table:
+    .quad irq240, irq241, irq242, irq243, irq244
+
+.section .text
+IRQ_STUB 240
+IRQ_STUB 241
+IRQ_STUB 242
+IRQ_STUB 243
+IRQ_STUB 244
