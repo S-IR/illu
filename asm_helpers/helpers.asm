@@ -312,3 +312,32 @@ IRQ_STUB 241
 IRQ_STUB 242
 IRQ_STUB 243
 IRQ_STUB 244
+
+
+.global rdtsc_asm
+rdtsc_asm:
+    rdtsc
+    shlq $32, %rdx
+    orq  %rdx, %rax
+    ret
+
+
+.global inb
+inb:
+   movw   %di, %dx
+    xorl   %eax, %eax
+    inb    %dx, %al
+    ret
+
+
+.global outb
+outb:
+    movw   %di, %dx
+    movb   %sil, %al
+    outb   %al, %dx
+    ret
+
+.global sti_asm
+sti_asm:
+    sti
+    ret
