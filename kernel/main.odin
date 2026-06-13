@@ -8,20 +8,15 @@ QEMU_TEST :: true
 
 @(export)
 kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
-	context = runtime.default_context()
+	// ah.kernel_start_setup()
 	// kernelParams := params^
 	// ah.kernel_start_setup()
 	print.serial_init_asm()
-	print.serial_writeln("kernel base!")
+	print.serial_writeln("illu kernel alive!")
 
-	print.serial_write_hex(params.kernelImg.base)
-	print.serial_writeln("kernel entry!")
-
-	print.serial_write_hex(params.kernelImg.entry)
-	print.serial_writeln("illu kernel starting!")
-
-	print.serial_write_hex(params.kernelImg.end)
-	print.serial_writeln("kernel end!")
+	gdt_tss_init()
+	context = runtime.default_context()
+	idt_init()
 
 	for {}
 }

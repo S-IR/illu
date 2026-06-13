@@ -46,7 +46,7 @@
 // FreeBSD EFI libefi (shared helpers — ExitBootServices, memory map, console):
 //   https://github.com/freebsd/freebsd-src/tree/main/stand/efi/libefi
 
-package efi
+package uefi
 import "../lib/elf"
 import "../lib/shared"
 import "core:slice"
@@ -83,7 +83,7 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 
 	// UEFI 2.10 §7.3.16 LocateProtocol https://uefi.org/specifications
 	gop: ^EFI_GRAPHICS_OUTPUT_PROTOCOL
-	if systemTable.BootServices.LocateProtocol(&GOP_GUID, nil, cast(^^VOID)&gop) != .SUCCESS ||
+	if systemTable.BootServices.LocateProtocol(&GOP_GUID, nil, auto_cast &gop) != .SUCCESS ||
 	   gop == nil ||
 	   gop.Mode == nil ||
 	   gop.Mode.Info == nil {
@@ -92,21 +92,19 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 
 	// UEFI 2.10 §7.3.5 HandleProtocol https://uefi.org/specifications
 	loadedImage: ^EFI_LOADED_IMAGE_PROTOCOL
-	if systemTable.BootServices.HandleProtocol(imageHandle, &LIP_GUID, cast(^^VOID)&loadedImage) !=
+	if systemTable.BootServices.HandleProtocol(imageHandle, &LIP_GUID, auto_cast &loadedImage) !=
 		   .SUCCESS ||
 	   loadedImage == nil {
 		boot_fail(systemTable, &errLip[0])
 	}
-	// before ExitBootServices, so ConOut still works
-	msg := [?]u16{'J', 'U', 'M', 'P', 'I', 'N', 'G', '\r', '\n', 0}
-	systemTable.ConOut.OutputString(systemTable.ConOut, &msg[0])
+
 
 	// UEFI 2.10 §7.3.5 HandleProtocol https://uefi.org/specifications
 	fs: ^EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
 	if systemTable.BootServices.HandleProtocol(
 		   loadedImage.DeviceHandle,
 		   &FS_GUID,
-		   cast(^^VOID)&fs,
+		   auto_cast &fs,
 	   ) !=
 		   .SUCCESS ||
 	   fs == nil {
@@ -122,8 +120,7 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 	kernelName := [?]u16{'k', 'e', 'r', 'n', 'e', 'l', '.', 'e', 'l', 'f', 0}
 	// fsDaemonName := [?]u16{'f', 's', '_', 'd', 'a', 'e', 'm', 'o', 'n', '.', 'e', 'l', 'f', 0}
 	// before ExitBootServices, so ConOut still works
-	msg2 := [?]u16{'J', 'U', 'M', 'P', 'I', 'N', '2', '\r', '\n', 0}
-	systemTable.ConOut.OutputString(systemTable.ConOut, &msg2[0])
+
 
 	kernelImg, kernelOk := load_elf(
 		root,
@@ -140,8 +137,7 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 		int(systemTable.NumberOfTableEntries),
 	)
 	// before ExitBootServices, so ConOut still works
-	msg3 := [?]u16{'J', 'U', 'M', 'P', 'I', 'N', '3', '\r', '\n', 0}
-	systemTable.ConOut.OutputString(systemTable.ConOut, &msg3[0])
+
 
 	for &t in configTable {
 		if guid_equal(&t.VendorGuid, &ACPI2_GUID) {
@@ -213,86 +209,4 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 	kernelMain(&params)
 	for {}
 	return .SUCCESS
-}
-load_elf :: proc "contextless" (
-	root: ^EFI_FILE_PROTOCOL,
-	name: [^]u16,
-	bs: ^EFI_BOOT_SERVICES,
-	systemTable: ^EFI_SYSTEM_TABLE,
-	//-1 means pie
-	desiredPhysicalAddr: int = -1,
-) -> (
-	image: elf.Image,
-	ok: bool,
-) {
-	f: ^EFI_FILE_PROTOCOL
-	if root.Open(root, &f, name, EFI_FILE_MODE_READ, 0) != .SUCCESS do return {}, false
-	defer f.Close(f)
-
-	header: elf.Hdr
-	headerSize: u64 = size_of(header)
-	if f.Read(f, &headerSize, cast(^VOID)&header) != .SUCCESS do return {}, false
-	if headerSize != size_of(header) do return
-	if !elf.is_valid_elf(header.eIdent) || !elf.is_64bit(header.eIdent) do return {}, false
-	if header.machine != .X86_64 do return {}, false
-	if header.phnum == 0 || header.phnum > elf.MAX_SEGMENTS do return {}, false
-
-	phdrs: [elf.MAX_SEGMENTS]elf.Phdr
-
-	if f.SetPosition(f, header.phoff) != .SUCCESS do return {}, false
-	want := u64(header.phnum) * u64(size_of(elf.Phdr))
-
-	actualSize := want
-	if f.Read(f, &actualSize, cast(^VOID)raw_data(phdrs[:])) != .SUCCESS do return {}, false
-	if actualSize != want do return {}, false
-
-	minVaddr := ~u64(0)
-	maxVaddr: u64 = 0
-
-	foundPhdrs := phdrs[:int(header.phnum)]
-	for ph in foundPhdrs {
-		if ph.type != .Load do continue
-		if ph.filesz > ph.memsz do return {}, false
-		if ph.vaddr < minVaddr do minVaddr = ph.vaddr
-		end := ph.vaddr + ph.memsz
-		if end > maxVaddr do maxVaddr = end
-
-	}
-	if maxVaddr == 0 do return {}, false
-
-	allocBase := minVaddr &~ (shared.PAGE_SIZE - 1)
-	pages := (maxVaddr - allocBase + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
-
-	physBase: u64 = 42
-	if desiredPhysicalAddr == -1 {
-		efiAddr: EFI_PHYSICAL_ADDRESS
-		if bs.AllocatePages(.AllocateAnyPages, .LoaderData, pages, &efiAddr) != .SUCCESS do return {}, false
-		physBase = u64(efiAddr) - allocBase
-	} else {
-		efiAddr := EFI_PHYSICAL_ADDRESS(desiredPhysicalAddr)
-		if bs.AllocatePages(.AllocateAddress, .LoaderData, pages, &efiAddr) != .SUCCESS do return {}, false
-		physBase = u64(efiAddr) - allocBase
-	}
-	for ph in foundPhdrs {
-		if ph.type != .Load do continue
-
-		dest := ph.vaddr + physBase
-		mem := ([^]u8)(uintptr(dest))
-
-		for j in u64(0) ..< ph.memsz do mem[j] = 0
-
-		if f.SetPosition(f, ph.offset) != .SUCCESS do return {}, false
-		read: u64 = ph.filesz
-		if f.Read(f, &read, cast(^VOID)uintptr(dest)) != .SUCCESS || read != ph.filesz do return {}, false
-		segment: elf.Segment = {
-			perms = ph.flags,
-			base  = dest,
-			end   = dest + ph.memsz,
-		}
-		append(&image.segments, segment)
-	}
-	image.entry = header.entry + physBase
-	image.base = allocBase + physBase
-	image.end = maxVaddr + physBase
-	return image, true
 }

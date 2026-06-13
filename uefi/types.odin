@@ -3,7 +3,7 @@
  */
 
 // __has_include is clang/gcc defined; But should be in C standard C2X
-package efi
+package uefi
 
 // UEFI 2.10 §2.3.1 https://uefi.org/specifications
 UINT8 :: u8
@@ -12,11 +12,10 @@ UINT32 :: u32
 UINT64 :: u64
 UINTN :: u64
 CHAR16 :: u16 // UTF-16, but should use UCS-2 code points 0x0000-0xFFFF
-VOID :: rawptr
 EFI_STATUS :: enum u64 {
 	SUCCESS = 0,
 }
-EFI_HANDLE :: ^VOID
+EFI_HANDLE :: rawptr
 
 // UEFI 2.10 Appendix D https://uefi.org/specifications
 
@@ -73,7 +72,7 @@ EFI_MEMORY_DESCRIPTOR :: struct {
 // Brought back to root so you can cast and loop through configuration entries
 EFI_CONFIGURATION_TABLE :: struct {
 	VendorGuid:  EFI_GUID,
-	VendorTable: ^VOID,
+	VendorTable: rawptr,
 }
 
 // --- ENUMS (Kept at root for accessibility) ---
@@ -193,7 +192,7 @@ EFI_FILE_PROTOCOL :: struct {
 	Read:        proc "c" (
 		This: ^EFI_FILE_PROTOCOL,
 		BufferSize: ^UINTN,
-		Buffer: ^VOID,
+		Buffer: rawptr,
 	) -> EFI_STATUS,
 	Write:       rawptr,
 	GetPosition: rawptr,
@@ -202,7 +201,7 @@ EFI_FILE_PROTOCOL :: struct {
 		This: ^EFI_FILE_PROTOCOL,
 		InformationType: ^EFI_GUID,
 		BufferSize: ^UINTN,
-		Buffer: ^VOID,
+		Buffer: rawptr,
 	) -> EFI_STATUS,
 	SetInfo:     rawptr,
 	Flush:       rawptr,
@@ -268,7 +267,7 @@ EFI_BOOT_SERVICES :: struct {
 	HandleProtocol:                      proc "c" (
 		Handle: EFI_HANDLE,
 		Protocol: ^EFI_GUID,
-		Interface: ^^VOID,
+		Interface: ^rawptr,
 	) -> EFI_STATUS,
 	Reserved:                            rawptr,
 	RegisterProtocolNotify:              rawptr,
@@ -306,8 +305,8 @@ EFI_BOOT_SERVICES :: struct {
 	LocateHandleBuffer:                  rawptr,
 	LocateProtocol:                      proc "c" (
 		Protocol: ^EFI_GUID,
-		Registration: ^VOID,
-		Interface: ^^VOID,
+		Registration: rawptr,
+		Interface: ^rawptr,
 	) -> EFI_STATUS,
 	InstallMultipleProtocolInterfaces:   rawptr,
 	UninstallMultipleProtocolInterfaces: rawptr,
@@ -334,8 +333,8 @@ EFI_RUNTIME_SERVICES :: struct {
 		ResetType: EFI_RESET_TYPE,
 		ResetStatus: EFI_STATUS,
 		DataSize: UINTN,
-		ResetData: ^VOID,
-	) -> VOID,
+		ResetData: rawptr,
+	),
 	UpdateCapsule:             rawptr,
 	QueryCapsuleCapabilities:  rawptr,
 	QueryVariableInfo:         rawptr,

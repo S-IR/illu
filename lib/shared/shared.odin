@@ -7,4 +7,4 @@ FrameBuffer :: struct {
 	stride: u64,
 }
 PAGE_SIZE :: 4096
-KERNEL_PHYSICAL_MEM_LOCATION: int : 2 * mem.Megabyte
+KERNEL_PHYSICAL_MEM_LOCATION: int : -1

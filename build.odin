@@ -68,6 +68,7 @@ build_kernel :: proc() {
 		KERNEL_DIR,
 		"kernel.o",
 		{
+			"-reloc-mode:pic",
 			"-vet-shadowing",
 			"-target:freestanding_amd64_sysv",
 			"-build-mode:obj",
@@ -83,10 +84,11 @@ build_kernel :: proc() {
 	if osErr != .Exist do ensure_os(osErr)
 
 	cmd := make([dynamic]string, context.temp_allocator)
-	append(&cmd, "ld.lld", "-o", kernelEndPath, "--entry=kernel_main", "-Ttext=0x200000")
+	append(&cmd, "ld.lld", "-pie", "--image-base=0x0", "-o", kernelEndPath, "--entry=kernel_main")
 	for o in objs do append(&cmd, o)
 	exec(cmd[:])
 }
+
 
 collect_objs :: proc(dir: string, pred: proc(_: string) -> bool) -> [dynamic]string {
 	d, err := os.read_directory_by_path(dir, -1, context.temp_allocator)
@@ -105,7 +107,7 @@ ensure_os :: proc(err: os.Error) {
 }
 asm_build :: proc(src, dstFolder: string) {
 	cmd := make([dynamic]string, context.temp_allocator)
-	append(&cmd, "clang", "-target", "x86_64-unknown-none-elf", "-fno-pic")
+	append(&cmd, "clang", "-target", "x86_64-unknown-none-elf", "-fPIC")
 	when ODIN_DEBUG {
 		append(&cmd, "-g")
 	}

@@ -8,7 +8,7 @@ when !ODIN_TEST {
 		for i := 0; i < len(s); i += 1 do ah.serial_write_byte_asm(s[i])
 	}
 
-	serial_write_hex :: proc(value: u64) {
+	serial_write_hex :: proc "contextless" (value: u64) {
 		serial_write("0x")
 		for i := 60; i >= 0; i -= 4 {
 			nibble := (value >> uint(i)) & 0xF

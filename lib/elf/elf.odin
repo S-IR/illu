@@ -1,5 +1,6 @@
 package elf
 
+import "core:hash/xxhash"
 Addr :: u64
 Off :: u64
 Half :: u16
@@ -22,38 +23,44 @@ ElfIdentIndex :: enum u8 {
 	PAD        = 9,
 }
 
-Hdr :: struct {
-	eIdent:    [EI_NIDENT]u8,
-	type:      enum Half {
-		None,
-		Rel,
-		Exec,
-		Dyn,
-		Core,
-		Loproc,
-		Hiproc,
-	},
-	machine:   enum Half {
-		X86_64 = 62,
-	},
-	version:   Word,
-	entry:     Addr,
-	phoff:     Off,
-	shoff:     Off,
-	flags:     Word,
-	ehsize:    Half,
-	phentsize: Half,
-	phnum:     Half,
-	shentsize: Half,
-	shnum:     Half,
-	shstrndx:  Half,
+ElfType :: enum u16 {
+	None,
+	Rel,
+	Exec,
+	Dyn,
+	Core,
+	Loproc,
+	Hiproc,
 }
+ElfMachine :: enum u16 {
+	X86_64 = 62,
+}
+
+Hdr :: struct #packed {
+	eIdent:    [16]u8,
+	type:      ElfType,
+	machine:   ElfMachine,
+	version:   u32,
+	entry:     u64,
+	phoff:     u64,
+	shoff:     u64,
+	flags:     u32,
+	ehsize:    u16,
+	phentsize: u16,
+	phnum:     u16,
+	shentsize: u16,
+	shnum:     u16,
+	shstrndx:  u16,
+}
+#assert(offset_of(Hdr, entry) == 24)
+#assert(size_of(Hdr{}.machine) == size_of(u16))
+#assert(size_of(Hdr) == 64)
 PhdrFlag :: enum Word {
 	X,
 	W,
 	R,
 }
-Phdr :: struct {
+Phdr :: struct #packed {
 	type:   enum Word {
 		Null    = 0,
 		Load    = 1,
@@ -73,7 +80,7 @@ Phdr :: struct {
 }
 
 
-Segment :: struct {
+Segment :: struct #packed {
 	base:  u64,
 	end:   u64,
 	perms: bit_set[PhdrFlag;Word],
@@ -96,4 +103,42 @@ is_valid_elf :: proc "contextless" (ident: [EI_NIDENT]u8) -> bool {
 }
 is_64bit :: proc "contextless" (ident: [EI_NIDENT]u8) -> bool {
 	return ident[ElfIdentIndex.CLASS] == 2
+}
+#assert(size_of(Phdr) == 56)
+#assert(offset_of(Phdr, type) == 0)
+
+
+DynamicTag :: enum i64 {
+	NULL     = 0,
+	NEEDED   = 1,
+	PLTRELSZ = 2,
+	PLTGOT   = 3,
+	HASH     = 4,
+	STRTAB   = 5,
+	SYMTAB   = 6,
+	RELA     = 7, // address of relocation table
+	RELASZ   = 8, // size of relocation table
+	RELAENT  = 9, // size of one relocation entry (must be 24)
+	// more
+}
+DynamicEntry :: struct #packed {
+	dTag: DynamicTag,
+	dVal: u64, // also accessible as d_ptr when it's an address
+}
+RelaEntry :: struct #packed {
+	rOffset: Addr,
+	rInfo:   Xword,
+	rAddend: Sxword,
+}
+RelaType :: enum u32 {
+	NONE            = 0,
+	DIRECT_64       = 1, // R_X86_64_64
+	PC_RELATIVE_32  = 2, // R_X86_64_PC32
+	GOT_PC_RELATIVE = 9, // R_X86_64_GOTPCREL
+	// … many more …
+	RELATIVE        = 8, // R_X86_64_RELATIVE
+}
+
+rela_type :: proc "contextless" (rInfo: Xword) -> RelaType {
+	return RelaType(u32(rInfo & 0xFFFF_FFFF))
 }
