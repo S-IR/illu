@@ -69,6 +69,7 @@ buddy_free :: proc(addr: u64, order: u8) {
 
 	for currOrder < u8(PMM_BUDDY_MAX_ORDER) - 1 {
 		buddyPage := currPage ~ (u64(1) << currOrder)
+		if buddyPage == 0 do break
 		if buddyPage + (u64(1) << currOrder) > state.totalPages do break
 		if is_used(&state, buddyPage) do break
 

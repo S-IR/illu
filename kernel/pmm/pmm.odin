@@ -1,13 +1,14 @@
 package pmm
 import "../../lib/elf"
 import "../../lib/shared"
+import "../../lib/spinlock"
 import "../../uefi"
 import "../print"
 import "core:mem"
-
-PMM :: struct {
+PMM :: struct #all_or_none {
 	bitmap:     []u64,
 	totalPages: u64,
+	lock:       spinlock.Spinlock,
 }
 when ODIN_TEST {
 	@(thread_local)
@@ -163,12 +164,17 @@ order_for :: proc(n: u64) -> (order: u8 = 0) {
 	return order
 }
 pmm_alloc :: proc(bytes: u64) -> u64 {
+	spinlock.lock(&state.lock)
+	defer spinlock.unlock(&state.lock)
 
 	pages := pages_needed(bytes)
 	order := order_for(pages)
 	return buddy_alloc(order)
 }
 pmm_free :: proc(addr: u64, bytes: u64) {
+	spinlock.lock(&state.lock)
+	defer spinlock.unlock(&state.lock)
+
 	pages := pages_needed(bytes)
 	order := order_for(pages)
 	buddy_free(addr, order)
