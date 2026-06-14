@@ -4,6 +4,8 @@ import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+
+
 BUILD_DIR :: "build-dir"
 BOOT_DIR :: BUILD_DIR + "/bootloader"
 
@@ -53,28 +55,23 @@ build_bootloader :: proc() {
 	exec(cmd[:])
 
 }
-
 build_kernel :: proc() {
 	// when ODIN_DEBUG do exec({"odin", "test", "tests/", "-debug", "-o:minimal"})
 	KERNEL_DIR, _ := filepath.join({BUILD_DIR, "kernel"})
 	helpersPath, _ := filepath.join({"asm_helpers", "helpers.asm"})
 	asm_build(helpersPath, KERNEL_DIR)
 
-	// itDEFINE := "-define:INTEGRATION_TESTS=false"
-	// when INTEGRATION_TESTS do itDEFINE = "-define:INTEGRATION_TESTS=true"
-
 	odin_build(
 		"kernel",
 		KERNEL_DIR,
 		"kernel.o",
 		{
-			"-reloc-mode:pic",
+			"-reloc-mode:static",
 			"-vet-shadowing",
 			"-target:freestanding_amd64_sysv",
 			"-build-mode:obj",
 			"-no-entry-point",
 			"-disable-red-zone",
-			// itDEFINE,
 		},
 	)
 
@@ -84,7 +81,18 @@ build_kernel :: proc() {
 	if osErr != .Exist do ensure_os(osErr)
 
 	cmd := make([dynamic]string, context.temp_allocator)
-	append(&cmd, "ld.lld", "-pie", "--image-base=0x0", "-o", kernelEndPath, "--entry=kernel_main")
+
+	// CHANGED: Removed -pie, added -static, and updated image-base to 1MB (0x100000)
+	append(
+		&cmd,
+		"ld.lld",
+		"-static",
+		"--image-base=0x100000",
+		"-o",
+		kernelEndPath,
+		"--entry=kernel_main",
+	)
+
 	for o in objs do append(&cmd, o)
 	exec(cmd[:])
 }
@@ -107,7 +115,9 @@ ensure_os :: proc(err: os.Error) {
 }
 asm_build :: proc(src, dstFolder: string) {
 	cmd := make([dynamic]string, context.temp_allocator)
-	append(&cmd, "clang", "-target", "x86_64-unknown-none-elf", "-fPIC")
+
+	append(&cmd, "clang", "-target", "x86_64-unknown-none-elf")
+
 	when ODIN_DEBUG {
 		append(&cmd, "-g")
 	}

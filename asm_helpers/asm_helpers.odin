@@ -4,16 +4,19 @@ X86TableDescriptor :: struct #packed {
 	limit: u16,
 	base:  u64,
 }
+
 PIT_FREQ_HZ :: u32(1_193_182)
 PIT_CMD_PORT :: u16(0x43)
 PIT_CH2_PORT :: u16(0x42)
 PIT_CH2_GATE :: u16(0x61)
+
+
 when !ODIN_TEST {
 	@(default_calling_convention = "c")
 	foreign _ {
 		int3me :: proc() ---
 		kernel_start_setup :: proc() ---
-		halt :: proc() ---
+		halt :: proc() -> ! ---
 		serial_init_asm :: proc() ---
 		serial_write_byte_asm :: proc(c: u8) ---
 
@@ -21,11 +24,9 @@ when !ODIN_TEST {
 		reload_segments_asm :: proc() ---
 		load_tss_asm :: proc(sel: u16) ---
 
-		// CPU exception stubs — vectors 0-31
 		isr_table: [32]uintptr
-
-		// Hardware IRQ stubs — vectors 32-63
 		irq_stub_table: [32]uintptr
+
 		lidt_asm :: proc(desc: ^X86TableDescriptor) ---
 
 		read_cr2 :: proc() -> u64 ---
@@ -43,8 +44,8 @@ when !ODIN_TEST {
 
 		sti_asm :: proc() ---
 
-
 	}
+
 	pit_delay_us :: proc(us: u32) {
 		ticks := u16(PIT_FREQ_HZ * us / 1_000_000)
 		if ticks == 0 do ticks = 1
@@ -54,4 +55,39 @@ when !ODIN_TEST {
 		outb(PIT_CH2_PORT, u8(ticks >> 8))
 		for inb(PIT_CH2_GATE) & 0x20 == 0 {}
 	}
+
+} else {
+
+	int3me :: proc "contextless" () {}
+	kernel_start_setup :: proc "contextless" () {}
+	halt :: proc "contextless" () {}
+	serial_init_asm :: proc "contextless" () {}
+	serial_write_byte_asm :: proc "contextless" (c: u8) {}
+
+	lgdt_asm :: proc "contextless" (desc: ^X86TableDescriptor) {}
+	reload_segments_asm :: proc "contextless" () {}
+	load_tss_asm :: proc "contextless" (sel: u16) {}
+
+	isr_table: [32]uintptr
+	irq_stub_table: [32]uintptr
+
+	lidt_asm :: proc "contextless" (desc: ^X86TableDescriptor) {}
+
+	read_cr2 :: proc "contextless" () -> u64 {return 0}
+	read_cr3 :: proc "contextless" () -> u64 {return 0}
+	write_cr3 :: proc "contextless" (addr: u64) {}
+
+	wrmsr_asm :: proc "contextless" (msr: u32, value: u64) {}
+	rdmsr_asm :: proc "contextless" (msr: u32) -> u64 {return 0}
+
+	rdtsc_asm :: proc "contextless" () -> u64 {return 0}
+	apic_stub_table: [5]uintptr
+
+	outb :: proc "contextless" (port: u16, val: u8) {}
+	inb :: proc "contextless" (port: u16) -> u8 {return 0}
+
+	sti_asm :: proc "contextless" () {}
+
+	pit_delay_us :: proc "contextless" (us: u32) {}
+
 }

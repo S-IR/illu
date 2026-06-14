@@ -61,7 +61,7 @@ EFI_TABLE_HEADER :: struct {
 
 // UEFI 2.10 §7.2 https://uefi.org/specifications
 EFI_MEMORY_DESCRIPTOR :: struct {
-	Type:          UINT32,
+	Type:          EFI_MEMORY_TYPE,
 	PhysicalStart: EFI_PHYSICAL_ADDRESS,
 	VirtualStart:  EFI_VIRTUAL_ADDRESS,
 	NumberOfPages: UINT64,

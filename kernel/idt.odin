@@ -29,7 +29,7 @@ idt_init :: proc() {
 	idtDesc.base = u64(uintptr(&idt))
 	idtDesc.limit = u16(size_of(idt) - 1)
 	ah.lidt_asm(&idtDesc)
-	// print.serial_writeln("idt: loaded")
+	print.serial_writeln("idt: loaded")
 
 
 }
@@ -42,7 +42,7 @@ IdtAccess :: bit_field u8 {
 }
 
 idt_set_entry :: proc(index: int, handler: u64, ist: u8 = 0) {
-	print.kassert(index >= 0 && index < 256, "idt_set_entry: index out of range")
+	assert(index >= 0 && index < 256, "idt_set_entry: index out of range")
 	idt[index].offsetLow = u16(handler & 0xFFFF)
 	idt[index].offsetMid = u16((handler >> 16) & 0xFFFF)
 	idt[index].offsetHigh = u32(handler >> 32)

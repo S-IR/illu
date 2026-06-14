@@ -15,4 +15,11 @@ when !ODIN_TEST {
 		cpuid_asm :: proc(leaf: CPUIDLeaf, subleaf: u32, result: ^CPUIDResult) ---
 	}
 
+} else {
+	cpuid_asm :: proc(leaf: CPUIDLeaf, subleaf: u32, result: ^CPUIDResult) {
+		result.eax = 0
+		result.ebx = 0
+		result.ecx = 0
+		result.edx = 0
+	}
 }

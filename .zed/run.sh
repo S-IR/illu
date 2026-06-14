@@ -8,4 +8,5 @@ qemu-system-x86_64 -enable-kvm -m 512m \
   -drive if=pflash,format=raw,file=ovmf/ovmf_vars.fd \
   -drive format=raw,file=fat:rw:diskimg,if=ide \
   -serial stdio \
+  -s -S \
   -nographic
