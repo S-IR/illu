@@ -43,7 +43,8 @@ when !ODIN_TEST {
 		inb :: proc(port: u16) -> u8 ---
 
 		sti_asm :: proc() ---
-
+		enable_write_protect_kernel :: proc() ---
+		read_rsp :: proc() -> u64 ---
 	}
 
 	pit_delay_us :: proc(us: u32) {
@@ -89,5 +90,5 @@ when !ODIN_TEST {
 	sti_asm :: proc "contextless" () {}
 
 	pit_delay_us :: proc "contextless" (us: u32) {}
-
+	read_rsp :: proc "contextless" () -> u64 {return 0}
 }

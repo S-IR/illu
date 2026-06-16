@@ -115,14 +115,17 @@ men_init :: proc(
 	kernelStart := kernelImg.base / shared.PAGE_SIZE
 	kernelEnd := pages_needed(kernelImg.end)
 	for pg in kernelStart ..< kernelEnd {
-		set(&state, pg)
+		kset(&state, pg)
 	}
 	buddy_init()
+
+	paging_init(kernelImg)
+
 	print.serial_writeln("pmm: loaded")
 
 }
 
-set :: #force_inline proc(p: ^PMM, i: u64) {
+kset :: #force_inline proc(p: ^PMM, i: u64) {
 	assert(i < p.totalPages, "pmm set: page beyond bitmap")
 	p.bitmap[i / 64] |= u64(1) << (i % 64)
 }
@@ -154,6 +157,12 @@ when ODIN_TEST {
 }
 pages_needed :: proc(bytes: u64) -> u64 {
 	return (bytes + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
+}
+addr_round_up_to_page :: proc(addr: u64) -> u64 {
+	return (addr + shared.PAGE_SIZE - 1) & ~u64(shared.PAGE_SIZE - 1)
+}
+addr_round_down_to_page :: proc(addr: u64) -> u64 {
+	return addr & ~u64(shared.PAGE_SIZE - 1)
 }
 order_for :: proc(n: u64) -> (order: u8 = 0) {
 	size := u64(1)

@@ -57,6 +57,8 @@ gdtTss: TSS
 @(private)
 GDTDescriptor: ah.X86TableDescriptor = {}
 
+@(link_name = "_kernel_stack_top")
+_kernel_stack_top: u8
 
 gdt_tss_init :: proc "contextless" () {
 	make_flat_descriptor :: proc "contextless" (access: GdtAccess, flags: GdtFlags) -> u64 {
@@ -70,7 +72,6 @@ gdt_tss_init :: proc "contextless" () {
 
 
 	tssBase := u64(uintptr(&gdtTss))
-
 	tssLimit := u64(size_of(TSS) - 1)
 	tss: GdtEntry
 	tss.limitLow = u16(tssLimit)

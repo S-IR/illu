@@ -528,35 +528,35 @@ errMmap := [?]u16 {
 	0,
 }
 errRsdp := [?]u16{'n', 'o', ' ', 'A', 'C', 'P', 'I', ' ', 'R', 'S', 'D', 'P', '\r', '\n', 0}
-@(export, link_name = "_fltused")
-_fltused: i32 = 1
+// @(export, link_name = "_fltused")
+// _fltused: i32 = 1
 
-@(export, link_name = "_tls_index")
-_tls_index: u32 = 0
+// @(export, link_name = "_tls_index")
+// _tls_index: u32 = 0
 
-@(export, link_name = "memcpy")
-memcpy :: proc "c" (dst, src: rawptr, n: uint) -> rawptr {
-	d := ([^]u8)(dst)
-	s := ([^]u8)(src)
-	for i in 0 ..< n do d[i] = s[i]
-	return dst
-}
+// @(export, link_name = "memcpy")
+// memcpy :: proc "c" (dst, src: rawptr, n: uint) -> rawptr {
+// 	d := ([^]u8)(dst)
+// 	s := ([^]u8)(src)
+// 	for i in 0 ..< n do d[i] = s[i]
+// 	return dst
+// }
 
-@(export, link_name = "memset")
-memset :: proc "c" (dst: rawptr, val: i32, n: uint) -> rawptr {
-	d := ([^]u8)(dst)
-	for i in 0 ..< n do d[i] = u8(val)
-	return dst
-}
+// @(export, link_name = "memset")
+// memset :: proc "c" (dst: rawptr, val: i32, n: uint) -> rawptr {
+// 	d := ([^]u8)(dst)
+// 	for i in 0 ..< n do d[i] = u8(val)
+// 	return dst
+// }
 
-@(export, link_name = "memmove")
-memmove :: proc "c" (dst, src: rawptr, n: uint) -> rawptr {
-	d := ([^]u8)(dst)
-	s := ([^]u8)(src)
-	if uintptr(dst) < uintptr(src) {
-		for i in 0 ..< n do d[i] = s[i]
-	} else {
-		for i := n; i > 0; i -= 1 do d[i - 1] = s[i - 1]
-	}
-	return dst
-}
+// @(export, link_name = "memmove")
+// memmove :: proc "c" (dst, src: rawptr, n: uint) -> rawptr {
+// 	d := ([^]u8)(dst)
+// 	s := ([^]u8)(src)
+// 	if uintptr(dst) < uintptr(src) {
+// 		for i in 0 ..< n do d[i] = s[i]
+// 	} else {
+// 		for i := n; i > 0; i -= 1 do d[i - 1] = s[i - 1]
+// 	}
+// 	return dst
+// }

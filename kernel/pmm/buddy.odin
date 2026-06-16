@@ -53,7 +53,7 @@ buddy_alloc :: proc(order: u8) -> u64 {
 	}
 
 	for i in u64(0) ..< (u64(1) << order) {
-		set(&state, page + i)
+		kset(&state, page + i)
 	}
 	return u64(uintptr(page_to_rawptr(page)))
 

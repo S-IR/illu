@@ -5,132 +5,112 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 
-
 BUILD_DIR :: "build-dir"
-BOOT_DIR :: BUILD_DIR + "/bootloader"
 
 BUILD_BOOTLOADER :: #config(BUILD_BOOTLOADER, true)
 BUILD_KERNEL :: #config(BUILD_KERNEL, true)
-INTEGRATION_TESTS :: #config(INTEGRATION_TESTS, false)
-
 
 main :: proc() {
 	os.remove_all(BUILD_DIR)
-	osErr := os.make_directory_all(BUILD_DIR)
-	if osErr != .Exist do ensure_os(osErr)
+	os.make_directory_all(BUILD_DIR)
+
 	when BUILD_BOOTLOADER do build_bootloader()
 	when BUILD_KERNEL do build_kernel()
 }
-build_bootloader :: proc() {
-	odin_build(
-		"uefi",
-		BOOT_DIR,
-		"efi_boot.o",
-		{
-			"-vet-shadowing",
-			"-target:freestanding_amd64_win64",
-			"-build-mode:obj",
-			"-no-entry-point",
-			"-disable-red-zone",
-		},
-	)
-	objs := collect_objs(BOOT_DIR, proc(n: string) -> bool {
-			return strings.has_prefix(n, "efi_boot")
-		})
-	cmd := make([dynamic]string, context.temp_allocator)
-	uefiPath, _ := filepath.join({"diskimg", "EFI", "BOOT", "BOOTX64.EFI"})
-	osErr := os.make_directory_all(filepath.dir(uefiPath))
-	if osErr != .Exist do ensure_os(osErr)
 
+build_bootloader :: proc() {
+	bootDir, _ := filepath.join({BUILD_DIR, "boot"})
+	os.make_directory_all(bootDir)
+	os.make_directory_all("diskimg/EFI/BOOT")
+
+	objOut, _ := filepath.join({bootDir, "efi_boot.o"})
+	bootFlags := []string {
+		"-vet-shadowing",
+		"-target:freestanding_amd64_win64",
+		"-build-mode:obj",
+		"-no-entry-point",
+		"-disable-red-zone",
+		"-define:UEFI_BUILD=true",
+	}
+
+	odin_build("uefi", objOut, bootFlags)
+
+	objs := collect_objs(bootDir)
+	linkCmd := make([dynamic]string, context.temp_allocator)
 	append(
-		&cmd,
+		&linkCmd,
 		"lld-link",
 		"-subsystem:efi_application",
 		"-entry:efi_main",
-		fmt.tprintf("-out:%s", uefiPath),
+		"-out:diskimg/EFI/BOOT/BOOTX64.EFI",
+	)
+	for o in objs do append(&linkCmd, o)
+	exec(linkCmd[:])
+}
+
+build_kernel :: proc() {
+	os.make_directory_all("diskimg")
+
+	kernelDir, _ := filepath.join({BUILD_DIR, "kernel"})
+	os.make_directory_all(kernelDir)
+
+	asmOut, _ := filepath.join({kernelDir, "asm_helpers.o"})
+	exec(
+		[]string {
+			"clang",
+			"-target",
+			"x86_64-unknown-none-elf",
+			"-c",
+			"asm_helpers/helpers.asm",
+			"-o",
+			asmOut,
+		},
 	)
 
-
-	for o in objs do append(&cmd, o)
-	exec(cmd[:])
-
-}
-build_kernel :: proc() {
-	// when ODIN_DEBUG do exec({"odin", "test", "tests/", "-debug", "-o:minimal"})
-	KERNEL_DIR, _ := filepath.join({BUILD_DIR, "kernel"})
-	helpersPath, _ := filepath.join({"asm_helpers", "helpers.asm"})
-	asm_build(helpersPath, KERNEL_DIR)
-
+	objOut, _ := filepath.join({kernelDir, "kernel.o"})
 	odin_build(
 		"kernel",
-		KERNEL_DIR,
-		"kernel.o",
+		objOut,
 		{
 			"-reloc-mode:static",
 			"-vet-shadowing",
 			"-target:freestanding_amd64_sysv",
-			"-build-mode:obj",
 			"-no-entry-point",
-			"-disable-red-zone",
+			"-no-crt",
+			"-build-mode:obj",
 		},
 	)
 
-	objs := collect_objs(KERNEL_DIR, nil)
-	kernelEndPath, _ := filepath.join({"diskimg", "kernel.elf"})
-	osErr := os.make_directory_all(filepath.dir(kernelEndPath))
-	if osErr != .Exist do ensure_os(osErr)
+	objs := collect_objs(kernelDir)
+	kernelOut, _ := filepath.join({"diskimg", "kernel.elf"})
 
-	cmd := make([dynamic]string, context.temp_allocator)
-
-	// CHANGED: Removed -pie, added -static, and updated image-base to 1MB (0x100000)
+	linkCmd := make([dynamic]string, context.temp_allocator)
 	append(
-		&cmd,
+		&linkCmd,
 		"ld.lld",
-		"-static",
 		"--image-base=0x100000",
+		"--entry=kernel_start_setup",
 		"-o",
-		kernelEndPath,
-		"--entry=kernel_main",
+		kernelOut,
 	)
-
-	for o in objs do append(&cmd, o)
-	exec(cmd[:])
+	for o in objs do append(&linkCmd, o)
+	exec(linkCmd[:])
 }
-
-
-collect_objs :: proc(dir: string, pred: proc(_: string) -> bool) -> [dynamic]string {
+collect_objs :: proc(dir: string) -> [dynamic]string {
 	d, err := os.read_directory_by_path(dir, -1, context.temp_allocator)
-	if err != nil do panic(fmt.tprintf("failed to read %s", dir))
+	if err != nil {
+		panic(fmt.tprintf("failed to read directory %s: %s", dir, os.error_string(err)))
+	}
 	out := make([dynamic]string, context.temp_allocator)
 	for f in d {
-		if strings.has_suffix(f.name, ".o") && (pred == nil || pred(f.name)) {
+		if strings.has_suffix(f.name, ".o") {
 			append(&out, fmt.tprintf("%s/%s", dir, f.name))
 		}
 	}
 	return out
 }
 
-ensure_os :: proc(err: os.Error) {
-	if err != nil do ensure(false, fmt.tprintf("OS ERROR: %s", os.error_string(err)))
-}
-asm_build :: proc(src, dstFolder: string) {
-	cmd := make([dynamic]string, context.temp_allocator)
-
-	append(&cmd, "clang", "-target", "x86_64-unknown-none-elf")
-
-	when ODIN_DEBUG {
-		append(&cmd, "-g")
-	}
-	dst, _ := filepath.join(
-		{dstFolder, fmt.tprintf("%s%s", strings.trim_suffix(filepath.base(src), ".asm"), ".o")},
-	)
-	append(&cmd, "-c", src, "-o", dst)
-
-	osErr := os.make_directory_all(dstFolder)
-	if osErr != .Exist do ensure_os(osErr)
-	exec(cmd[:])
-}
-odin_build :: proc(pkg, outDir, out: string, extra: []string) {
+odin_build :: proc(pkg: string, out: string, extra: []string) {
 	cmd := make([dynamic]string, context.temp_allocator)
 	append(&cmd, "odin", "build", pkg)
 	when ODIN_DEBUG {
@@ -139,21 +119,21 @@ odin_build :: proc(pkg, outDir, out: string, extra: []string) {
 		append(&cmd, "-o:aggressive")
 	}
 	for e in extra do append(&cmd, e)
-	append(&cmd, fmt.tprintf("-out:%s/%s", outDir, out))
-
-	osErr := os.make_directory_all(outDir)
-	if osErr != .Exist do ensure_os(osErr)
-
+	append(&cmd, fmt.tprintf("-out:%s", out))
 	exec(cmd[:])
 }
+
 exec :: proc(command: []string) {
 	state, stdout, stderr, err := os.process_exec(
 		os.Process_Desc{working_dir = ".", command = command},
 		allocator = context.temp_allocator,
 	)
-	// fmt.println(command)
-	if err != nil do panic(fmt.tprintf("error executing COMMAND %s : ERROR %s", command, os.error_string(err)))
+	if err != nil {
+		panic(fmt.tprintf("error executing %v: %s", command, os.error_string(err)))
+	}
 	msg := fmt.tprintf("%s%s", string(stdout), string(stderr))
-	if state.exit_code != 0 do panic(fmt.tprintf("error executing COMMAND %s : ERROR %s", command, msg))
+	if state.exit_code != 0 {
+		panic(fmt.tprintf("command failed %v: %s", command, msg))
+	}
 	fmt.print(msg)
 }

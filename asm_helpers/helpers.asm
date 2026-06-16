@@ -13,16 +13,26 @@ isr_table:
     .quad isr16, isr17, isr18, isr19, isr20, isr21, isr22, isr23
     .quad isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
 
-.section .text
+.section .bss
+.align 16
+.global _kernel_stack
+_kernel_stack:
+    .skip 16 * 4096       
+.global _kernel_stack_top
+_kernel_stack_top:
 
+.section .text
 .global kernel_start_setup
-// SDM Vol 2A "CLI": clears RFLAGS.IF — no interrupts before IDT is loaded (would triple-fault).
-// SDM Vol 2A "CLD": clears RFLAGS.DF — Odin runtime memset/memcpy use rep movs which require DF=0.
 kernel_start_setup:
     cli
     cld
-    ret
-
+    lea _kernel_stack_top(%rip), %rsp
+    and $-16, %rsp
+    call kernel_main
+.halt_loop:
+    hlt
+    jmp .halt_loop
+    
 .global serial_init_asm
 // NS16550A UART. COM1 base = 0x3F8 (IBM PC standard). Reg offsets: PC16550D datasheet §3.
 // Port map: +0=THR/RBR/DLL, +1=IER/DLH, +2=FCR/IIR, +3=LCR, +5=LSR.
@@ -340,4 +350,16 @@ outb:
 .global sti_asm
 sti_asm:
     sti
+    ret
+
+.global enable_write_protect_kernel
+enable_write_protect_kernel:
+    mov %cr0, %rax
+    or $0x10000, %rax
+    mov %rax, %cr0
+    ret
+
+.global read_rsp
+read_rsp:
+    mov %rsp, %rax
     ret

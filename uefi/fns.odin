@@ -183,3 +183,37 @@ print_hex_line :: proc "contextless" (st: ^EFI_SYSTEM_TABLE, val: u64) {
 	newline := [?]u16{'\r', '\n', 0}
 	st.ConOut.OutputString(st.ConOut, &newline[0])
 }
+when #config(UEFI_BUILD, false) {
+	@(export, link_name = "_fltused")
+	_fltused: i32 = 1
+
+	@(export, link_name = "_tls_index")
+	_tls_index: u32 = 0
+
+	@(export, link_name = "memcpy")
+	mcpy :: proc "c" (dst, src: rawptr, #any_int len: uint) -> rawptr {
+		d := ([^]u8)(dst)
+		s := ([^]u8)(src)
+		for i in 0 ..< len do d[i] = s[i]
+		return dst
+	}
+
+	@(export, link_name = "memset")
+	mset :: proc "c" (ptr: rawptr, val: i32, #any_int len: uint) -> rawptr {
+		d := ([^]u8)(ptr)
+		for i in 0 ..< len do d[i] = u8(val)
+		return ptr
+	}
+
+	@(export, link_name = "memmove")
+	mmove :: proc "c" (dst, src: rawptr, #any_int len: uint) -> rawptr {
+		d := ([^]u8)(dst)
+		s := ([^]u8)(src)
+		if uintptr(dst) < uintptr(src) {
+			for i in 0 ..< len do d[i] = s[i]
+		} else {
+			for i := len; i > 0; i -= 1 do d[i - 1] = s[i - 1]
+		}
+		return dst
+	}
+}
