@@ -157,9 +157,56 @@ men_init :: proc(
 	for pg in mmapStart ..< mmapStart + mmapPages {
 		kset(&state, pg)
 	}
+	print.serial_write("mmapBase="); print.serial_write_hex(mmapBase); print.serial_writeln("")
+
+	page128 := u64(0x128000) / shared.PAGE_SIZE
+	print.serial_write("page 0x128 used=")
+	if is_used(&state, page128) {print.serial_writeln("yes")} else {print.serial_writeln("no")}
+	// Print every UEFI memory map entry before buddy_init()
+	print.serial_writeln("All UEFI memory map entries:")
+	for i in 0 ..< entryCount {
+		desc := mmap_desc(memoryMap, memoryMapDescSize, i)
+		type_str := "?"
+		#partial switch desc.Type {
+		case .ConventionalMemory:
+			type_str = "Conv"
+		case .LoaderCode:
+			type_str = "Code"
+		case .LoaderData:
+			type_str = "Data"
+		case .BootServicesCode:
+			type_str = "BSCode"
+		case .BootServicesData:
+			type_str = "BSData"
+		case .RuntimeServicesCode:
+			type_str = "RSCode"
+		case .RuntimeServicesData:
+			type_str = "RSData"
+		case .ReservedMemoryType:
+			type_str = "Resv"
+		case .UnusableMemory:
+			type_str = "Unusable"
+		case .ACPIReclaimMemory:
+			type_str = "ACPI"
+		case .ACPIMemoryNVS:
+			type_str = "NVS"
+		case .MemoryMappedIO:
+			type_str = "MMIO"
+		case .MemoryMappedIOPortSpace:
+			type_str = "MMIOPort"
+		}
+		print.serial_write(type_str)
+		print.serial_write(" start=")
+		print.serial_write_hex(desc.PhysicalStart)
+		print.serial_write(" pages=")
+		print.serial_write_u64(desc.NumberOfPages)
+		print.serial_write(" end=")
+		print.serial_write_hex(desc.PhysicalStart + desc.NumberOfPages * shared.PAGE_SIZE)
+		print.serial_writeln("")
+	}
+	paging_init(kernelImg, memoryMap, memoryMapSize, memoryMapDescSize)
 	buddy_init()
 
-	paging_init(kernelImg, memoryMap, memoryMapSize, memoryMapDescSize)
 
 	order := order_for(mmapPages)
 	buddy_free(mmapBase, order)
@@ -238,4 +285,14 @@ mmap_desc :: #force_inline proc(
 	return (^uefi.EFI_MEMORY_DESCRIPTOR)(
 		uintptr(rawptr(memoryMap)) + uintptr(i * memoryMapDescSize),
 	)
+}
+// Temporary allocator: find a free page in the bitmap and mark it used.
+early_alloc_page :: proc() -> u64 {
+	for i in u64(0) ..< state.totalPages {
+		if !is_used(&state, i) {
+			kset(&state, i)
+			return i * shared.PAGE_SIZE
+		}
+	}
+	return 0 // no free page left
 }

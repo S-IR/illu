@@ -29,23 +29,6 @@ paging_init :: proc(
 	memoryMapSize: u64,
 	memoryMapDescSize: u64,
 ) {
-	head := &freeLists[0]
-	print.serial_write("buddy sanity: head.next=")
-	print.serial_write_hex(u64(uintptr(head.next)))
-	print.serial_write(" head.prev=")
-	print.serial_write_hex(u64(uintptr(head.prev)))
-	print.serial_writeln("")
-	if head.next != head {
-		blk := head.next
-		print.serial_write("first blk=")
-		print.serial_write_hex(u64(uintptr(blk)))
-		print.serial_write(" blk.prev=")
-		print.serial_write_hex(u64(uintptr(blk.prev)))
-		print.serial_write(" blk.next=")
-		print.serial_write_hex(u64(uintptr(blk.next)))
-		print.serial_writeln("")
-	}
-
 	enable_nxe()
 	kernelPML4 = pmm_alloc_zeroed_page()
 
@@ -61,7 +44,6 @@ paging_init :: proc(
 		return t == .ConventionalMemory || t == .LoaderCode || t == .LoaderData
 	}
 
-	print.serial_writeln("paging: pass1")
 	for i in u64(0) ..< entryCount {
 		desc := desc_at(memoryMap, memoryMapDescSize, i)
 		if !usable(desc.Type) || desc.PhysicalStart == 0 do continue
@@ -73,7 +55,6 @@ paging_init :: proc(
 		}
 	}
 
-	print.serial_writeln("paging: kernel perms")
 	for seg in kernelImg.segments {
 		flags := PageFlags{.Present, .NX}
 		if .W in seg.perms {flags += {.Write}}
@@ -83,10 +64,8 @@ paging_init :: proc(
 		for phys < end {map_page(kernelPML4, phys, ._4KB, flags); phys += shared.PAGE_SIZE}
 	}
 
-	print.serial_writeln("paging: cr3 switch")
 	ah.write_cr3(kernelPML4)
 
-	print.serial_writeln("paging: pass2 huge pages")
 	GB := u64(mem.Gigabyte)
 	MB2 := u64(2 * mem.Megabyte)
 	for i in u64(0) ..< entryCount {
@@ -107,8 +86,6 @@ paging_init :: proc(
 			phys += shared.PAGE_SIZE
 		}
 	}
-
-	print.serial_writeln("paging: done")
 }
 cpuid_has_1gb_pages :: proc() -> bool {
 	r: ah.CPUIDResult
@@ -188,9 +165,15 @@ ensure_table :: #force_inline proc(parent: [^]u64, index: u64) -> [^]u64 {
 ENTRY_ADDR_MASK :: u64(0x000F_FFFF_FFFF_F000)
 
 pmm_alloc_zeroed_page :: proc() -> u64 {
-	phys := pmm_alloc(shared.PAGE_SIZE)
-	mem.zero(rawptr(uintptr(phys)), shared.PAGE_SIZE)
-	return phys
+	for i in u64(0) ..< state.totalPages {
+		if !is_used(&state, i) {
+			kset(&state, i)
+			phys := i * shared.PAGE_SIZE
+			mem.zero(rawptr(uintptr(phys)), shared.PAGE_SIZE)
+			return phys
+		}
+	}
+	return 0
 }
 enable_nxe :: proc() {
 	EFER_MSR :: u32(0xC0000080)
