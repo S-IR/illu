@@ -4,7 +4,6 @@
 
 // __has_include is clang/gcc defined; But should be in C standard C2X
 package uefi
-
 // UEFI 2.10 §2.3.1 https://uefi.org/specifications
 UINT8 :: u8
 UINT16 :: u16

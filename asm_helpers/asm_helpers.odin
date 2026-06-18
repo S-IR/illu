@@ -45,6 +45,8 @@ when !ODIN_TEST {
 		sti_asm :: proc() ---
 		enable_write_protect_kernel :: proc() ---
 		read_rsp :: proc() -> u64 ---
+		idle_loop :: proc() -> u64 ---
+
 	}
 
 	pit_delay_us :: proc(us: u32) {

@@ -17,6 +17,7 @@ when ODIN_TEST {
 	state: PMM
 
 }
+trampolinePhys: u64 = 0
 
 men_init :: proc(
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
@@ -30,15 +31,7 @@ men_init :: proc(
 
 	entryCount := memoryMapSize / memoryMapDescSize
 
-	mmap_desc :: #force_inline proc(
-		memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
-		memoryMapDescSize: u64,
-		i: u64,
-	) -> ^uefi.EFI_MEMORY_DESCRIPTOR {
-		return (^uefi.EFI_MEMORY_DESCRIPTOR)(
-			uintptr(rawptr(memoryMap)) + uintptr(i * memoryMapDescSize),
-		)
-	}
+
 	is_good_ram :: #force_inline proc(t: uefi.EFI_MEMORY_TYPE) -> bool {
 		return(
 			t != .ReservedMemoryType &&
@@ -112,15 +105,64 @@ men_init :: proc(
 		}
 	}
 
+	print.serial_write(
+		"kernel base=",
+	); print.serial_write_hex(kernelImg.base); print.serial_writeln("")
+	print.serial_write(
+		"kernel end= ",
+	); print.serial_write_hex(kernelImg.end); print.serial_writeln("")
+	print.serial_write(
+		"freeLists= ",
+	); print.serial_write_hex(u64(uintptr(&freeLists[0]))); print.serial_writeln("")
+	print.serial_write(
+		"freeLists end=",
+	); print.serial_write_hex(u64(uintptr(&freeLists[0])) + size_of(freeLists)); print.serial_writeln("")
+	print.serial_write(
+		"state=    ",
+	); print.serial_write_hex(u64(uintptr(&state))); print.serial_writeln("")
+	print.serial_write(
+		"bitmap=   ",
+	); print.serial_write_hex(auto_cast state.bitmap[0]); print.serial_writeln("")
+
+	kernelStartPage := kernelImg.base / shared.PAGE_SIZE
+	kernelEndPage := pages_needed(kernelImg.end) // number of pages, exclusive
+	print.serial_write(
+		"kernel pages [ ",
+	); print.serial_write_u64(kernelStartPage); print.serial_write(" , "); print.serial_write_u64(kernelEndPage); print.serial_writeln(" )")
+
 	kernelStart := kernelImg.base / shared.PAGE_SIZE
 	kernelEnd := pages_needed(kernelImg.end)
 	for pg in kernelStart ..< kernelEnd {
 		kset(&state, pg)
 	}
+
+
+	TRAMPOLINE_LOW_LIMIT: u64 : shared.PAGE_SIZE
+	TRAMPOLINE_HIGH_LIMIT: u64 : mem.Megabyte
+
+	for page in TRAMPOLINE_LOW_LIMIT /
+		shared.PAGE_SIZE ..< TRAMPOLINE_HIGH_LIMIT / shared.PAGE_SIZE {
+		if is_used(&state, page) do continue
+
+		kset(&state, page)
+		trampolinePhys = page * shared.PAGE_SIZE
+		break
+	}
+	print.kensure(trampolinePhys != 0, "pmm: no free page below 1mb for trampoline")
+
+
+	mmapBase := u64(uintptr(rawptr(memoryMap)))
+	mmapPages := pages_needed(memoryMapSize)
+	mmapStart := mmapBase / shared.PAGE_SIZE
+	for pg in mmapStart ..< mmapStart + mmapPages {
+		kset(&state, pg)
+	}
 	buddy_init()
 
-	paging_init(kernelImg)
+	paging_init(kernelImg, memoryMap, memoryMapSize, memoryMapDescSize)
 
+	order := order_for(mmapPages)
+	buddy_free(mmapBase, order)
 	print.serial_writeln("pmm: loaded")
 
 }
@@ -187,4 +229,13 @@ pmm_free :: proc(addr: u64, bytes: u64) {
 	pages := pages_needed(bytes)
 	order := order_for(pages)
 	buddy_free(addr, order)
+}
+mmap_desc :: #force_inline proc(
+	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
+	memoryMapDescSize: u64,
+	i: u64,
+) -> ^uefi.EFI_MEMORY_DESCRIPTOR {
+	return (^uefi.EFI_MEMORY_DESCRIPTOR)(
+		uintptr(rawptr(memoryMap)) + uintptr(i * memoryMapDescSize),
+	)
 }

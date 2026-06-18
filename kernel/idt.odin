@@ -16,7 +16,7 @@ IdtEntry :: struct #packed {
 }
 
 idt: [256]IdtEntry
-idtDesc: ah.X86TableDescriptor
+GIDTDescriptor: ah.X86TableDescriptor
 
 idt_init :: proc() {
 	for isrTable, i in ah.isr_table {
@@ -26,9 +26,9 @@ idt_init :: proc() {
 		idt_set_entry(32 + i, u64(irqTable))
 	}
 
-	idtDesc.base = u64(uintptr(&idt))
-	idtDesc.limit = u16(size_of(idt) - 1)
-	ah.lidt_asm(&idtDesc)
+	GIDTDescriptor.base = u64(uintptr(&idt))
+	GIDTDescriptor.limit = u16(size_of(idt) - 1)
+	ah.lidt_asm(&GIDTDescriptor)
 	print.serial_writeln("idt: loaded")
 
 

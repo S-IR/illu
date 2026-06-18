@@ -363,3 +363,98 @@ enable_write_protect_kernel:
 read_rsp:
     mov %rsp, %rax
     ret
+
+.global gs_write_base
+gs_write_base:
+    movl $0xC0000101, %ecx
+    movl %edi, %eax
+    shrq $32, %rdi
+    movl %edi, %edx
+    wrmsr
+    ret
+
+
+.global syscall_entry
+syscall_entry:
+    swapgs
+    mov %rsp, %gs:16
+    mov %gs:8, %rsp
+
+    push %rcx
+    push %r11
+
+    sub $8, %rsp
+
+    mov %rax, %rdi
+    mov %rdi, %rsi
+    mov %rsi, %rdx
+    mov %rdx, %rcx
+    mov %r10, %r8
+    mov %r8,  %r9
+    call syscall_dispatch
+
+    add $8, %rsp               # remove alignment
+    pop %r11                   # restore user RFLAGS
+    pop %rcx                   # restore user RIP
+    mov %gs:16, %rsp           # back to user stack
+    swapgs                     # swap back to user’s GS base
+    sysretq                    # return to user, using RCX as RIP and R11 as RFLAGS
+
+.global idle_loop
+idle_loop:
+    leaq -8(%rsp), %rax
+    movl $0, %ecx
+    movl $0, %edx
+    monitor
+    movzbq %gs:60, %rax
+    xorl %ecx, %ecx
+    xorl %edx, %edx
+    mwait
+    jmp idle_loop
+
+.global gs_read_cpustate
+gs_read_cpustate:
+    movq %gs:0, %rax
+    ret
+
+
+.global thread_save_and_switch_to
+thread_save_and_switch_to:
+    mov %rsp, (%rdi)         // old.rsp = current RSP
+    mov 40(%rsi), %rax       // new.stackTop
+    mov %rax, %gs:8          // CpuState.kernelRSP = new.stackTop
+    mov (%rsi), %rsp         // rsp = new.rsp
+    ret
+
+.global thread_load_and_switch_to
+thread_load_and_switch_to:
+    mov 40(%rdi), %rax
+    mov %rax, %gs:8
+    mov (%rdi), %rsp
+    ret
+
+.global thread_start_idle_loop
+thread_start_idle_loop:
+    movq %gs:64, %rsp
+    movq %gs:64, %rax
+    movq %rax, %gs:24
+    jmp idle_loop
+
+.global trampoline_start
+trampoline_start:
+    movq patch_cr3(%rip), %rax
+    movq %rax, %cr3
+    movq patch_stack(%rip), %rsp
+    jmp *patch_entry(%rip)
+
+.align 8
+.global patch_cr3
+patch_cr3:   .quad 0
+.global patch_stack
+patch_stack: .quad 0
+.global patch_entry
+patch_entry: .quad 0
+
+.global trampoline_end
+trampoline_end:
+    nop

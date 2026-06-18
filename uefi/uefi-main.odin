@@ -47,12 +47,13 @@
 //   https://github.com/freebsd/freebsd-src/tree/main/stand/efi/libefi
 
 package uefi
+import "../lib/acpi"
 import "../lib/elf"
 import "../lib/shared"
 import "core:slice"
 KernelParams :: struct #all_or_none {
 	fb:                shared.FrameBuffer,
-	rsdp:              rawptr,
+	rsdp:              ^acpi.Rsdp,
 	memoryMap:         [^]EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize:     u64,
 	memoryMapDescSize: u64,
@@ -131,7 +132,7 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 	)
 	if !kernelOk do boot_fail(systemTable, &errKernel[0])
 
-	rsdp: rawptr = nil
+	rsdp: ^acpi.Rsdp = nil
 	configTable := slice.from_ptr(
 		systemTable.ConfigurationTable,
 		int(systemTable.NumberOfTableEntries),
@@ -141,11 +142,11 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 
 	for &t in configTable {
 		if guid_equal(&t.VendorGuid, &ACPI2_GUID) {
-			rsdp = rawptr(t.VendorTable)
+			rsdp = (^acpi.Rsdp)(t.VendorTable)
 			break
 		}
 		if guid_equal(&t.VendorGuid, &ACPI1_GUID) && rsdp == nil {
-			rsdp = rawptr(t.VendorTable)
+			rsdp = (^acpi.Rsdp)(t.VendorTable)
 		}
 	}
 	if rsdp == nil do boot_fail(systemTable, &errRsdp[0])
