@@ -11,6 +11,8 @@ SLICE_MS: u64 : 20
 SLICE_WARN_MS: u64 : SLICE_MS - 2
 KERNEL_STACK_PER_CPU_SIZE :: 16 * mem.Kilobyte
 
+//allignment requirement
+#assert(KERNEL_STACK_PER_CPU_SIZE % 16 == 0)
 Process :: struct {
 	pml4s:      [dynamic]u64,
 	activePml4: u64,
@@ -117,17 +119,13 @@ smp_start :: proc(rsdp: ^acpi.Rsdp) {
 		kernelStack, aErr := make([]byte, KERNEL_STACK_PER_CPU_SIZE)
 		print.kensure(aErr == nil, "smp_start: temp stack alloc failed")
 		kernelStackTop := u64(uintptr(raw_data(kernelStack))) + KERNEL_STACK_PER_CPU_SIZE
-		bootstrapCPU: ^CpuState
-		bootstrapCPU, aErr = new(CpuState)
-		print.kensure(aErr == nil, "smp_start:bootstrap cpu alloc failed")
-
 
 		install_trampoline(
 			rawptr(uintptr(pmm.trampolinePhys)),
 			cr3,
 			kernelStackTop,
 			u64(uintptr(rawptr(ap_init))),
-			u64(uintptr(rawptr(bootstrapCPU))),
+			kernelStackTop,
 		)
 		intrinsics.atomic_store(&apReady, 0)
 		send_init_sipi(apId, pmm.trampolinePhys)
@@ -155,10 +153,25 @@ cpu_init :: proc(cpu: ^CpuState) {
 
 	cpu.tssRSP0^ = cpu.kernelRSP
 	ah.gs_write_base(u64(uintptr(cpu)))
-	ah.cpu_syscall_init()
+	cpu_syscall_init()
 
 
 }
+cpu_syscall_init :: proc() {
+	IA32_EFER :: u32(0xC0000080)
+	IA32_STAR :: u32(0xC0000081)
+	IA32_LSTAR :: u32(0xC0000082)
+	IA32_FMASK :: u32(0xC0000084)
+	KERNELGSBASE :: u32(0xC0000102)
+	EFER_SCE :: u64(1 << 0)
+	IA32_GS_BASE :: u32(0xC0000101)
+	ah.wrmsr_asm(IA32_EFER, ah.rdmsr_asm(IA32_EFER) | EFER_SCE)
+	ah.wrmsr_asm(IA32_STAR, (u64(ah.USER_CS32) << 48) | (u64(ah.KERNEL_CS) << 32))
+	ah.wrmsr_asm(IA32_LSTAR, u64(uintptr(rawptr(ah.syscall_entry))))
+	ah.wrmsr_asm(IA32_FMASK, u64(0x200))
+	ah.wrmsr_asm(KERNELGSBASE, ah.rdmsr_asm(IA32_GS_BASE))
+}
+
 nextGdtSlot: u32 = 1
 apReady: u32
 ap_init :: proc "c" () {

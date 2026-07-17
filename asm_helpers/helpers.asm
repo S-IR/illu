@@ -424,15 +424,13 @@ syscall_entry:
     mov %gs:8, %rsp
     push %rcx
     push %r11
-    sub $8, %rsp
-    mov %rax, %rdi
-    mov %rdi, %rsi
-    mov %rsi, %rdx
-    mov %rdx, %rcx
-    mov %r10, %r8
     mov %r8,  %r9
+    mov %r10, %r8
+    mov %rdx, %rcx
+    mov %rsi, %rdx
+    mov %rdi, %rsi
+    mov %rax, %rdi
     call syscall_dispatch
-    add $8, %rsp
     pop %r11
     pop %rcx
     mov %gs:16, %rsp
@@ -478,3 +476,18 @@ thread_start_idle_loop:
     movq %gs:24, %rcx    
     movq %rax, (%rcx)    
     jmp idle_loop
+
+.global enter_userspace
+enter_userspace:
+    // rdi = target user rip (arg1), rsi = target user rsp (arg2) — SysV ABI
+    swapgs                  // stash kernel CpuState ptr (GS_BASE) into KERNEL_GS_BASE,
+                              // mirrors the swapgs pair already used in syscall_entry
+    push $0x23               // SS: UserData selector (GDT index 4, 4<<3=0x20) | RPL3 (0x20|3)
+    push %rsi                 // RSP = user stack top passed in by caller
+    pushfq
+    pop %rax
+    or $0x200, %rax           // force IF (bit 9) on — user thread must run with interrupts enabled
+    push %rax                 // RFLAGS for the target context
+    push $0x2B                // CS: UserCode64 selector (GDT index 5, 5<<3=0x28) | RPL3 (0x28|3)
+    push %rdi                 // RIP = user entry point passed in by caller
+    iretq                     // pops RIP,CS,RFLAGS,RSP,SS — CS.RPL=3 triggers the ring0->ring3 switch
