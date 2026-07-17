@@ -3,7 +3,6 @@ import ah "../asm_helpers"
 import "base:intrinsics"
 import "base:runtime"
 import "print"
-IDLE_STACK_SIZE :: 4096
 
 when !ODIN_TEST {
 	@(default_calling_convention = "c")
@@ -18,15 +17,23 @@ when !ODIN_TEST {
 
 
 runq_enqueue :: proc(q: ^RunQueue, t: ^Thread) {
-	q.buf[q.tail % RUN_QUEUE_CAP] = t
-	q.tail += 1
-}
+	t.next = nil
+	if q.tail != nil {
+		q.tail.next = t
+	} else {
+		q.head = t
+	}
+	q.tail = t
 
+}
 runq_dequeue :: proc(q: ^RunQueue) -> (t: ^Thread) {
-	if q.head == q.tail do return nil
-	t = q.buf[q.head % RUN_QUEUE_CAP]
-	q.head += 1
+	t = q.head
+	if t == nil do return nil
+	q.head = t.next
+	if q.head == nil do q.tail = nil
+	t.next = nil
 	return t
+
 }
 thread_switch_away :: proc() {
 	cpu := gs_read_cpustate()

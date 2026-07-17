@@ -51,16 +51,16 @@ TSS :: struct #packed {
 	iomapBase: u16,
 }
 
-@(private)
-gdtTss: TSS
-
-@(private)
-GDTDescriptor: ah.X86TableDescriptor = {}
+GDT :: struct {
+	entries: [GDTEntryNames]u64,
+	tss:     TSS,
+	desc:    ah.X86TableDescriptor,
+}
 
 @(link_name = "_kernel_stack_top")
 _kernel_stack_top: u8
 
-gdt_tss_init :: proc "contextless" () {
+gdt_tss_init :: proc "contextless" (g: ^GDT) {
 	make_flat_descriptor :: proc "contextless" (access: GdtAccess, flags: GdtFlags) -> u64 {
 		e: GdtEntry
 		e.limitLow = 0xFFFF
@@ -71,7 +71,7 @@ gdt_tss_init :: proc "contextless" () {
 	}
 
 
-	tssBase := u64(uintptr(&gdtTss))
+	tssBase := u64(uintptr(&g.tss))
 	tssLimit := u64(size_of(TSS) - 1)
 	tss: GdtEntry
 	tss.limitLow = u16(tssLimit)
@@ -90,7 +90,7 @@ gdt_tss_init :: proc "contextless" () {
 	tss.baseHigh = u8(tssBase >> 24)
 
 
-	gdtEntries = {
+	g.entries = {
 		.NullDesc   = 0,
 		.KernelCode = make_flat_descriptor(
 			{present = true, segment = true, exec = true, rw = true, dpl = 0},
@@ -116,13 +116,13 @@ gdt_tss_init :: proc "contextless" () {
 		.Tss2       = tssBase >> 32,
 	}
 
-	GDTDescriptor.base = u64(uintptr(&gdtEntries))
-	GDTDescriptor.limit = u16(size_of(gdtEntries) - 1)
+	g.desc.base = u64(uintptr(&g.entries))
+	g.desc.limit = u16(size_of(g.entries) - 1)
 
-	ah.lgdt_asm(&GDTDescriptor)
+	ah.lgdt_asm(&g.desc)
 	ah.reload_segments_asm()
 
-	//1:10 PMClaude responded: SDM Vol 3A §3.SDM Vol 3A §3.4.2 "Segment Selectors":
+	//1:10 PMClaude responded: SDM Vol 3A §3.SDM Vol 3A §3.4.2 "Segment Selectors":
 	// Bits 15:3 = index into descriptor table, bits 2 = TI (0=GDT, 1=LDT), bits 1:0 = RPL.
 	TSS_SEL :: u16(GDTEntryNames.Tss1) << 3
 	ah.load_tss_asm(TSS_SEL)

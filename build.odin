@@ -103,7 +103,7 @@ collect_objs :: proc(dir: string) -> [dynamic]string {
 	}
 	out := make([dynamic]string, context.temp_allocator)
 	for f in d {
-		if strings.has_suffix(f.name, ".o") {
+		if strings.has_suffix(f.name, ".o") || strings.has_suffix(f.name, ".obj") {
 			append(&out, fmt.tprintf("%s/%s", dir, f.name))
 		}
 	}

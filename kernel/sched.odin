@@ -8,6 +8,8 @@ import "core:mem"
 import "pmm"
 import "print"
 SLICE_MS: u64 : 20
+SLICE_WARN_MS: u64 : SLICE_MS - 2
+KERNEL_STACK_PER_CPU_SIZE :: 16 * mem.Kilobyte
 
 Process :: struct {
 	pml4s:      [dynamic]u64,
@@ -22,13 +24,16 @@ Alloc :: struct {
 }
 
 Thread :: struct {
-	rsp:       u64,
-	process:   ^Process,
-	state:     ThreadState,
-	next:      ^Thread,
-	id:        u64,
-	stackTop:  u64,
-	stackSize: u64,
+	rsp:                u64,
+	process:            ^Process,
+	state:              ThreadState,
+	next:               ^Thread,
+	id:                 u64,
+	stackTop:           u64,
+	stackSize:          u64,
+	preemptRip:         u64,
+	savedRip, savedRsp: u64,
+	warned:             bool,
 }
 ThreadState :: enum u8 {
 	Ready,
@@ -39,39 +44,30 @@ ThreadState :: enum u8 {
 IdleHint :: enum u8 {
 	Shallow = 0x00, // C1
 	C1E     = 0x10, // C1E
-	Deep    = 0x40, // C6 – deepest documented state
+	Deep    = 0x40,
 }
 DEFAULT_IDLE_HINT :: IdleHint.Deep
 
 CpuState :: struct {
-	self:             ^CpuState, // 0
-	kernelRSP:        u64, // 8
-	userRSP:          u64, // 16
-	tssRSP0:          ^u64, // 24
-	current:          ^Thread, // 32
-	pendingFree:      ^Thread, // 40
-	kernelSyscallRSP: u64, // 48
-	id:               u32, // 56
-	idleHint:         IdleHint, // 60
-	_pad:             [3]u8, // 61-63
-	idleStackTop:     u64, // 64
-	runQueue:         RunQueue, // 72
+	self:               ^CpuState,
+	kernelRSP, userRSP: u64,
+	tssRSP0:            ^u64,
+	current:            ^Thread,
+	idleHint:           IdleHint,
+	_pad:               [3]u8,
+	runQueue:           RunQueue,
 }
 
 #assert(offset_of(CpuState, kernelRSP) == 8)
 #assert(offset_of(CpuState, userRSP) == 16)
 #assert(offset_of(CpuState, tssRSP0) == 24)
-#assert(offset_of(CpuState, kernelSyscallRSP) == 48)
-#assert(offset_of(CpuState, idleHint) == 60)
+#assert(offset_of(CpuState, current) == 32)
+#assert(offset_of(CpuState, idleHint) == 40)
 #assert(offset_of(Thread, rsp) == 0)
 #assert(offset_of(Thread, stackTop) == 40)
 
-RUN_QUEUE_CAP :: 256
-
 RunQueue :: struct {
-	buf:  [RUN_QUEUE_CAP]^Thread,
-	head: u64,
-	tail: u64,
+	head, tail: ^Thread,
 }
 
 cpu0: CpuState
@@ -79,46 +75,64 @@ nextID: u64 = 1
 nextCPU: u32
 gKernelCtx: runtime.Context
 
-
+gdts: []GDT
 sched_init :: proc(rsdp: ^acpi.Rsdp) {
 	print.kensure(cpuid_has_sse3(), "CPU does not support SSE3 (MONITOR/MWAIT)")
-	gKernelCtx = context
-	cpu0.tssRSP0 = &gdtTss.rsp[0]
 
+	X2APIC_MSR_ID :: 0x802
+	bspId := u8(ah.rdmsr_asm(X2APIC_MSR_ID) & 0xFF)
+	apCount := acpi.collect_ap_ids(rsdp, bspId, nil)
+	totalCores := int(apCount) + 1
+
+	print.serial_write("AP count: ")
+	print.serial_write_u64(u64(apCount))
+	print.serial_writeln("")
+
+	print.serial_write("Total cores: ")
+	print.serial_write_u64(u64(totalCores))
+	print.serial_writeln("")
+
+	gdtsAlloc, allocErr := make([]GDT, totalCores)
+	print.kensure(allocErr == nil, "OOM sched_init: gdts")
+	gdts = gdtsAlloc
+
+	gdt_tss_init(&gdts[0])
+	cpu0.tssRSP0 = &gdts[0].tss.rsp[0]
 
 	cpu_init(&cpu0)
 	smp_start(rsdp)
-
 }
-gAPReady: u32
 
 smp_start :: proc(rsdp: ^acpi.Rsdp) {
 	X2APIC_MSR_ID :: 0x802
 	bspId := u8(ah.rdmsr_asm(X2APIC_MSR_ID) & 0xFF)
 
 	apCount := acpi.collect_ap_ids(rsdp, bspId, nil)
-	apIds, allocErr := make([]u8, apCount, context.temp_allocator)
+	apIds, allocErr := make([]u8, apCount, context.allocator)
 	print.kensure(allocErr == nil, "OOM smp_start")
 	acpi.collect_ap_ids(rsdp, bspId, apIds)
 
-
 	cr3 := ah.read_cr3()
 	for apId in apIds {
-		tempStack := make([]u8, IDLE_STACK_SIZE)
-		print.kassert(raw_data(tempStack) != nil, "smp_start: temp stack alloc failed")
-		tempStackTop := u64(uintptr(raw_data(tempStack))) + IDLE_STACK_SIZE
+		kernelStack, aErr := make([]byte, KERNEL_STACK_PER_CPU_SIZE)
+		print.kensure(aErr == nil, "smp_start: temp stack alloc failed")
+		kernelStackTop := u64(uintptr(raw_data(kernelStack))) + KERNEL_STACK_PER_CPU_SIZE
+		bootstrapCPU: ^CpuState
+		bootstrapCPU, aErr = new(CpuState)
+		print.kensure(aErr == nil, "smp_start:bootstrap cpu alloc failed")
 
-		intrinsics.atomic_store(&gAPReady, u32(0))
+
 		install_trampoline(
 			rawptr(uintptr(pmm.trampolinePhys)),
 			cr3,
-			tempStackTop,
+			kernelStackTop,
 			u64(uintptr(rawptr(ap_init))),
+			u64(uintptr(rawptr(bootstrapCPU))),
 		)
+		intrinsics.atomic_store(&apReady, 0)
 		send_init_sipi(apId, pmm.trampolinePhys)
-		for intrinsics.atomic_load(&gAPReady) == 0 {
-			intrinsics.cpu_relax()
-		}
+
+		for intrinsics.atomic_load(&apReady) == 0 {}
 	}
 
 }
@@ -132,43 +146,56 @@ sched_start :: proc() {
 }
 cpu_init :: proc(cpu: ^CpuState) {
 	cpu.self = cpu
-	cpu.id = intrinsics.atomic_add(&nextCPU, 1)
+
 	cpu.idleHint = DEFAULT_IDLE_HINT
-	cpu.current = nil
 
-	idleStack, allocErr := make([]u8, IDLE_STACK_SIZE)
-	print.kensure(allocErr == {} && raw_data(idleStack) != nil, "OOM cpu_init")
-	cpu.idleStackTop = u64(uintptr(raw_data(idleStack))) + IDLE_STACK_SIZE
+	kernelStack, aErr := make([]u8, KERNEL_STACK_PER_CPU_SIZE)
+	print.kensure(aErr == nil, "cpu_init: allocation failure for kernel stack")
+	cpu.kernelRSP = u64(uintptr(raw_data(kernelStack))) + KERNEL_STACK_PER_CPU_SIZE
 
-	cpu.tssRSP0^ = cpu.idleStackTop
+	cpu.tssRSP0^ = cpu.kernelRSP
 	ah.gs_write_base(u64(uintptr(cpu)))
 	ah.cpu_syscall_init()
-	idt_set_entry(VECTOR_APIC_TIMER, u64(uintptr(rawptr(timer_tick))))
 
 
 }
+nextGdtSlot: u32 = 1
+apReady: u32
 ap_init :: proc "c" () {
+	intrinsics.atomic_store(&apReady, 1)
+	ah.wrmsr_asm(u32(0xC0000100), gBootTlsEnd)
 	context = gKernelCtx
-	intrinsics.atomic_store(&gAPReady, u32(1))
-	ah.lgdt_asm(&GDTDescriptor)
 	ah.lidt_asm(&GIDTDescriptor)
+
+	slot := intrinsics.atomic_add(&nextGdtSlot, 1) - 1
+	gdt_tss_init(&gdts[slot])
 
 	cpu, allocErr := new(CpuState)
 	print.kensure(allocErr == nil, "OOM ap_init")
-
-	apTss: ^TSS
-	apTss, allocErr = new(TSS)
-	print.kensure(allocErr == nil, "OOM ap_init")
-	ah.load_tss_asm(u16(GDTEntryNames.Tss1) << 3)
-	cpu.tssRSP0 = &apTss.rsp[0]
+	cpu.tssRSP0 = &gdts[slot].tss.rsp[0]
 
 	cpu_init(cpu)
-	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
-	ah.sti_asm()
 	thread_start_idle_loop()
 }
-timer_tick :: proc() {
-	lapic_send_eoi()
+timer_tick :: proc(frame: ^InterruptFrame) {
+	cpu := gs_read_cpustate()
+	t := cpu.current
+
+
+	if t != nil && !t.warned && t.preemptRip != 0 {
+		t.warned = true
+		t.savedRip = frame.rip
+		t.savedRsp = frame.rsp
+
+		frame.rip = t.preemptRip
+		frame.rdi = t.savedRip
+		frame.rsi = t.savedRsp
+
+		lapic_set_deadline(tscTicksPerMs * SLICE_WARN_MS)
+		return
+	}
+
 	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
+	if t != nil do t.warned = false
 	thread_switch_away()
 }

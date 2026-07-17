@@ -17,9 +17,10 @@ cpu_syscall_init :: proc() {
 	IA32_FMASK :: u32(0xC0000084)
 	KERNELGSBASE :: u32(0xC0000102)
 	EFER_SCE :: u64(1 << 0)
+	IA32_GS_BASE :: u32(0xC0000101)
 	wrmsr_asm(IA32_EFER, rdmsr_asm(IA32_EFER) | EFER_SCE)
 	wrmsr_asm(IA32_STAR, (u64(USER_CS32) << 48) | (u64(KERNEL_CS) << 32))
 	wrmsr_asm(IA32_LSTAR, u64(uintptr(rawptr(syscall_entry))))
 	wrmsr_asm(IA32_FMASK, u64(0x200))
-	wrmsr_asm(KERNELGSBASE, 0)
+	wrmsr_asm(KERNELGSBASE, rdmsr_asm(IA32_GS_BASE))
 }

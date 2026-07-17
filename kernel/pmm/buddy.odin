@@ -126,14 +126,6 @@ list_remove :: proc(blk: ^FreeBlock) {
 	assert(blk.next != nil)
 
 	assert(blk.prev.next == blk)
-	print.serial_write("blk=")
-	print.serial_write_hex(u64(uintptr(blk)))
-	print.serial_write(" next=")
-	print.serial_write_hex(u64(uintptr(blk.next)))
-	print.serial_write(" next.prev=")
-	print.serial_write_hex(u64(uintptr(blk.next.prev)))
-	print.serial_writeln("")
-
 	assert(blk.next.prev == blk)
 
 	blk.prev.next = blk.next

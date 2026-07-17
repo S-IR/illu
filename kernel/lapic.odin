@@ -13,7 +13,8 @@ lapic_init :: proc() {
 	flags := transmute(ApicBaseFlags)raw
 	print.kensure(.EN in flags, "xapic not globally enabled, cannot upgrade to x2apic")
 	flags += {.EN, .EXTD}
-	ah.wrmsr_asm(MSR_IA32_APIC_BASE, transmute(u64)flags)
+	ah.wrmsr_asm(MSR_IA32_APIC_BASE, (raw & MSR_APIC_BASE_MASK) | 0x800)
+	ah.wrmsr_asm(MSR_IA32_APIC_BASE, (raw & MSR_APIC_BASE_MASK) | 0xC00)
 	VECTOR_APIC_SPURIOUS :: 0xFF
 
 	svr := SvrRegister {
@@ -67,8 +68,6 @@ lapic_init :: proc() {
 	}
 	ah.wrmsr_asm(X2APIC_MSR_LVT_TIMER, u64(transmute(u32)lvt))
 
-	ah.sti_asm()
-	lapic_set_deadline(tscTicksPerMs * 1)
 
 	print.serial_writeln("lapic: x2apic enabled, timer armed")
 }

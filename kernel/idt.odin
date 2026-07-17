@@ -116,7 +116,7 @@ InterruptFrame :: struct #packed {
 
 @(export)
 exception_handler :: proc "c" (frame: ^InterruptFrame) {
-	context = runtime.default_context()
+	context = gKernelCtx
 	if frame.interruptNumber >= 32 {
 		irq_handler(frame)
 		return
@@ -127,38 +127,85 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 			return
 		}
 	}
-	// if frame.interruptNumber == 1 {
-	// 	debug_exception_handler(frame)
-	// 	return
-	// }
 
-	fromRing3 := frame.cs & 3 == 3
+	name := exceptionNames[frame.interruptNumber]
+	print.serial_writeln("")
+	print.serial_writeln("======== KERNEL EXCEPTION ========")
+	print.serial_write("vector:  ")
+	print.serial_write_u64(frame.interruptNumber)
+	print.serial_write("  (")
+	print.serial_write(name)
+	print.serial_writeln(")")
 
-	when QEMU_TEST {
-		name := exceptionNames[frame.interruptNumber]
-		print.serial_write("EXCEPTION ")
-		print.serial_write(name)
-		print.serial_write(" at rip=")
-		print.serial_write_hex(frame.rip)
-		print.serial_write(" rsp=")
-		print.serial_write_hex(frame.rsp)
-		print.serial_write(" error=")
-		print.serial_write_hex(frame.error_code)
-		if frame.interruptNumber == 14 {
-			print.serial_write(" cr2=")
-			print.serial_write_hex(ah.read_cr2())
-		}
+	print.serial_write("rip:     ")
+	print.serial_write_hex(frame.rip)
+	print.serial_writeln("")
+
+	print.serial_write("cs:      ")
+	print.serial_write_hex(frame.cs)
+	print.serial_write("   (ring ")
+	print.serial_write_u64(frame.cs & 3)
+	print.serial_writeln(")")
+
+	print.serial_write("rsp:     ")
+	print.serial_write_hex(frame.rsp)
+	print.serial_writeln("")
+	print.serial_write("rflags:  ")
+	print.serial_write_hex(frame.rflags)
+	print.serial_writeln("")
+	print.serial_write("error:   ")
+	print.serial_write_hex(frame.error_code)
+	print.serial_writeln("")
+
+	if frame.interruptNumber == 14 {
+		cr2 := ah.read_cr2()
+		print.serial_write("cr2:     ")
+		print.serial_write_hex(cr2)
 		print.serial_writeln("")
+
+		ec := frame.error_code
+		print.serial_write("pf info: ")
+		print.serial_write(ec & 1 != 0 ? "PROTECTION-VIOLATION" : "NOT-PRESENT")
+		print.serial_write(" | ")
+		print.serial_write(ec & 2 != 0 ? "WRITE" : "READ")
+		print.serial_write(" | ")
+		print.serial_write(ec & 4 != 0 ? "USER" : "SUPERVISOR")
+		if ec & 8 != 0 do print.serial_write(" | RESERVED-BIT-SET")
+		if ec & 16 != 0 do print.serial_write(" | INSTR-FETCH")
+		print.serial_writeln("")
+
+		if cr2 == 0 {
+			print.serial_writeln("        cr2=0 -> likely a nil pointer dereference")
+		}
 	}
 
+	print.serial_writeln("--- general purpose registers ---")
+	print_reg("rax", frame.rax); print_reg("rbx", frame.rbx)
+	print_reg("rcx", frame.rcx); print_reg("rdx", frame.rdx)
+	print_reg("rsi", frame.rsi); print_reg("rdi", frame.rdi)
+	print_reg("rbp", frame.rbp)
+	print_reg("r8 ", frame.r8); print_reg("r9 ", frame.r9)
+	print_reg("r10", frame.r10); print_reg("r11", frame.r11)
+	print_reg("r12", frame.r12); print_reg("r13", frame.r13)
+	print_reg("r14", frame.r14); print_reg("r15", frame.r15)
+
+	print.serial_writeln("===================================")
 	ah.halt()
+}
+
+@(private)
+print_reg :: proc "contextless" (name: string, val: u64) {
+	print.serial_write(name)
+	print.serial_write(": ")
+	print.serial_write_hex(val)
+	print.serial_writeln("")
 }
 irq_handler :: proc(frame: ^InterruptFrame) {
 	defer lapic_send_eoi()
 	v := int(frame.interruptNumber)
 	switch v {
 	case VECTOR_APIC_TIMER:
-	// scheduler tick goes here later
+		timer_tick(frame)
 	case VECTOR_APIC_ERROR:
 		print.serial_writeln("lapic: error fired")
 	case VECTOR_APIC_THERMAL:

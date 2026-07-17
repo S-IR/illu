@@ -132,6 +132,7 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 	)
 	if !kernelOk do boot_fail(systemTable, &errKernel[0])
 
+
 	rsdp: ^acpi.Rsdp = nil
 	configTable := slice.from_ptr(
 		systemTable.ConfigurationTable,

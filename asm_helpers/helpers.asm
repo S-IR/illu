@@ -1,4 +1,3 @@
-
 .section .data
 .global irq_stub_table
 irq_stub_table:
@@ -17,11 +16,79 @@ isr_table:
 .align 16
 .global _kernel_stack
 _kernel_stack:
-    .skip 16 * 4096       
+    .skip 16 * 4096
 .global _kernel_stack_top
 _kernel_stack_top:
 
 .section .text
+.org 0
+.code16
+.global trampoline_start
+trampoline_start:
+    cli
+    cld
+    xor %ax, %ax
+    mov %ax, %ds
+    lgdtl (0x8000 + gdt_desc - trampoline_start)
+    mov %cr0, %eax
+    or $1, %eax
+    mov %eax, %cr0
+    ljmpl $0x08, $(0x8000 + protected - trampoline_start)
+.code32
+protected:
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+    mov (0x8000 + patch_cr3 - trampoline_start), %eax
+    mov %eax, %cr3
+    mov %cr4, %eax
+    or $0x620, %eax        // PAE | OSFXSR | OSXMMEXCPT (was 0x20)
+    mov %eax, %cr4
+    mov $0xC0000080, %ecx
+    rdmsr
+    or $0x900, %eax        // LME | NXE (was 0x100) - must match BSP's enable_nxe()
+    wrmsr
+    mov %cr0, %eax
+    or $0x80000000, %eax
+    mov %eax, %cr0
+ljmpl $0x18, $(0x8000 + long_mode - trampoline_start)
+.code64
+long_mode:
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+    mov (0x8000 + patch_stack - trampoline_start), %rsp
+    and $-16, %rsp
+    mov (0x8000 + patch_cpu - trampoline_start), %rdi
+    mov (0x8000 + patch_entry - trampoline_start), %rax
+    call *%rax
+1:  hlt
+    jmp 1b
+
+.align 8
+gdt:
+    .quad 0x0000000000000000
+    .quad 0x00CF9A000000FFFF
+    .quad 0x00CF92000000FFFF
+    .quad 0x00AF9A000000FFFF
+    .quad 0x00AF92000000FFFF
+gdt_desc:
+    .word gdt_desc - gdt - 1
+    .long 0x8000 + gdt - trampoline_start
+.global patch_cr3
+patch_cr3:   .quad 0
+.global patch_stack
+patch_stack: .quad 0
+.global patch_entry
+patch_entry: .quad 0
+.global patch_cpu
+patch_cpu: .quad 0
+.global trampoline_end
+trampoline_end:
+    nop
+
 .global kernel_start_setup
 kernel_start_setup:
     cli
@@ -32,33 +99,25 @@ kernel_start_setup:
 .halt_loop:
     hlt
     jmp .halt_loop
-    
+
 .global serial_init_asm
-// NS16550A UART. COM1 base = 0x3F8 (IBM PC standard). Reg offsets: PC16550D datasheet §3.
-// Port map: +0=THR/RBR/DLL, +1=IER/DLH, +2=FCR/IIR, +3=LCR, +5=LSR.
-// Baud: clock=1843200 Hz, divisor=CLOCK/(16*baud). Divisor 3 → 38400 baud.
 serial_init_asm:
-    mov $0x3F9, %dx       // COM1+1 = IER: disable all UART interrupts (we poll LSR)
+    mov $0x3F9, %dx
     mov $0x00, %al
     out %al, %dx
-
-    mov $0x3FB, %dx       // COM1+3 = LCR: DLAB=1 (bit 7) → next writes go to DLL/DLH
+    mov $0x3FB, %dx
     mov $0x80, %al
     out %al, %dx
-
-    mov $0x3F8, %dx       // COM1+0 = DLL (DLAB=1): divisor low = 3 → 38400 baud
+    mov $0x3F8, %dx
     mov $0x03, %al
     out %al, %dx
-
-    mov $0x3F9, %dx       // COM1+1 = DLH (DLAB=1): divisor high = 0
+    mov $0x3F9, %dx
     mov $0x00, %al
     out %al, %dx
-
-    mov $0x3FB, %dx       // COM1+3 = LCR: 0x03 = 8 data bits, no parity, 1 stop (8N1). DLAB cleared.
+    mov $0x3FB, %dx
     mov $0x03, %al
     out %al, %dx
-
-    mov $0x3FA, %dx       // COM1+2 = FCR: 0xC7 = enable FIFO, clear TX+RX FIFOs, 14-byte RX trigger
+    mov $0x3FA, %dx
     mov $0xC7, %al
     out %al, %dx
     ret
@@ -67,12 +126,12 @@ serial_init_asm:
 serial_write_byte_asm:
     push %rdi
 1:
-    mov $0x3FD, %dx       // COM1+5 = LSR: bit 5 (THRE) = TX holding register empty → safe to write
+    mov $0x3FD, %dx
     in %dx, %al
     test $0x20, %al
     jz 1b
     pop %rdi
-    mov $0x3F8, %dx       // COM1+0 = THR (DLAB=0): write byte to transmit holding register
+    mov $0x3F8, %dx
     mov %dil, %al
     out %al, %dx
     ret
@@ -81,16 +140,12 @@ serial_write_byte_asm:
 int3me:
     int3
 
-
 .global lgdt_asm
 lgdt_asm:
     lgdt (%rdi)
     ret
 
 .global reload_segments_asm
-// SDM Vol 3A §3.4.2: CS can only be reloaded via far jmp/call/ret — not mov.
-// We do a far return: push CS selector (0x08 = KERNEL_CS) then RIP, then lretq.
-// DS/ES/SS loaded with 0x10 (KERNEL_DS). FS zeroed (no TLS yet); GS used for per-CPU later.
 reload_segments_asm:
     pushq  $0x08
     leaq   1f(%rip), %rax
@@ -104,7 +159,6 @@ reload_segments_asm:
     xorw   %ax, %ax
     movw   %ax, %fs
     ret
-
 
 .macro IRQ_STUB num
 .global irq\num
@@ -247,20 +301,15 @@ halt:
     hlt
     jmp halt
 
-
-// SDM Vol 2A "LTR — Load Task Register": loads TR with the TSS selector, marks descriptor busy.
-// Must call after GDT is loaded. Required for IST stacks and RSP0 to work on interrupts.
 .global load_tss_asm
 load_tss_asm:
     ltrw   %di
     ret
 
-
 .global lidt_asm
 lidt_asm:
     lidt (%rdi)
     ret
-
 
 .global read_cr2
 read_cr2:
@@ -276,7 +325,6 @@ read_cr3:
 write_cr3:
     mov %rdi, %cr3
     ret
-
 
 .global wrmsr_asm
 wrmsr_asm:
@@ -294,7 +342,6 @@ rdmsr_asm:
     shlq   $32, %rdx
     orq    %rdx, %rax
     ret
-
 
 .global cpuid_asm
 cpuid_asm:
@@ -323,7 +370,6 @@ IRQ_STUB 242
 IRQ_STUB 243
 IRQ_STUB 244
 
-
 .global rdtsc_asm
 rdtsc_asm:
     rdtsc
@@ -331,14 +377,12 @@ rdtsc_asm:
     orq  %rdx, %rax
     ret
 
-
 .global inb
 inb:
-   movw   %di, %dx
+    movw   %di, %dx
     xorl   %eax, %eax
     inb    %dx, %al
     ret
-
 
 .global outb
 outb:
@@ -373,18 +417,14 @@ gs_write_base:
     wrmsr
     ret
 
-
 .global syscall_entry
 syscall_entry:
     swapgs
     mov %rsp, %gs:16
     mov %gs:8, %rsp
-
     push %rcx
     push %r11
-
     sub $8, %rsp
-
     mov %rax, %rdi
     mov %rdi, %rsi
     mov %rsi, %rdx
@@ -392,13 +432,12 @@ syscall_entry:
     mov %r10, %r8
     mov %r8,  %r9
     call syscall_dispatch
-
-    add $8, %rsp               # remove alignment
-    pop %r11                   # restore user RFLAGS
-    pop %rcx                   # restore user RIP
-    mov %gs:16, %rsp           # back to user stack
-    swapgs                     # swap back to user’s GS base
-    sysretq                    # return to user, using RCX as RIP and R11 as RFLAGS
+    add $8, %rsp
+    pop %r11
+    pop %rcx
+    mov %gs:16, %rsp
+    swapgs
+    sysretq
 
 .global idle_loop
 idle_loop:
@@ -406,7 +445,7 @@ idle_loop:
     movl $0, %ecx
     movl $0, %edx
     monitor
-    movzbq %gs:60, %rax
+    movzbq %gs:40, %rax
     xorl %ecx, %ecx
     xorl %edx, %edx
     mwait
@@ -417,13 +456,12 @@ gs_read_cpustate:
     movq %gs:0, %rax
     ret
 
-
 .global thread_save_and_switch_to
 thread_save_and_switch_to:
-    mov %rsp, (%rdi)         // old.rsp = current RSP
-    mov 40(%rsi), %rax       // new.stackTop
-    mov %rax, %gs:8          // CpuState.kernelRSP = new.stackTop
-    mov (%rsi), %rsp         // rsp = new.rsp
+    mov %rsp, (%rdi)
+    mov 40(%rsi), %rax
+    mov %rax, %gs:8
+    mov (%rsi), %rsp
     ret
 
 .global thread_load_and_switch_to
@@ -435,26 +473,8 @@ thread_load_and_switch_to:
 
 .global thread_start_idle_loop
 thread_start_idle_loop:
-    movq %gs:64, %rsp
-    movq %gs:64, %rax
-    movq %rax, %gs:24
+    movq %gs:8, %rsp     
+    movq %gs:8, %rax      
+    movq %gs:24, %rcx    
+    movq %rax, (%rcx)    
     jmp idle_loop
-
-.global trampoline_start
-trampoline_start:
-    movq patch_cr3(%rip), %rax
-    movq %rax, %cr3
-    movq patch_stack(%rip), %rsp
-    jmp *patch_entry(%rip)
-
-.align 8
-.global patch_cr3
-patch_cr3:   .quad 0
-.global patch_stack
-patch_stack: .quad 0
-.global patch_entry
-patch_entry: .quad 0
-
-.global trampoline_end
-trampoline_end:
-    nop

@@ -39,13 +39,22 @@ McfgEntry :: struct #packed {
 
 // Walk the XSDT and return the first table matching sig, or nil
 find_table :: proc(rsdp: ^Rsdp, sig: [4]u8) -> ^Header {
-	xsdt := (^Header)(uintptr(rsdp.xsdtAddr))
-	numEntries := (xsdt.length - u32(size_of(Header))) / 8
-	// entries[] starts immediately after the XSDT header
-	entries := ([^]u64)(intrinsics.ptr_offset((^u8)(rawptr(xsdt)), size_of(Header)))
-	for i in 0 ..< numEntries {
-		hdr := (^Header)(uintptr(entries[i]))
-		if hdr.signature == sig do return hdr
+	if rsdp.revision >= 2 {
+		xsdt := (^Header)(uintptr(rsdp.xsdtAddr))
+		numEntries := (xsdt.length - u32(size_of(Header))) / 8
+		entries := ([^]u64)(intrinsics.ptr_offset((^u8)(rawptr(xsdt)), size_of(Header)))
+		for i in 0 ..< numEntries {
+			hdr := (^Header)(uintptr(entries[i]))
+			if hdr.signature == sig do return hdr
+		}
+	} else {
+		rsdt := (^Header)(uintptr(rsdp.rsdtAddr))
+		numEntries := (rsdt.length - u32(size_of(Header))) / 4
+		entries := ([^]u32)(intrinsics.ptr_offset((^u8)(rawptr(rsdt)), size_of(Header)))
+		for i in 0 ..< numEntries {
+			hdr := (^Header)(uintptr(entries[i]))
+			if hdr.signature == sig do return hdr
+		}
 	}
 	return nil
 }

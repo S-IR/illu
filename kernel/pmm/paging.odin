@@ -30,62 +30,45 @@ paging_init :: proc(
 	memoryMapDescSize: u64,
 ) {
 	enable_nxe()
-	kernelPML4 = pmm_alloc_zeroed_page()
+	// APs load CR3 before long mode is fully established, so the top-level page
+	// table must live below 4 GiB.
+	kernelPML4 = pmm_alloc_zeroed_page_below(u64(4) * u64(mem.Gigabyte))
+	print.kensure(kernelPML4 != 0, "paging_init: no page below 4 GiB for kernel PML4")
+	print.kensure(kernelPML4 < u64(4) * u64(mem.Gigabyte), "paging_init: kernel PML4 above 4 GiB")
 
-	entryCount := memoryMapSize / memoryMapDescSize
-	desc_at :: #force_inline proc(
-		m: [^]uefi.EFI_MEMORY_DESCRIPTOR,
-		s: u64,
-		i: u64,
-	) -> ^uefi.EFI_MEMORY_DESCRIPTOR {
-		return (^uefi.EFI_MEMORY_DESCRIPTOR)(uintptr(rawptr(m)) + uintptr(i * s))
-	}
-	usable :: #force_inline proc(t: uefi.EFI_MEMORY_TYPE) -> bool {
-		return t == .ConventionalMemory || t == .LoaderCode || t == .LoaderData
-	}
-
-	for i in u64(0) ..< entryCount {
-		desc := desc_at(memoryMap, memoryMapDescSize, i)
-		if !usable(desc.Type) || desc.PhysicalStart == 0 do continue
-		phys := desc.PhysicalStart
-		end := phys + desc.NumberOfPages * shared.PAGE_SIZE
-		for phys < end {
-			map_page(kernelPML4, phys, ._4KB, PAGE_RW)
-			phys += shared.PAGE_SIZE
-		}
+	for p in u64(1) ..< state.totalPages {
+		map_page(kernelPML4, p * shared.PAGE_SIZE, ._4KB, PAGE_RW)
 	}
 
 	for seg in kernelImg.segments {
 		flags := PageFlags{.Present, .NX}
-		if .W in seg.perms {flags += {.Write}}
-		if .X in seg.perms {flags -= {.NX}}
+		if .W in seg.perms do flags += {.Write}
+		if .X in seg.perms do flags -= {.NX}
 		phys := addr_round_down_to_page(seg.base)
 		end := addr_round_up_to_page(seg.end)
-		for phys < end {map_page(kernelPML4, phys, ._4KB, flags); phys += shared.PAGE_SIZE}
+		for phys < end {
+			map_page(kernelPML4, phys, ._4KB, flags); phys += shared.PAGE_SIZE
+		}
 	}
-
-	ah.write_cr3(kernelPML4)
 
 	GB := u64(mem.Gigabyte)
 	MB2 := u64(2 * mem.Megabyte)
-	for i in u64(0) ..< entryCount {
-		desc := desc_at(memoryMap, memoryMapDescSize, i)
-		if !usable(desc.Type) || desc.PhysicalStart == 0 do continue
-		phys := desc.PhysicalStart
-		end := phys + desc.NumberOfPages * shared.PAGE_SIZE
-		for phys < end {
-			if cpuid_has_1gb_pages() &&
-			   phys % GB == 0 &&
-			   end - phys >= GB &&
-			   block_is_free(phys, GB) {
-				map_page(kernelPML4, phys, ._1GB, PAGE_RW); phys += GB; continue
-			}
-			if phys % MB2 == 0 && end - phys >= MB2 && block_is_free(phys, MB2) {
-				map_page(kernelPML4, phys, ._2MB, PAGE_RW); phys += MB2; continue
-			}
-			phys += shared.PAGE_SIZE
+	for p in u64(1) ..< state.totalPages {
+		phys := p * shared.PAGE_SIZE
+		if phys % MB2 == 0 &&
+		   state.totalPages - p >= MB2 / shared.PAGE_SIZE &&
+		   block_is_free(phys, MB2) {
+			map_page(kernelPML4, phys, ._2MB, PAGE_RW)
+		}
+		if cpuid_has_1gb_pages() &&
+		   phys % GB == 0 &&
+		   state.totalPages - p >= GB / shared.PAGE_SIZE &&
+		   block_is_free(phys, GB) {
+			map_page(kernelPML4, phys, ._1GB, PAGE_RW)
 		}
 	}
+	map_page(kernelPML4, trampolinePhys, ._4KB, {.Present, .Write})
+	ah.write_cr3(kernelPML4)
 }
 cpuid_has_1gb_pages :: proc() -> bool {
 	r: ah.CPUIDResult
@@ -166,6 +149,21 @@ ENTRY_ADDR_MASK :: u64(0x000F_FFFF_FFFF_F000)
 
 pmm_alloc_zeroed_page :: proc() -> u64 {
 	for i in u64(0) ..< state.totalPages {
+		if !is_used(&state, i) {
+			kset(&state, i)
+			phys := i * shared.PAGE_SIZE
+			mem.zero(rawptr(uintptr(phys)), shared.PAGE_SIZE)
+			return phys
+		}
+	}
+
+	return 0
+}
+
+pmm_alloc_zeroed_page_below :: proc(limitPhys: u64) -> u64 {
+	limitPage := limitPhys / shared.PAGE_SIZE
+	if limitPage > state.totalPages do limitPage = state.totalPages
+	for i in u64(0) ..< limitPage {
 		if !is_used(&state, i) {
 			kset(&state, i)
 			phys := i * shared.PAGE_SIZE

@@ -27,6 +27,7 @@ test_pmm :: proc(t: ^testing.T) {
 	state.totalPages = TEST_PAGES_COUNT
 	for i in 0 ..< bitmapWords do state.bitmap[i] = max(u64)
 	for pg in u64(1) ..< TEST_PAGES_COUNT do kclear(&state, pg)
+
 	buddy_init()
 
 	oom := pmm_alloc(TEST_PAGES_COUNT * shared.PAGE_SIZE * 2)
