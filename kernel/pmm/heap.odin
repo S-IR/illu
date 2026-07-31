@@ -31,7 +31,7 @@ heap_proc :: proc(
 		if size == 0 do return nil, nil
 		pages := pages_for_alloc(u64(size))
 
-		addr := pmm_alloc(pages * shared.PAGE_SIZE)
+		addr := palloc(pages * shared.PAGE_SIZE)
 		if addr == 0 do return nil, .Out_Of_Memory
 		p := rawptr(uintptr(addr))
 
@@ -41,7 +41,7 @@ heap_proc :: proc(
 	case .Free:
 		if old == nil do return nil, nil
 		pages := pages_for_alloc(u64(old_size))
-		pmm_free(u64(uintptr(old)), pages * shared.PAGE_SIZE)
+		pfree(u64(uintptr(old)), pages * shared.PAGE_SIZE)
 		return nil, nil
 	case .Resize, .Resize_Non_Zeroed:
 		if old == nil do return heap_proc(nil, .Alloc, size, 0, nil, 0, {})

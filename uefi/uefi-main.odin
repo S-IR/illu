@@ -52,12 +52,12 @@ import "../lib/elf"
 import "../lib/shared"
 import "core:slice"
 KernelParams :: struct #all_or_none {
-	fb:                shared.FrameBuffer,
-	rsdp:              ^acpi.Rsdp,
-	memoryMap:         [^]EFI_MEMORY_DESCRIPTOR,
-	memoryMapSize:     u64,
-	memoryMapDescSize: u64,
-	kernelImg:         elf.Image,
+	fb:                 shared.FrameBuffer,
+	rsdp:               ^acpi.Rsdp,
+	memoryMap:          [^]EFI_MEMORY_DESCRIPTOR,
+	memoryMapSize:      u64,
+	memoryMapDescSize:  u64,
+	kernelImg, adamImg: elf.Image,
 }
 
 
@@ -126,11 +126,14 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 	kernelImg, kernelOk := load_elf(
 		root,
 		&kernelName[0],
-		systemTable.BootServices,
 		systemTable,
 		shared.KERNEL_PHYSICAL_MEM_LOCATION,
 	)
 	if !kernelOk do boot_fail(systemTable, &errKernel[0])
+
+	adamName := [?]u16{'a', 'd', 'a', 'm', '.', 'e', 'l', 'f', 0}
+	adamImg, adamOk := load_elf(root, &adamName[0], systemTable, -1)
+	if !adamOk do boot_fail(systemTable, &errAdam[0])
 
 
 	rsdp: ^acpi.Rsdp = nil
@@ -203,6 +206,7 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 		memoryMapSize = u64(mmapSize),
 		memoryMapDescSize = u64(descSize),
 		kernelImg = kernelImg,
+		adamImg = adamImg,
 	}
 	KernelEntry :: #type proc "sysv" (params: ^KernelParams)
 

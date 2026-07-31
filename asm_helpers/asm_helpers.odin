@@ -10,10 +10,11 @@ PIT_CMD_PORT :: u16(0x43)
 PIT_CH2_PORT :: u16(0x42)
 PIT_CH2_GATE :: u16(0x61)
 
-
+KERNEL_DS :: 0x10
 when !ODIN_TEST {
 	@(default_calling_convention = "c")
 	foreign _ {
+		user_thread_entry :: proc() ---
 		int3me :: proc() ---
 		kernel_start_setup :: proc() ---
 		halt :: proc() -> ! ---
@@ -37,7 +38,7 @@ when !ODIN_TEST {
 		rdmsr_asm :: proc(msr: u32) -> u64 ---
 
 		rdtsc_asm :: proc() -> u64 ---
-		apic_stub_table: [5]uintptr
+		apic_stub_table: [6]uintptr
 
 		outb :: proc(port: u16, val: u8) ---
 		inb :: proc(port: u16) -> u8 ---
@@ -45,7 +46,7 @@ when !ODIN_TEST {
 		sti_asm :: proc() ---
 		enable_write_protect_kernel :: proc() ---
 		read_rsp :: proc() -> u64 ---
-		idle_loop :: proc() -> u64 ---
+
 
 	}
 
@@ -84,7 +85,7 @@ when !ODIN_TEST {
 	rdmsr_asm :: proc "contextless" (msr: u32) -> u64 {return 0}
 
 	rdtsc_asm :: proc "contextless" () -> u64 {return 0}
-	apic_stub_table: [5]uintptr
+	apic_stub_table: [6]uintptr
 
 	outb :: proc "contextless" (port: u16, val: u8) {}
 	inb :: proc "contextless" (port: u16) -> u8 {return 0}

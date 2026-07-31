@@ -5,7 +5,6 @@ import "core:mem"
 load_elf :: proc "contextless" (
 	root: ^EFI_FILE_PROTOCOL,
 	name: [^]u16,
-	bs: ^EFI_BOOT_SERVICES,
 	systemTable: ^EFI_SYSTEM_TABLE,
 	//-1 means pie
 	desiredPhysicalAddr: int = -1,
@@ -64,15 +63,14 @@ load_elf :: proc "contextless" (
 
 	allocBase := minVaddr &~ (shared.PAGE_SIZE - 1)
 	pages := (maxVaddr - allocBase + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
-
 	physBase: u64 = 42
 	if desiredPhysicalAddr == -1 {
 		efiAddr: EFI_PHYSICAL_ADDRESS
-		if bs.AllocatePages(.AllocateAnyPages, .LoaderData, pages, &efiAddr) != .SUCCESS do return {}, false
+		if systemTable.BootServices.AllocatePages(.AllocateAnyPages, .LoaderData, pages, &efiAddr) != .SUCCESS do return {}, false
 		physBase = u64(efiAddr) - allocBase
 	} else {
 		efiAddr := EFI_PHYSICAL_ADDRESS(desiredPhysicalAddr)
-		if bs.AllocatePages(.AllocateAddress, .LoaderData, pages, &efiAddr) != .SUCCESS do return {}, false
+		if systemTable.BootServices.AllocatePages(.AllocateAddress, .LoaderData, pages, &efiAddr) != .SUCCESS do return {}, false
 		physBase = u64(efiAddr) - allocBase
 	}
 	for ph in foundPhdrs {

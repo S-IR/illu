@@ -36,6 +36,7 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 		memoryMapSize = params.memoryMapSize,
 		memoryMapDescSize = params.memoryMapDescSize,
 		kernelImg = params.kernelImg,
+		adamImg = params.adamImg,
 	)
 
 	context.allocator = pmm.heap_allocator()
@@ -48,6 +49,8 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	gKernelCtx = context
 
 	sched_init(params.rsdp)
+	adam_init(params.adamImg)
+
 
 	sched_start()
 }

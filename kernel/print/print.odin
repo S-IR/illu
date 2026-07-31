@@ -27,7 +27,7 @@ when !ODIN_TEST {
 		}
 	}
 
-	serial_write_u64 :: proc(value: u64) {
+	serial_write_u64 :: proc "contextless" (value: u64) {
 		spinlock.lock(&serialLock)
 		defer spinlock.unlock(&serialLock)
 		if value == 0 {

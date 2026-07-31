@@ -23,6 +23,7 @@ PAGE_R :: PageFlags{.Present, .User, .NX}
 PAGE_MMIO :: PageFlags{.Present, .Write, .PWT, .PCD}
 
 kernelPML4: u64
+
 paging_init :: proc(
 	kernelImg: elf.Image,
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
@@ -173,6 +174,7 @@ pmm_alloc_zeroed_page_below :: proc(limitPhys: u64) -> u64 {
 	}
 	return 0
 }
+
 enable_nxe :: proc() {
 	EFER_MSR :: u32(0xC0000080)
 	val := ah.rdmsr_asm(EFER_MSR)

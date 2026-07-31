@@ -49,7 +49,7 @@ lapic_init :: proc() {
 	idt_set_entry(VECTOR_APIC_THERMAL, u64(ah.apic_stub_table[2]))
 	idt_set_entry(VECTOR_APIC_LINT0, u64(ah.apic_stub_table[3]))
 	idt_set_entry(VECTOR_APIC_LINT1, u64(ah.apic_stub_table[4]))
-
+	idt_set_entry(VECTOR_APIC_IPI, u64(ah.apic_stub_table[5]))
 	// ─── TSC calibration using your existing pit_delay_us ───
 
 	calibrationMs := u64(10)
@@ -119,7 +119,7 @@ lapic_send_eoi :: #force_inline proc() {
 	ah.wrmsr_asm(X2APIC_MSR_EOI, 0)
 }
 
-lapic_set_deadline :: #force_inline proc(tsc_ticks: u64) {
+lapic_set_deadline :: #force_inline proc "contextless" (tsc_ticks: u64) {
 	IA32_TSC_DEADLINE_MSR :: u32(0x6E0)
 	ah.wrmsr_asm(IA32_TSC_DEADLINE_MSR, ah.rdtsc_asm() + tsc_ticks)
 }

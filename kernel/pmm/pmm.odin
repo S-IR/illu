@@ -23,7 +23,7 @@ men_init :: proc(
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize: u64,
 	memoryMapDescSize: u64,
-	kernelImg: elf.Image,
+	kernelImg, adamImg: elf.Image,
 ) {
 
 	assert(memoryMapDescSize != 0, "mem_init: zero descriptor size")
@@ -108,15 +108,17 @@ men_init :: proc(
 	}
 
 
-	kernelStartPage := kernelImg.base / shared.PAGE_SIZE
-	kernelEndPage := pages_needed(kernelImg.end) // number of pages, exclusive
-
 	kernelStart := kernelImg.base / shared.PAGE_SIZE
 	kernelEnd := pages_needed(kernelImg.end)
 	for pg in kernelStart ..< kernelEnd {
 		kset(&state, pg)
 	}
 
+	adamStart := adamImg.base / shared.PAGE_SIZE
+	adamEnd := pages_needed(adamImg.end)
+	for pg in adamStart ..< adamEnd {
+		kset(&state, pg)
+	}
 
 	TRAMPOLINE_LOW_LIMIT: u64 : shared.PAGE_SIZE
 	TRAMPOLINE_HIGH_LIMIT: u64 : mem.Megabyte
@@ -193,15 +195,21 @@ order_for :: proc(n: u64) -> (order: u8 = 0) {
 	}
 	return order
 }
-pmm_alloc :: proc(bytes: u64) -> u64 {
+palloc :: proc(sizeInBytes: u64) -> u64 {
 	spinlock.lock(&state.lock)
 	defer spinlock.unlock(&state.lock)
 
-	pages := pages_needed(bytes)
+	pages := pages_needed(sizeInBytes)
 	order := order_for(pages)
 	return buddy_alloc(order)
 }
-pmm_free :: proc(addr: u64, bytes: u64) {
+palloc_zeroed :: proc(bytes: u64) -> u64 {
+	addr := palloc(bytes)
+	mem.zero(rawptr(uintptr(addr)), int(bytes))
+	return addr
+}
+
+pfree :: proc(addr: u64, bytes: u64) {
 	spinlock.lock(&state.lock)
 	defer spinlock.unlock(&state.lock)
 

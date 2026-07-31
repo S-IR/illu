@@ -214,6 +214,8 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 		print.serial_writeln("lapic: lint0 fired")
 	case VECTOR_APIC_LINT1:
 		print.serial_writeln("lapic: lint1 fired")
+	case VECTOR_APIC_IPI:
+		return
 	case:
 		print.serial_write("lapic: unhandled irq=")
 		print.serial_write_hex(u64(v))

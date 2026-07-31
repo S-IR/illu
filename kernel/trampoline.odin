@@ -63,7 +63,7 @@ tsc_delay_us :: proc(us: u64) {
 	for ah.rdtsc_asm() < target {}
 }
 
-send_init_sipi :: proc(apicId: u8, trampolinePhys: u64) {
+send_init_sipi :: proc(apicId: u32, trampolinePhys: u64) {
 	X2APIC_MSR_ICR :: 0x830
 	INIT_ASSERT :: 0xC500
 	INIT_DEASSERT :: 0x8500

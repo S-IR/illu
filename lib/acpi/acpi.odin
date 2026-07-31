@@ -8,14 +8,12 @@ Rsdp :: struct #packed {
 	oemId:       [6]u8,
 	revision:    u8,
 	rsdtAddr:    u32,
-	// ACPI 2.0+ fields
 	length:      u32,
-	xsdtAddr:    u64, // physical address of XSDT — use this, not rsdtAddr
+	xsdtAddr:    u64,
 	extChecksum: u8,
 	reserved:    [3]u8,
 }
 
-// Every ACPI table starts with this 36-byte header
 Header :: struct #packed {
 	signature:       [4]u8,
 	length:          u32,
@@ -28,7 +26,6 @@ Header :: struct #packed {
 	creatorRevision: u32,
 }
 
-// One entry in the MCFG table — one per PCI segment group
 McfgEntry :: struct #packed {
 	baseAddr:     u64,
 	segmentGroup: u16,
@@ -37,7 +34,6 @@ McfgEntry :: struct #packed {
 	reserved:     u32,
 }
 
-// Walk the XSDT and return the first table matching sig, or nil
 find_table :: proc(rsdp: ^Rsdp, sig: [4]u8) -> ^Header {
 	if rsdp.revision >= 2 {
 		xsdt := (^Header)(uintptr(rsdp.xsdtAddr))
@@ -59,11 +55,9 @@ find_table :: proc(rsdp: ^Rsdp, sig: [4]u8) -> ^Header {
 	return nil
 }
 
-// Return the ECAM base address for segment group 0 from the MCFG table
 ecam_base :: proc(rsdp: ^Rsdp) -> u64 {
 	hdr := find_table(rsdp, {'M', 'C', 'F', 'G'})
 	if hdr == nil do return 0
-	// MCFG body: 8 bytes reserved, then McfgEntry array
 	entry := (^McfgEntry)(
 		intrinsics.ptr_offset(intrinsics.ptr_offset((^u8)(rawptr(hdr)), size_of(Header)), 8),
 	)
@@ -84,24 +78,48 @@ MadtLocalApic :: struct #packed {
 	apicId:          u8,
 	flags:           u32,
 }
-collect_ap_ids :: proc(rsdp: ^Rsdp, bspId: u8, out: []u8) -> (count: int = 0) {
+
+MadtLocalX2Apic :: struct #packed {
+	type:     u8,
+	length:   u8,
+	reserved: u16,
+	x2ApicId: u32,
+	flags:    u32,
+	acpiUid:  u32,
+}
+
+collect_ap_ids :: proc(rsdp: ^Rsdp, bspId: u32, out: []u32) -> (count: int = 0) {
 	madt := cast(^MadtHeader)find_table(rsdp, {'A', 'P', 'I', 'C'})
 	if madt == nil do return 0
-
 
 	body := uintptr(rawptr(madt)) + size_of(MadtHeader)
 	end := uintptr(rawptr(madt)) + uintptr(madt.length)
 
+	PROCESSOR_LOCAL_APIC :: 0
+	PROCESSOR_LOCAL_X2APIC :: 9
+
 	for body < end {
 		recType := (^u8)(body)^
 		recLen := (^u8)(body + 1)^
-		PROCESSOR_LOCAL_APIC :: 0
-		if recType == PROCESSOR_LOCAL_APIC {
+
+		switch recType {
+		case PROCESSOR_LOCAL_APIC:
 			rec := cast(^MadtLocalApic)body
 			enabled := (rec.flags & 1) != 0 || (rec.flags & 2) != 0
-			if enabled && rec.apicId != bspId {
+			id := u32(rec.apicId)
+			if enabled && id != bspId {
 				if out != nil && count < len(out) {
-					out[count] = rec.apicId
+					out[count] = id
+				}
+				count += 1
+			}
+		case PROCESSOR_LOCAL_X2APIC:
+			rec := cast(^MadtLocalX2Apic)body
+			enabled := (rec.flags & 1) != 0 || (rec.flags & 2) != 0
+			id := rec.x2ApicId
+			if enabled && id != bspId {
+				if out != nil && count < len(out) {
+					out[count] = id
 				}
 				count += 1
 			}

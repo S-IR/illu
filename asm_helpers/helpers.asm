@@ -361,7 +361,7 @@ cpuid_asm:
 .section .data
 .global apic_stub_table
 apic_stub_table:
-    .quad irq240, irq241, irq242, irq243, irq244
+    .quad irq240, irq241, irq242, irq243, irq244, irq245
 
 .section .text
 IRQ_STUB 240
@@ -369,6 +369,7 @@ IRQ_STUB 241
 IRQ_STUB 242
 IRQ_STUB 243
 IRQ_STUB 244
+IRQ_STUB 245
 
 .global rdtsc_asm
 rdtsc_asm:
@@ -439,7 +440,10 @@ syscall_entry:
 
 .global idle_loop
 idle_loop:
-    leaq -8(%rsp), %rax
+    sti
+    call domain_pick_and_enter
+    cli
+    lea %gs:41, %rax
     movl $0, %ecx
     movl $0, %edx
     monitor
@@ -491,3 +495,10 @@ enter_userspace:
     push $0x2B                // CS: UserCode64 selector (GDT index 5, 5<<3=0x28) | RPL3 (0x28|3)
     push %rdi                 // RIP = user entry point passed in by caller
     iretq                     // pops RIP,CS,RFLAGS,RSP,SS — CS.RPL=3 triggers the ring0->ring3 switch
+
+.global user_thread_entry
+user_thread_entry:
+    popq %rdi
+    popq %rsi
+    call enter_userspace
+    hlt
