@@ -26,6 +26,7 @@ when !ODIN_TEST {
 }
 
 execution_run :: proc "contextless" (domain: ^ProtectionDomain, state: ^SavedState) {
+
 	ah.write_cr3(domain.pml4)
 	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
 	run_domain(state)
@@ -78,9 +79,11 @@ rrCpuNext: uint = 0
 run_next_execution :: proc "c" () -> bool {
 	// context = runtime.default_context()
 	cpu := gs_read_cpustate()
-
+	print.serial_write("hello i am here")
 	print.kassert(cpu != nil, "rn: cpu nil")
 	print.kassert(cpu.self == cpu, "rn: cpu self corrupt")
+
+	print.serial_write("hello i am here 2")
 
 	if cpu.rrCurrent == nil {
 		exec := execution_dequeue(cpu)
@@ -97,8 +100,13 @@ run_next_execution :: proc "c" () -> bool {
 	print.kassert(exec.state.cs == 0x2B, "rn: bad cs")
 	print.kassert(exec.state.ss == 0x23, "rn: bad ss")
 	print.kassert(exec.state.rsp % 16 == 0, "rn: rsp unaligned")
+	print.serial_write("hello i am here 3")
+
 
 	execution_run(exec.domain, &exec.state)
+
+	print.serial_write("hello i am here 4")
+
 	return true
 }
 @(export)
