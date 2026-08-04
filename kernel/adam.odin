@@ -6,25 +6,66 @@ import "base:intrinsics"
 import "core:mem"
 import "pmm"
 import "print"
+ADAM_STACK_SIZE :: 16 * mem.Kilobyte
+
 adam_init :: proc(adamImg: elf.Image) {
-
 	assert((adamImg.end - adamImg.base) > 0)
-	regions, mErr := make([]MemRegion, len(adamImg.segments))
-	print.kensure(mErr == nil, "adam_init: process_spawn failed")
 
-	for seg, i in adamImg.segments {
+	print.serial_write("adam: starting init \n")
+
+	newPML4 := pmm.pmm_alloc_zeroed_page()
+	print.kensure(newPML4 != 0, "adam_init: pml4 alloc failed")
+	pmm.pml4_deep_copy(newPML4, pmm.kernelPML4, true)
+
+	for seg in adamImg.segments {
 		flags := pmm.PageFlags{.Present, .User, .NX}
 		if .X in seg.perms do flags -= {.NX}
 		if .W in seg.perms do flags += {.Write}
 
-		regions[i] = MemRegion {
-			phys  = pmm.addr_round_down_to_page(seg.base),
-			size  = pmm.addr_round_up_to_page(seg.end) - pmm.addr_round_down_to_page(seg.base),
-			flags = flags,
+		phys := pmm.addr_round_down_to_page(seg.base)
+		end := pmm.addr_round_up_to_page(seg.end)
+		for phys < end {
+			pmm.map_page(newPML4, phys, ._4KB, flags)
+			phys += shared.PAGE_SIZE
 		}
 	}
 
-	_, err := process_spawn(adamImg.entry, regions)
-	print.kensure(err == nil, "adam_init: process_spawn failed")
+	stackPhys := pmm.palloc_zeroed(ADAM_STACK_SIZE + shared.PAGE_SIZE)
+	print.kensure(stackPhys != 0, "adam_init: stack alloc failed")
+
+	pmm.map_page(newPML4, stackPhys, ._4KB, {})
+
+	usableStart := stackPhys + shared.PAGE_SIZE
+	stackTop := usableStart + ADAM_STACK_SIZE
+	assert(stackTop % 16 == 0)
+	for p := usableStart; p < stackTop; p += shared.PAGE_SIZE {
+		pmm.map_page(newPML4, p, ._4KB, {.Present, .User, .Write, .NX})
+	}
+
+	domain, dErr := new(ProtectionDomain)
+	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")
+	domain^ = ProtectionDomain {
+		pml4 = newPML4,
+	}
+	append(
+		&domain.allocs,
+		Alloc{phys = adamImg.base, pages = pmm.pages_needed(adamImg.end - adamImg.base)},
+	)
+	append(
+		&domain.allocs,
+		Alloc{phys = stackPhys, pages = (ADAM_STACK_SIZE + shared.PAGE_SIZE) / shared.PAGE_SIZE},
+	)
+
+	execMem, eErr := mem.alloc(size_of(Execution), 16)
+	print.kensure(eErr == nil, "adam_init: Execution alloc failed")
+
+	exec := cast(^Execution)execMem
+	exec.domain = domain
+	exec.state = saved_state_fresh(adamImg.entry, stackTop)
+
+	idx := u32(intrinsics.atomic_add(&rrCpuNext, 1)) % u32(len(cpus))
+	execution_enqueue(exec, &cpus[idx])
+
+	print.serial_write("adam: began execution \n")
 
 }

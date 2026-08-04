@@ -9,6 +9,7 @@ BUILD_DIR :: "build-dir"
 
 BUILD_BOOTLOADER :: #config(BUILD_BOOTLOADER, true)
 BUILD_KERNEL :: #config(BUILD_KERNEL, true)
+BUILD_ADAM :: #config(BUILD_ADAM, true)
 
 main :: proc() {
 	os.remove_all(BUILD_DIR)
@@ -16,6 +17,8 @@ main :: proc() {
 
 	when BUILD_BOOTLOADER do build_bootloader()
 	when BUILD_KERNEL do build_kernel()
+	when BUILD_ADAM do build_adam()
+
 }
 
 build_bootloader :: proc() {
@@ -47,7 +50,47 @@ build_bootloader :: proc() {
 	for o in objs do append(&linkCmd, o)
 	exec(linkCmd[:])
 }
+build_adam :: proc() {
+	os.make_directory_all("diskimg")
 
+	adamDir, _ := filepath.join({BUILD_DIR, "adam"})
+	os.make_directory_all(adamDir)
+
+	asmOut, _ := filepath.join({adamDir, "syscall_exit.o"})
+	exec(
+		[]string {
+			"clang",
+			"-target",
+			"x86_64-unknown-none-elf",
+			"-c",
+			"lib/syscalls/syscalls.asm",
+			"-o",
+			asmOut,
+		},
+	)
+	objOut, _ := filepath.join({adamDir, "adam.o"})
+	odin_build(
+		"adam",
+		objOut,
+		{
+			"-reloc-mode:static",
+			"-vet-shadowing",
+			"-target:freestanding_amd64_sysv",
+			"-no-entry-point",
+			"-no-crt",
+			"-build-mode:obj",
+		},
+	)
+
+	objs := collect_objs(adamDir)
+	adamOut, _ := filepath.join({"diskimg", "adam.elf"})
+
+	linkCmd := make([dynamic]string, context.temp_allocator)
+	append(&linkCmd, "ld.lld", "--entry=_start", "-o", adamOut)
+	for o in objs do append(&linkCmd, o)
+	exec(linkCmd[:])
+
+}
 build_kernel :: proc() {
 	os.make_directory_all("diskimg")
 

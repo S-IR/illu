@@ -123,7 +123,7 @@ lapic_set_deadline :: #force_inline proc "contextless" (tsc_ticks: u64) {
 	IA32_TSC_DEADLINE_MSR :: u32(0x6E0)
 	ah.wrmsr_asm(IA32_TSC_DEADLINE_MSR, ah.rdtsc_asm() + tsc_ticks)
 }
-send_ipi :: proc(apicId: u32, vector: u8) {
+send_ipi :: proc "contextless" (apicId: u32, vector: u8) {
 	icr := (u64(apicId) << 32 | u64(vector))
 	X2APIC_MSR_ICR :: 0x830
 	ah.wrmsr_asm(X2APIC_MSR_ICR, icr)

@@ -3,7 +3,7 @@ package print
 import ah "../../asm_helpers"
 import "base:runtime"
 
-kassert :: proc(
+kassert :: proc "contextless" (
 	condition: bool,
 	message := #caller_expression(condition),
 	loc := #caller_location,

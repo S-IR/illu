@@ -121,11 +121,15 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		irq_handler(frame)
 		return
 	}
-	when ODIN_DEBUG {
-		if frame.interruptNumber == 3 {
-			print.serial_writeln("int3 caught")
-			return
-		}
+	userMode := (frame.cs & 3) == 3
+	if userMode {
+		name := exceptionNames[frame.interruptNumber]
+		print.serial_write("domain fault: ")
+		print.serial_write(name)
+		print.serial_write(" at rip=")
+		print.serial_write_hex(frame.rip)
+		print.serial_writeln("")
+		exec_kill_current()
 	}
 
 	name := exceptionNames[frame.interruptNumber]
@@ -221,4 +225,34 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 		print.serial_write_hex(u64(v))
 		print.serial_writeln("")
 	}
+}
+timer_tick :: proc(frame: ^InterruptFrame) {
+	cpu := gs_read_cpustate()
+	exec := cpu.rrCurrent
+	if exec != nil && cpu.schedulerResumeRsp != 0 {
+		s := &exec.state
+		s.rax = frame.rax; s.rbx = frame.rbx; s.rcx = frame.rcx; s.rdx = frame.rdx
+		s.rsi = frame.rsi; s.rdi = frame.rdi; s.rbp = frame.rbp
+		s.r8 = frame.r8; s.r9 = frame.r9; s.r10 = frame.r10; s.r11 = frame.r11
+		s.r12 = frame.r12; s.r13 = frame.r13; s.r14 = frame.r14; s.r15 = frame.r15
+		s.rip = frame.rip; s.cs = frame.cs; s.rflags = frame.rflags
+		s.rsp = frame.rsp; s.ss = frame.ss
+		fxsave_asm(&s.fxsave)
+		s.valid = true
+		run_abort(cpu.schedulerResumeRsp)
+	}
+	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
+}
+
+//should not return
+exec_kill_current :: proc() {
+	cpu := gs_read_cpustate()
+	exec := cpu.rrCurrent
+	if exec == nil do return
+
+	cpu.rrCurrent = nil
+	domain_destroy(exec.domain)
+	free(exec)
+	run_abort(cpu.schedulerResumeRsp)
+
 }

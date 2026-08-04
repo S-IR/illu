@@ -44,7 +44,6 @@ when !ODIN_TEST {
 		inb :: proc(port: u16) -> u8 ---
 
 		sti_asm :: proc() ---
-		enable_write_protect_kernel :: proc() ---
 		read_rsp :: proc() -> u64 ---
 
 

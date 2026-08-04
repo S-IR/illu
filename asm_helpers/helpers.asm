@@ -43,11 +43,11 @@ protected:
     mov (0x8000 + patch_cr3 - trampoline_start), %eax
     mov %eax, %cr3
     mov %cr4, %eax
-    or $0x620, %eax        // PAE | OSFXSR | OSXMMEXCPT (was 0x20)
+    or $0x620, %eax        // PAE | OSFXSR | OSXMMEXCPT
     mov %eax, %cr4
     mov $0xC0000080, %ecx
     rdmsr
-    or $0x900, %eax        // LME | NXE (was 0x100) - must match BSP's enable_nxe()
+    or $0x900, %eax        // LME | NXE
     wrmsr
     mov %cr0, %eax
     or $0x80000000, %eax
@@ -397,12 +397,7 @@ sti_asm:
     sti
     ret
 
-.global enable_write_protect_kernel
-enable_write_protect_kernel:
-    mov %cr0, %rax
-    or $0x10000, %rax
-    mov %rax, %cr0
-    ret
+
 
 .global read_rsp
 read_rsp:
@@ -416,6 +411,11 @@ gs_write_base:
     shrq $32, %rdi
     movl %edi, %edx
     wrmsr
+    ret
+
+.global gs_read_cpustate
+gs_read_cpustate:
+    movq %gs:0, %rax
     ret
 
 .global syscall_entry
@@ -438,67 +438,85 @@ syscall_entry:
     swapgs
     sysretq
 
-.global idle_loop
-idle_loop:
+
+.global cpu_idle_loop
+cpu_idle_loop:
     sti
-    call domain_pick_and_enter
+    call run_next_execution
     cli
-    lea %gs:41, %rax
-    movl $0, %ecx
-    movl $0, %edx
-    monitor
-    movzbq %gs:40, %rax
-    xorl %ecx, %ecx
-    xorl %edx, %edx
-    mwait
-    jmp idle_loop
+    test %al, %al
+    jnz cpu_idle_loop           
+    call cpu_prepare_sleep      
+    test %al, %al
+    jz cpu_idle_loop             
+    sti
+    hlt                         
+    call cpu_clear_sleeping
+    jmp cpu_idle_loop
 
-.global gs_read_cpustate
-gs_read_cpustate:
-    movq %gs:0, %rax
+
+.equ SS_RAX,0
+.equ SS_RBX,8
+.equ SS_RCX,16
+.equ SS_RDX,24
+.equ SS_RSI,32
+.equ SS_RDI,40
+.equ SS_RBP,48
+.equ SS_R8,56
+.equ SS_R9,64
+.equ SS_R10,72
+.equ SS_R11,80
+.equ SS_R12,88
+.equ SS_R13,96
+.equ SS_R14,104
+.equ SS_R15,112
+.equ SS_RIP,120
+.equ SS_CS,128
+.equ SS_RFLAGS,136
+.equ SS_RSP,144
+.equ SS_SS,152
+.equ SS_FXSAVE,160
+
+.equ CPU_SCHEDRESUME,32
+
+.global fxsave_asm
+fxsave_asm:
+    fxsave (%rdi)
     ret
 
-.global thread_save_and_switch_to
-thread_save_and_switch_to:
-    mov %rsp, (%rdi)
-    mov 40(%rsi), %rax
-    mov %rax, %gs:8
-    mov (%rsi), %rsp
+.global run_domain
+run_domain:
+    mov %rsp, %gs:CPU_SCHEDRESUME
+    swapgs
+
+    mov %rdi, %rbx
+    lea SS_FXSAVE(%rbx), %rax
+    fxrstor (%rax)
+
+    push SS_SS(%rbx)
+    push SS_RSP(%rbx)
+    push SS_RFLAGS(%rbx)
+    push SS_CS(%rbx)
+    push SS_RIP(%rbx)
+
+    mov SS_RAX(%rbx), %rax
+    mov SS_RCX(%rbx), %rcx
+    mov SS_RDX(%rbx), %rdx
+    mov SS_RSI(%rbx), %rsi
+    mov SS_RDI(%rbx), %rdi
+    mov SS_RBP(%rbx), %rbp
+    mov SS_R8(%rbx),  %r8
+    mov SS_R9(%rbx),  %r9
+    mov SS_R10(%rbx), %r10
+    mov SS_R11(%rbx), %r11
+    mov SS_R12(%rbx), %r12
+    mov SS_R13(%rbx), %r13
+    mov SS_R14(%rbx), %r14
+    mov SS_R15(%rbx), %r15
+    mov SS_RBX(%rbx), %rbx
+    iretq
+
+.global run_abort
+run_abort:
+    mov %rdi, %rsp
     ret
-
-.global thread_load_and_switch_to
-thread_load_and_switch_to:
-    mov 40(%rdi), %rax
-    mov %rax, %gs:8
-    mov (%rdi), %rsp
-    ret
-
-.global thread_start_idle_loop
-thread_start_idle_loop:
-    movq %gs:8, %rsp     
-    movq %gs:8, %rax      
-    movq %gs:24, %rcx    
-    movq %rax, (%rcx)    
-    jmp idle_loop
-
-.global enter_userspace
-enter_userspace:
-    // rdi = target user rip (arg1), rsi = target user rsp (arg2) — SysV ABI
-    swapgs                  // stash kernel CpuState ptr (GS_BASE) into KERNEL_GS_BASE,
-                              // mirrors the swapgs pair already used in syscall_entry
-    push $0x23               // SS: UserData selector (GDT index 4, 4<<3=0x20) | RPL3 (0x20|3)
-    push %rsi                 // RSP = user stack top passed in by caller
-    pushfq
-    pop %rax
-    or $0x200, %rax           // force IF (bit 9) on — user thread must run with interrupts enabled
-    push %rax                 // RFLAGS for the target context
-    push $0x2B                // CS: UserCode64 selector (GDT index 5, 5<<3=0x28) | RPL3 (0x28|3)
-    push %rdi                 // RIP = user entry point passed in by caller
-    iretq                     // pops RIP,CS,RFLAGS,RSP,SS — CS.RPL=3 triggers the ring0->ring3 switch
-
-.global user_thread_entry
-user_thread_entry:
-    popq %rdi
-    popq %rsi
-    call enter_userspace
-    hlt

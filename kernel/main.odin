@@ -16,7 +16,7 @@ BOOT_TLS_SIZE :: 4096
 tempArena: mem.Arena
 gBootTls: [BOOT_TLS_SIZE]u8
 
-rootGDT: GDT
+gdtBeforeSched: GDT
 gBootTlsEnd: u64
 @(export)
 kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
@@ -27,7 +27,8 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	print.serial_writeln("illu kernel alive!")
 
 
-	gdt_tss_init(&rootGDT)
+	gdt_tss_fill(&gdtBeforeSched)
+	gdt_tss_load(&gdtBeforeSched)
 
 	idt_init()
 	lapic_init()
@@ -36,7 +37,7 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 		memoryMapSize = params.memoryMapSize,
 		memoryMapDescSize = params.memoryMapDescSize,
 		kernelImg = params.kernelImg,
-		adamImg = params.adamImg,
+		adamImg = &params.adamImg,
 	)
 
 	context.allocator = pmm.heap_allocator()
@@ -51,6 +52,5 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	sched_init(params.rsdp)
 	adam_init(params.adamImg)
 
-
-	sched_start()
+	cpu_idle_loop()
 }

@@ -23,7 +23,8 @@ men_init :: proc(
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize: u64,
 	memoryMapDescSize: u64,
-	kernelImg, adamImg: elf.Image,
+	kernelImg: elf.Image,
+	adamImg: ^elf.Image,
 ) {
 
 	assert(memoryMapDescSize != 0, "mem_init: zero descriptor size")
@@ -141,6 +142,24 @@ men_init :: proc(
 
 	order := order_for(mmapPages)
 	buddy_free(mmapBase, order)
+
+	adamSize := adamImg.end - adamImg.base
+	newAdamBase := palloc_zeroed(pages_needed(adamSize) * shared.PAGE_SIZE)
+	print.kensure(newAdamBase != 0, "pmm: failed adam reallocation")
+	mem.copy(rawptr(uintptr(newAdamBase)), rawptr(uintptr(adamImg.base)), int(adamSize))
+
+	delta := newAdamBase - adamImg.base
+	adamImg.entry += delta
+	adamImg.base = newAdamBase
+	adamImg.end = newAdamBase + adamSize
+
+	for &seg in adamImg.segments {
+		seg.base += delta
+		seg.end += delta
+	}
+	for pg in adamStart ..< adamEnd {
+		kclear(&state, pg)
+	}
 	print.serial_writeln("pmm: loaded")
 
 }

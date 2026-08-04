@@ -23,7 +23,6 @@ when !ODIN_TEST {
 	patch_stack: u64
 	patch_entry: u64
 	patch_cpu: u64
-	patch_ready: u64
 }
 
 install_trampoline :: proc(dsyPhys: rawptr, cr3, stack, entry, cpu: u64) {
@@ -79,7 +78,9 @@ send_init_sipi :: proc(apicId: u32, trampolinePhys: u64) {
 	ah.wrmsr_asm(X2APIC_MSR_ICR, (u64(apicId) << 32) | INIT_ASSERT)
 	tsc_delay_us(10_000)
 	ah.wrmsr_asm(X2APIC_MSR_ICR, (u64(apicId) << 32) | INIT_DEASSERT)
-	tsc_delay_us(200) // 200 µs
+	tsc_delay_us(200)
+	ah.wrmsr_asm(X2APIC_MSR_ICR, (u64(apicId) << 32) | sipiCmd)
+	tsc_delay_us(200)
 	ah.wrmsr_asm(X2APIC_MSR_ICR, (u64(apicId) << 32) | sipiCmd)
 	tsc_delay_us(200)
 }

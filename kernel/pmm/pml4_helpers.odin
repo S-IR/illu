@@ -28,10 +28,10 @@ copy_pdpt :: proc(pml4e: u64, removeUserBit: bool) -> u64 {
 
 	for i in 0 ..< 512 {
 		entry := src[i]
-		flags := transmute(PageFlags)entry
-		if .Present not_in flags do continue
+		ptFlags := transmute(PageFlags)entry
+		if .Present not_in ptFlags do continue
 
-		if .PS in flags {
+		if .PS in ptFlags {
 			dst[i] = maybe_strip_user(entry, removeUserBit)
 		} else {
 			dst[i] = copy_pd(entry, removeUserBit)
@@ -51,10 +51,10 @@ copy_pd :: proc(pdpte: u64, removeUserBit: bool) -> u64 {
 
 	for i in 0 ..< 512 {
 		entry := src[i]
-		flags := transmute(PageFlags)entry
-		if .Present not_in flags do continue
+		pdFlags := transmute(PageFlags)entry
+		if .Present not_in pdFlags do continue
 
-		if .PS in flags {
+		if .PS in pdFlags {
 			dst[i] = maybe_strip_user(entry, removeUserBit)
 		} else {
 			dst[i] = copy_pt(entry, removeUserBit)
@@ -74,8 +74,8 @@ copy_pt :: proc(pde: u64, removeUserBit: bool) -> u64 {
 
 	for i in 0 ..< 512 {
 		entry := src[i]
-		flags := transmute(PageFlags)entry
-		if .Present not_in flags do continue
+		physFlags := transmute(PageFlags)entry
+		if .Present not_in physFlags do continue
 		dst[i] = maybe_strip_user(entry, removeUserBit)
 	}
 	return newPtPhys | transmute(u64)(PageFlags{.Present, .Write})

@@ -60,7 +60,8 @@ GDT :: struct {
 @(link_name = "_kernel_stack_top")
 _kernel_stack_top: u8
 
-gdt_tss_init :: proc "contextless" (g: ^GDT) {
+gdt_tss_fill :: proc "contextless" (g: ^GDT) {
+	// everything in gdt_tss_init EXCEPT the three asm calls at the end
 	make_flat_descriptor :: proc "contextless" (access: GdtAccess, flags: GdtFlags) -> u64 {
 		e: GdtEntry
 		e.limitLow = 0xFFFF
@@ -69,7 +70,6 @@ gdt_tss_init :: proc "contextless" (g: ^GDT) {
 		e.flags = transmute(u8)flags
 		return transmute(u64)e
 	}
-
 
 	tssBase := u64(uintptr(&g.tss))
 	tssLimit := u64(size_of(TSS) - 1)
@@ -84,11 +84,9 @@ gdt_tss_init :: proc "contextless" (g: ^GDT) {
 		exec = true,
 		accessed = true,
 	}
-
 	tss.limitHigh = u8(tssLimit >> 16)
 	tss.flags = 0
 	tss.baseHigh = u8(tssBase >> 24)
-
 
 	g.entries = {
 		.NullDesc   = 0,
@@ -118,15 +116,11 @@ gdt_tss_init :: proc "contextless" (g: ^GDT) {
 
 	g.desc.base = u64(uintptr(&g.entries))
 	g.desc.limit = u16(size_of(g.entries) - 1)
+}
 
+gdt_tss_load :: proc "contextless" (g: ^GDT) {
 	ah.lgdt_asm(&g.desc)
 	ah.reload_segments_asm()
-
-	//1:10 PMClaude responded: SDM Vol 3A §3.SDM Vol 3A §3.4.2 "Segment Selectors":
-	// Bits 15:3 = index into descriptor table, bits 2 = TI (0=GDT, 1=LDT), bits 1:0 = RPL.
 	TSS_SEL :: u16(GDTEntryNames.Tss1) << 3
 	ah.load_tss_asm(TSS_SEL)
-
-	// print.serial_writeln("gdt: loaded")
-
 }
