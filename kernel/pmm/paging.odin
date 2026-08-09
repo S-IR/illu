@@ -99,9 +99,35 @@ PT_SHIFT_PT :: u64(12)
 PT_INDEX_MASK :: u64(0x1FF)
 ADDR_MASK :: u64(0x000F_FFFF_FFFF_F000)
 
+split_1gb :: proc(pdpt: [^]u64, idx: u64) {
+	existing := transmute(PageFlags)pdpt[idx]
+	if .Present not_in existing || .PS not_in existing do return
+	oldPhys := pdpt[idx] & ENTRY_ADDR_MASK
+	oldFlags := existing - {.PS}
+	newTable := pmm_alloc_zeroed_page()
+	pt := ([^]u64)(uintptr(newTable))
+	for i in u64(0) ..< 512 {
+		pt[i] = (oldPhys + i * u64(2 * mem.Megabyte)) | transmute(u64)(oldFlags + {.Present, .PS})
+	}
+	pdpt[idx] = newTable | transmute(u64)(PageFlags{.Present, .Write})
+}
+
+split_2mb :: proc(pd: [^]u64, idx: u64) {
+	existing := transmute(PageFlags)pd[idx]
+	if .Present not_in existing || .PS not_in existing do return
+	oldPhys := pd[idx] & ENTRY_ADDR_MASK
+	oldFlags := existing - {.PS}
+	newTable := pmm_alloc_zeroed_page()
+	pt := ([^]u64)(uintptr(newTable))
+	for i in u64(0) ..< 512 {
+		pt[i] = (oldPhys + i * shared.PAGE_SIZE) | transmute(u64)(oldFlags + {.Present})
+	}
+	pd[idx] = newTable | transmute(u64)(PageFlags{.Present, .Write})
+}
+
 map_page :: proc(pml4Idx: u64, phys: u64, size: PageSize, flags: PageFlags) {
 	assert(phys % shared.PAGE_SIZE == 0)
-
+	user := .User in flags
 	pml4eIdx := (phys >> PT_SHIFT_PML4) & PT_INDEX_MASK
 	pdpteIdx := (phys >> PT_SHIFT_PDPT) & PT_INDEX_MASK
 	pdeIdx := (phys >> PT_SHIFT_PD) & PT_INDEX_MASK
@@ -110,39 +136,33 @@ map_page :: proc(pml4Idx: u64, phys: u64, size: PageSize, flags: PageFlags) {
 	pml4 := ([^]u64)(uintptr(pml4Idx))
 
 	if size == ._1GB {
-		if .Present not_in transmute(PageFlags)pml4[pml4eIdx] {
-			pml4[pml4eIdx] = pmm_alloc_zeroed_page() | transmute(u64)(PageFlags{.Present, .Write})
-		}
-		pdpt := ([^]u64)(uintptr(pml4[pml4eIdx] & ENTRY_ADDR_MASK))
+		pdpt := ensure_table(pml4, pml4eIdx, user)
 		pdpt[pdpteIdx] = phys | transmute(u64)(flags + {.Present, .PS})
 		return
 	}
 
-	pdpt := ensure_table(pml4, pml4eIdx)
+	pdpt := ensure_table(pml4, pml4eIdx, user)
+	split_1gb(pdpt, pdpteIdx)
 
 	if size == ._2MB {
-		if .Present not_in transmute(PageFlags)pdpt[pdpteIdx] {
-			pdpt[pdpteIdx] = pmm_alloc_zeroed_page() | transmute(u64)(PageFlags{.Present, .Write})
-		}
-		pd := ([^]u64)(uintptr(pdpt[pdpteIdx] & ENTRY_ADDR_MASK))
-
-		existing := transmute(PageFlags)pd[pdeIdx]
-		if .Present in existing && .PS not_in existing {
-			return
-		}
-
+		pd := ensure_table(pdpt, pdpteIdx, user)
+		split_2mb(pd, pdeIdx)
 		pd[pdeIdx] = phys | transmute(u64)(flags + {.Present, .PS})
 		return
 	}
 
-	pd := ensure_table(pdpt, pdpteIdx)
-	pt := ensure_table(pd, pdeIdx)
+	pd := ensure_table(pdpt, pdpteIdx, user)
+	split_2mb(pd, pdeIdx)
+	pt := ensure_table(pd, pdeIdx, user)
 	pt[pteIdx] = phys | transmute(u64)(flags + {.Present})
 }
 
-ensure_table :: #force_inline proc(parent: [^]u64, index: u64) -> [^]u64 {
+ensure_table :: #force_inline proc(parent: [^]u64, index: u64, user := false) -> [^]u64 {
 	if .Present not_in transmute(PageFlags)parent[index] {
 		parent[index] = pmm_alloc_zeroed_page() | transmute(u64)(PageFlags{.Present, .Write})
+	}
+	if user {
+		parent[index] |= transmute(u64)(PageFlags{.User})
 	}
 	return ([^]u64)(uintptr(parent[index] & ENTRY_ADDR_MASK))
 }

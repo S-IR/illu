@@ -423,6 +423,8 @@ syscall_entry:
     swapgs
     mov %rsp, %gs:16
     mov %gs:8, %rsp
+    call syscall_enter_kernel
+    push %rax
     push %rcx
     push %r11
     mov %r8,  %r9
@@ -434,6 +436,11 @@ syscall_entry:
     call syscall_dispatch
     pop %r11
     pop %rcx
+    pop %rdx
+    push %rax
+    mov %rdx, %rdi
+    call syscall_restore_domain
+    pop %rax
     mov %gs:16, %rsp
     swapgs
     sysretq

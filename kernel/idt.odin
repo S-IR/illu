@@ -1,6 +1,7 @@
 package kernel
 import ah "../asm_helpers"
 import "base:runtime"
+import "pmm"
 import "print"
 // SDM Vol 3A §6.14.1 Figure 6-8: 16-byte 64-bit IDT gate descriptor layout.
 // selector must be KERNEL_CS (0x08). ist=0 → use TSS.RSP0; ist=1..7 → use TSS.IST[ist-1].
@@ -116,18 +117,27 @@ InterruptFrame :: struct #packed {
 
 @(export)
 exception_handler :: proc "c" (frame: ^InterruptFrame) {
+	userMode := (frame.cs & 3) == 3
+	if userMode {
+		ah.write_cr3(pmm.kernelPML4)
+	}
+
 	context = gKernelCtx
 	if frame.interruptNumber >= 32 {
 		irq_handler(frame)
+		if userMode do restore_current_domain_cr3()
 		return
 	}
-	userMode := (frame.cs & 3) == 3
 	if userMode {
 		name := exceptionNames[frame.interruptNumber]
 		print.serial_write("domain fault: ")
 		print.serial_write(name)
 		print.serial_write(" at rip=")
 		print.serial_write_hex(frame.rip)
+		print.serial_write(" cr2=")
+		print.serial_write_hex(ah.read_cr2())
+		print.serial_write(" err=")
+		print.serial_write_hex(frame.error_code)
 		print.serial_writeln("")
 		exec_kill_current()
 	}

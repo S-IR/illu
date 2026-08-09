@@ -82,6 +82,8 @@ sched_init :: proc(rsdp: ^acpi.Rsdp) {
 
 	ah.lgdt_asm(&gdts[0].desc)
 	ah.reload_segments_asm()
+	TSS_SEL :: u16(GDTEntryNames.Tss1) << 3
+	ah.load_tss_asm(TSS_SEL)
 
 	cpus, aErr = make([]CpuState, totalCores)
 	print.kensure(aErr == nil, "OOM sched_init: cpus")

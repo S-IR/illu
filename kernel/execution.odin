@@ -31,6 +31,36 @@ execution_run :: proc "contextless" (domain: ^ProtectionDomain, state: ^SavedSta
 	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
 	run_domain(state)
 }
+
+// Syscalls arrive with the domain CR3 still loaded.  Keep the transition in
+// one kernel-side entry point so the assembly boundary does not need to know
+// about scheduler/domain state.
+@(export)
+syscall_enter_kernel :: proc "c" () -> u64 {
+	cpu := gs_read_cpustate()
+	print.kassert(cpu != nil, "syscall_enter_kernel: cpu nil")
+	exec := cpu.rrCurrent
+	print.kassert(exec != nil, "syscall_enter_kernel: no execution")
+	print.kassert(exec.domain != nil, "syscall_enter_kernel: no domain")
+
+	domainPML4 := exec.domain.pml4
+	ah.write_cr3(pmm.kernelPML4)
+	return domainPML4
+}
+
+@(export)
+syscall_restore_domain :: proc "c" (domainPML4: u64) {
+	print.kassert(domainPML4 != 0, "syscall_restore_domain: zero pml4")
+	ah.write_cr3(domainPML4)
+}
+
+restore_current_domain_cr3 :: proc "contextless" () {
+	cpu := gs_read_cpustate()
+	if cpu == nil || cpu.rrCurrent == nil do return
+	if cpu.rrCurrent.domain == nil do return
+	ah.write_cr3(cpu.rrCurrent.domain.pml4)
+}
+
 execution_enqueue :: proc "contextless" (e: ^Execution, cpu: ^CpuState) {
 
 	{
@@ -79,11 +109,9 @@ rrCpuNext: uint = 0
 run_next_execution :: proc "c" () -> bool {
 	// context = runtime.default_context()
 	cpu := gs_read_cpustate()
-	print.serial_write("hello i am here")
 	print.kassert(cpu != nil, "rn: cpu nil")
 	print.kassert(cpu.self == cpu, "rn: cpu self corrupt")
 
-	print.serial_write("hello i am here 2")
 
 	if cpu.rrCurrent == nil {
 		exec := execution_dequeue(cpu)
@@ -100,12 +128,10 @@ run_next_execution :: proc "c" () -> bool {
 	print.kassert(exec.state.cs == 0x2B, "rn: bad cs")
 	print.kassert(exec.state.ss == 0x23, "rn: bad ss")
 	print.kassert(exec.state.rsp % 16 == 0, "rn: rsp unaligned")
-	print.serial_write("hello i am here 3")
 
 
 	execution_run(exec.domain, &exec.state)
 
-	print.serial_write("hello i am here 4")
 
 	return true
 }
@@ -126,6 +152,11 @@ cpu_clear_sleeping :: proc "c" () {
 	cpu.sleeping = false
 }
 domain_destroy :: proc(domain: ^ProtectionDomain) {
+	// Syscalls enter the kernel without changing CR3.  The domain maps its
+	// image with its ELF permissions, so allocator cleanup must use the kernel
+	// identity map before writing buddy-list metadata into freed pages.
+	ah.write_cr3(pmm.kernelPML4)
+
 	for a in domain.allocs {
 		pmm.pfree(a.phys, a.pages * shared.PAGE_SIZE)
 	}

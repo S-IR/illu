@@ -18,6 +18,18 @@ adam_init :: proc(adamImg: elf.Image) {
 	pmm.pml4_deep_copy(newPML4, pmm.kernelPML4, true)
 
 	for seg in adamImg.segments {
+		print.serial_write("seg perms: ")
+		if .R in seg.perms do print.serial_write("R")
+		if .W in seg.perms do print.serial_write("W")
+		if .X in seg.perms do print.serial_write("X")
+		print.serial_writeln("")
+		print.serial_write("seg: base=")
+		print.serial_write_hex(seg.base)
+		print.serial_write(" end=")
+		print.serial_write_hex(seg.end)
+		print.serial_writeln("")
+
+
 		flags := pmm.PageFlags{.Present, .User, .NX}
 		if .X in seg.perms do flags -= {.NX}
 		if .W in seg.perms do flags += {.Write}
