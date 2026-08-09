@@ -87,7 +87,7 @@ buddy_free :: proc(addr: u64, order: u8) {
 		currPage = min(currPage, buddyPage)
 		currOrder += 1
 	}
-	list_add(order = currOrder, page = currPage) // correct
+	list_add(order = currOrder, page = currPage)
 
 }
 @(private)

@@ -30,19 +30,18 @@ when !ODIN_TEST {
 	serial_write_u64 :: proc "contextless" (value: u64) {
 		spinlock.lock(&serialLock)
 		defer spinlock.unlock(&serialLock)
-		if value == 0 {
-			ah.serial_write_byte_asm('0')
-			return
-		}
-		buf: [20]u8
-		n := 0
+		divisor: u64 = 1_000_000_000_000_000_000
 		v := value
-		for v > 0 {
-			buf[n] = u8('0') + u8(v % 10)
-			n += 1
-			v /= 10
+		started := false
+		for divisor > 0 {
+			digit := v / divisor
+			v %= divisor
+			if digit != 0 || started || divisor == 1 {
+				ah.serial_write_byte_asm(u8('0') + u8(digit))
+				started = true
+			}
+			divisor /= 10
 		}
-		for i := n - 1; i >= 0; i -= 1 do ah.serial_write_byte_asm(buf[i])
 	}
 
 	serial_writeln :: proc "contextless" (s: string) {

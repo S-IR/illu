@@ -52,40 +52,8 @@ paging_init :: proc(
 		}
 	}
 
-	GB := u64(mem.Gigabyte)
-	MB2 := u64(2 * mem.Megabyte)
-	for p in u64(1) ..< state.totalPages {
-		phys := p * shared.PAGE_SIZE
-		if phys % MB2 == 0 &&
-		   state.totalPages - p >= MB2 / shared.PAGE_SIZE &&
-		   block_is_free(phys, MB2) {
-			map_page(kernelPML4, phys, ._2MB, PAGE_RW)
-		}
-		if cpuid_has_1gb_pages() &&
-		   phys % GB == 0 &&
-		   state.totalPages - p >= GB / shared.PAGE_SIZE &&
-		   block_is_free(phys, GB) {
-			map_page(kernelPML4, phys, ._1GB, PAGE_RW)
-		}
-	}
 	map_page(kernelPML4, trampolinePhys, ._4KB, {.Present, .Write})
 	ah.write_cr3(kernelPML4)
-}
-cpuid_has_1gb_pages :: proc() -> bool {
-	r: ah.CPUIDResult
-	ah.cpuid_asm(.EXTENDED_FEATURE_INFO, 0, &r)
-	return (r.edx >> 26) & 1 == 1
-}
-@(private)
-block_is_free :: proc(start: u64, size: u64) -> bool {
-	start_page := start / shared.PAGE_SIZE
-	end_page := (start + size) / shared.PAGE_SIZE
-	for p in start_page ..< end_page {
-		if p < state.totalPages && is_used(&state, p) {
-			return false
-		}
-	}
-	return true
 }
 PageSize :: enum {
 	_4KB,
@@ -99,34 +67,10 @@ PT_SHIFT_PT :: u64(12)
 PT_INDEX_MASK :: u64(0x1FF)
 ADDR_MASK :: u64(0x000F_FFFF_FFFF_F000)
 
-split_1gb :: proc(pdpt: [^]u64, idx: u64) {
-	existing := transmute(PageFlags)pdpt[idx]
-	if .Present not_in existing || .PS not_in existing do return
-	oldPhys := pdpt[idx] & ENTRY_ADDR_MASK
-	oldFlags := existing - {.PS}
-	newTable := pmm_alloc_zeroed_page()
-	pt := ([^]u64)(uintptr(newTable))
-	for i in u64(0) ..< 512 {
-		pt[i] = (oldPhys + i * u64(2 * mem.Megabyte)) | transmute(u64)(oldFlags + {.Present, .PS})
-	}
-	pdpt[idx] = newTable | transmute(u64)(PageFlags{.Present, .Write})
-}
-
-split_2mb :: proc(pd: [^]u64, idx: u64) {
-	existing := transmute(PageFlags)pd[idx]
-	if .Present not_in existing || .PS not_in existing do return
-	oldPhys := pd[idx] & ENTRY_ADDR_MASK
-	oldFlags := existing - {.PS}
-	newTable := pmm_alloc_zeroed_page()
-	pt := ([^]u64)(uintptr(newTable))
-	for i in u64(0) ..< 512 {
-		pt[i] = (oldPhys + i * shared.PAGE_SIZE) | transmute(u64)(oldFlags + {.Present})
-	}
-	pd[idx] = newTable | transmute(u64)(PageFlags{.Present, .Write})
-}
-
 map_page :: proc(pml4Idx: u64, phys: u64, size: PageSize, flags: PageFlags) {
 	assert(phys % shared.PAGE_SIZE == 0)
+	if size == ._2MB do assert(phys % u64(2 * mem.Megabyte) == 0)
+	if size == ._1GB do assert(phys % u64(mem.Gigabyte) == 0)
 	user := .User in flags
 	pml4eIdx := (phys >> PT_SHIFT_PML4) & PT_INDEX_MASK
 	pdpteIdx := (phys >> PT_SHIFT_PDPT) & PT_INDEX_MASK
@@ -137,27 +81,27 @@ map_page :: proc(pml4Idx: u64, phys: u64, size: PageSize, flags: PageFlags) {
 
 	if size == ._1GB {
 		pdpt := ensure_table(pml4, pml4eIdx, user)
+		assert(.Present not_in transmute(PageFlags)pdpt[pdpteIdx], "map_page: 1 GiB mapping conflicts")
 		pdpt[pdpteIdx] = phys | transmute(u64)(flags + {.Present, .PS})
 		return
 	}
 
 	pdpt := ensure_table(pml4, pml4eIdx, user)
-	split_1gb(pdpt, pdpteIdx)
 
 	if size == ._2MB {
 		pd := ensure_table(pdpt, pdpteIdx, user)
-		split_2mb(pd, pdeIdx)
+		assert(.Present not_in transmute(PageFlags)pd[pdeIdx], "map_page: 2 MiB mapping conflicts")
 		pd[pdeIdx] = phys | transmute(u64)(flags + {.Present, .PS})
 		return
 	}
 
 	pd := ensure_table(pdpt, pdpteIdx, user)
-	split_2mb(pd, pdeIdx)
 	pt := ensure_table(pd, pdeIdx, user)
 	pt[pteIdx] = phys | transmute(u64)(flags + {.Present})
 }
 
 ensure_table :: #force_inline proc(parent: [^]u64, index: u64, user := false) -> [^]u64 {
+	assert(.PS not_in transmute(PageFlags)parent[index], "ensure_table: large-page mapping conflicts")
 	if .Present not_in transmute(PageFlags)parent[index] {
 		parent[index] = pmm_alloc_zeroed_page() | transmute(u64)(PageFlags{.Present, .Write})
 	}

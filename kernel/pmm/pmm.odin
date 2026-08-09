@@ -170,9 +170,6 @@ kset :: #force_inline proc(p: ^PMM, i: u64) {
 }
 kclear :: #force_inline proc(p: ^PMM, i: u64) {
 	assert(i < p.totalPages, "pmm clear: page beyond bitmap")
-	if i == u64(0x1fb7e000) / shared.PAGE_SIZE {
-		print.serial_writeln("kclear on rsdp page!")
-	}
 	p.bitmap[i / 64] &= ~(u64(1) << (i % 64))
 }
 is_used :: #force_inline proc(p: ^PMM, i: u64) -> bool {

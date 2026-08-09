@@ -128,8 +128,6 @@ run_next_execution :: proc "c" () -> bool {
 	print.kassert(exec.state.cs == 0x2B, "rn: bad cs")
 	print.kassert(exec.state.ss == 0x23, "rn: bad ss")
 	print.kassert(exec.state.rsp % 16 == 0, "rn: rsp unaligned")
-
-
 	execution_run(exec.domain, &exec.state)
 
 
