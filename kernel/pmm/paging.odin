@@ -104,7 +104,9 @@ map_page :: proc(pml4Idx: u64, phys: u64, size: PageSize, flags: PageFlags) {
 ensure_table :: #force_inline proc(parent: [^]u64, index: u64, user := false) -> [^]u64 {
 	assert(.PS not_in transmute(PageFlags)parent[index], "ensure_table: large-page mapping conflicts")
 	if .Present not_in transmute(PageFlags)parent[index] {
-		parent[index] = pmm_alloc_zeroed_page() | transmute(u64)(PageFlags{.Present, .Write})
+		page := pmm_alloc_zeroed_page()
+		assert(page != 0, "ensure_table: out of page-table memory")
+		parent[index] = page | transmute(u64)(PageFlags{.Present, .Write})
 	}
 	if user {
 		parent[index] |= transmute(u64)(PageFlags{.User})

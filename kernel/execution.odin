@@ -33,11 +33,15 @@ execution_run :: proc "contextless" (domain: ^ProtectionDomain, state: ^SavedSta
 	run_domain(state)
 }
 
-// execution_create creates one runnable execution in a kernel-owned domain.
-// The execution count is used to prevent domain destruction while it runs.
 execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execution {
 	print.kassert(domain != nil, "execution_create: nil domain")
 	if domain == nil do return nil
+	print.kassert(domain.pml4 != 0, "execution_create: domain has no PML4")
+	print.kassert(state.rip != 0, "execution_create: zero entry RIP")
+	print.kassert(state.rsp != 0, "execution_create: zero entry RSP")
+	print.kassert(state.cs == 0x2B, "execution_create: bad code segment")
+	print.kassert(state.ss == 0x23, "execution_create: bad stack segment")
+	print.kassert(state.rsp % 16 == 0, "execution_create: unaligned entry stack")
 
 	spinlock.lock(&domain.executionLock)
 	defer spinlock.unlock(&domain.executionLock)
@@ -51,8 +55,6 @@ execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execu
 	return exec
 }
 
-// execution_release removes exactly one execution from the domain and frees
-// the execution object. The final execution also owns the domain teardown.
 execution_release :: proc(exec: ^Execution) {
 	print.kassert(exec != nil, "execution_release: nil execution")
 	if exec == nil do return
@@ -61,9 +63,8 @@ execution_release :: proc(exec: ^Execution) {
 	domain := exec.domain
 	print.kassert(domain != nil, "execution_release: nil domain")
 	if domain == nil do return
+	print.kassert(domain.pml4 != 0, "execution_release: domain PML4 already gone")
 
-	// Use CAS rather than an unconditional subtract: a stale/double release
-	// must not wrap the count and resurrect the domain's paging lifetime.
 	destroy_domain := false
 	{
 		spinlock.lock(&domain.executionLock)
@@ -94,6 +95,13 @@ restore_current_domain_cr3 :: proc "contextless" () {
 }
 
 execution_enqueue :: proc "contextless" (e: ^Execution, cpu: ^CpuState) {
+	print.kassert(e != nil, "execution_enqueue: nil execution")
+	print.kassert(cpu != nil, "execution_enqueue: nil CPU")
+	if e == nil || cpu == nil do return
+	print.kassert(e.domain != nil, "execution_enqueue: nil domain")
+	if e.domain == nil do return
+	print.kassert(intrinsics.atomic_load(&e.domain.executionCount) > 0,
+		"execution_enqueue: domain has no executions")
 
 	{
 		spinlock.lock(&cpu.rrLock)
@@ -187,18 +195,16 @@ domain_destroy :: proc(domain: ^ProtectionDomain) {
 	count := intrinsics.atomic_load(&domain.executionCount)
 	print.kassert(count == 0, "domain_destroy: executions still attached")
 	if count != 0 do return
+	print.kassert(domain.pml4 != 0, "domain_destroy: paging already destroyed")
+	print.kassert(domain.pml4 != pmm.kernelPML4, "domain_destroy: kernel PML4 passed")
 	defer free(domain)
 	defer delete(domain.allocs)
 
-	// Syscalls enter the kernel without changing CR3.  The domain maps its
-	// image with its ELF permissions, so allocator cleanup must use the kernel
-	// identity map before writing buddy-list metadata into freed pages.
 	ah.write_cr3(pmm.kernelPML4)
 
 	for a in domain.allocs {
 		pmm.pfree(a.phys, a.pages * shared.PAGE_SIZE)
 	}
-	print.kassert(domain.pml4 != 0, "domain_destroy: paging already destroyed")
 	pmm.pml4_destroy(domain.pml4)
 	domain.pml4 = 0
 }

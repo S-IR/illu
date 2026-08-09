@@ -424,16 +424,12 @@ syscall_entry:
     mov %rsp, %gs:16
     mov %gs:8, %rsp
 
-    // Keep the domain CR3 and switch to the kernel address space before
-    // touching kernel-only code or calling the Odin dispatcher.
     push %rax
     mov %cr3, %rax
     push %rax
     mov kernelPML4(%rip), %rax
     mov %rax, %cr3
 
-    // Save sysret state.  The syscall arguments remain in their hardware
-    // registers; syscall_dispatch uses the normal C register convention.
     push %rcx
     push %r11
     mov %r8,  %r9

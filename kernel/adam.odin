@@ -32,6 +32,10 @@ adam_init :: proc(adamImg: elf.Image) {
 
 	stackPhys := pmm.palloc_zeroed(ADAM_STACK_SIZE + shared.PAGE_SIZE)
 	print.kensure(stackPhys != 0, "adam_init: stack alloc failed")
+	if stackPhys == 0 {
+		pmm.pml4_destroy(newPML4)
+		return
+	}
 
 	pmm.map_page(newPML4, stackPhys, ._4KB, {})
 
@@ -44,6 +48,11 @@ adam_init :: proc(adamImg: elf.Image) {
 
 	domain, dErr := new(ProtectionDomain)
 	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")
+	if dErr != nil {
+		pmm.pfree(stackPhys, ADAM_STACK_SIZE + shared.PAGE_SIZE)
+		pmm.pml4_destroy(newPML4)
+		return
+	}
 	domain^ = ProtectionDomain {
 		pml4 = newPML4,
 	}

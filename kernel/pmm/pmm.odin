@@ -212,6 +212,7 @@ order_for :: proc(n: u64) -> (order: u8 = 0) {
 	return order
 }
 palloc :: proc(sizeInBytes: u64) -> u64 {
+	assert(sizeInBytes != 0, "palloc: zero-size allocation")
 	spinlock.lock(&state.lock)
 	defer spinlock.unlock(&state.lock)
 
@@ -221,11 +222,15 @@ palloc :: proc(sizeInBytes: u64) -> u64 {
 }
 palloc_zeroed :: proc(bytes: u64) -> u64 {
 	addr := palloc(bytes)
+	if addr == 0 do return 0
 	mem.zero(rawptr(uintptr(addr)), int(bytes))
 	return addr
 }
 
 pfree :: proc(addr: u64, bytes: u64) {
+	assert(addr != 0, "pfree: null physical address")
+	assert(addr % shared.PAGE_SIZE == 0, "pfree: unaligned physical address")
+	assert(bytes != 0, "pfree: zero-size allocation")
 	spinlock.lock(&state.lock)
 	defer spinlock.unlock(&state.lock)
 

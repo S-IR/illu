@@ -6,6 +6,8 @@ pml4_deep_copy :: proc(dstPML4Phys, srcPML4Phys: u64, removeUserBit := true) {
 	assert(srcPML4Phys != 0)
 	assert(dstPML4Phys != 0)
 	assert(dstPML4Phys != srcPML4Phys)
+	assert(srcPML4Phys % shared.PAGE_SIZE == 0)
+	assert(dstPML4Phys % shared.PAGE_SIZE == 0)
 
 	srcPML4 := ([^]u64)(uintptr(srcPML4Phys))
 	dstPML4 := ([^]u64)(uintptr(dstPML4Phys))
@@ -17,11 +19,10 @@ pml4_deep_copy :: proc(dstPML4Phys, srcPML4Phys: u64, removeUserBit := true) {
 	}
 }
 
-// pml4_destroy releases the page-table hierarchy owned by one protection
-// domain. It releases table pages only; entries pointing at mapped memory are
-// leaves and are owned by the caller's allocation ledger.
 pml4_destroy :: proc(pml4Phys: u64) {
 	assert(pml4Phys != 0)
+	assert(pml4Phys % shared.PAGE_SIZE == 0)
+	assert(pml4Phys != kernelPML4, "pml4_destroy: attempted kernel PML4 free")
 
 	pml4 := ([^]u64)(uintptr(pml4Phys))
 	for i in 0 ..< 512 {
@@ -35,7 +36,10 @@ pml4_destroy :: proc(pml4Phys: u64) {
 
 @(private)
 destroy_pdpt :: proc(pdpte: u64) {
+	assert(pdpte != 0)
+	assert(.PS not_in transmute(PageFlags)pdpte)
 	pdptPhys := pdpte & ENTRY_ADDR_MASK
+	assert(pdptPhys != 0)
 	pdpt := ([^]u64)(uintptr(pdptPhys))
 	for i in 0 ..< 512 {
 		entry := pdpt[i]
@@ -48,7 +52,10 @@ destroy_pdpt :: proc(pdpte: u64) {
 
 @(private)
 destroy_pd :: proc(pde: u64) {
+	assert(pde != 0)
+	assert(.PS not_in transmute(PageFlags)pde)
 	pdPhys := pde & ENTRY_ADDR_MASK
+	assert(pdPhys != 0)
 	pd := ([^]u64)(uintptr(pdPhys))
 	for i in 0 ..< 512 {
 		entry := pd[i]
@@ -61,7 +68,10 @@ destroy_pd :: proc(pde: u64) {
 
 @(private)
 destroy_pt :: proc(pte: u64) {
+	assert(pte != 0)
+	assert(.PS not_in transmute(PageFlags)pte)
 	ptPhys := pte & ENTRY_ADDR_MASK
+	assert(ptPhys != 0)
 	pfree(ptPhys, shared.PAGE_SIZE)
 }
 
@@ -71,6 +81,7 @@ copy_pdpt :: proc(pml4e: u64, removeUserBit: bool) -> u64 {
 	if .Present not_in flags do return 0
 
 	newPdptPhys := pmm_alloc_zeroed_page()
+	assert(newPdptPhys != 0, "copy_pdpt: out of page-table memory")
 	src := ([^]u64)(uintptr(pml4e & ENTRY_ADDR_MASK))
 	dst := ([^]u64)(uintptr(newPdptPhys))
 
@@ -94,6 +105,7 @@ copy_pd :: proc(pdpte: u64, removeUserBit: bool) -> u64 {
 	if .Present not_in flags do return 0
 
 	newPdPhys := pmm_alloc_zeroed_page()
+	assert(newPdPhys != 0, "copy_pd: out of page-table memory")
 	src := ([^]u64)(uintptr(pdpte & ENTRY_ADDR_MASK))
 	dst := ([^]u64)(uintptr(newPdPhys))
 
@@ -117,6 +129,7 @@ copy_pt :: proc(pde: u64, removeUserBit: bool) -> u64 {
 	if .Present not_in flags do return 0
 
 	newPtPhys := pmm_alloc_zeroed_page()
+	assert(newPtPhys != 0, "copy_pt: out of page-table memory")
 	src := ([^]u64)(uintptr(pde & ENTRY_ADDR_MASK))
 	dst := ([^]u64)(uintptr(newPtPhys))
 
