@@ -33,6 +33,7 @@ buddy_init :: proc() {
 		p = end
 
 	}
+	buddyInitialized = true
 }
 //max u64 is invalid
 buddy_alloc :: proc(order: u8) -> u64 {

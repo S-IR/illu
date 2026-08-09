@@ -116,6 +116,13 @@ ensure_table :: #force_inline proc(parent: [^]u64, index: u64, user := false) ->
 ENTRY_ADDR_MASK :: u64(0x000F_FFFF_FFFF_F000)
 
 pmm_alloc_zeroed_page :: proc() -> u64 {
+	if buddyInitialized do return palloc_zeroed(shared.PAGE_SIZE)
+	return early_alloc_zeroed_page()
+}
+
+
+@(private)
+early_alloc_zeroed_page :: proc() -> u64 {
 	for i in u64(0) ..< state.totalPages {
 		if !is_used(&state, i) {
 			kset(&state, i)
@@ -128,7 +135,9 @@ pmm_alloc_zeroed_page :: proc() -> u64 {
 	return 0
 }
 
+@(private)
 pmm_alloc_zeroed_page_below :: proc(limitPhys: u64) -> u64 {
+	assert(!buddyInitialized, "pmm_alloc_zeroed_page_below: allocator is already initialized")
 	limitPage := limitPhys / shared.PAGE_SIZE
 	if limitPage > state.totalPages do limitPage = state.totalPages
 	for i in u64(0) ..< limitPage {

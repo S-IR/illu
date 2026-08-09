@@ -17,6 +17,7 @@ when ODIN_TEST {
 	state: PMM
 
 }
+buddyInitialized: bool
 trampolinePhys: u64 = 0x8000
 
 men_init :: proc(
@@ -222,7 +223,8 @@ palloc :: proc(sizeInBytes: u64) -> u64 {
 }
 palloc_zeroed :: proc(bytes: u64) -> u64 {
 	addr := palloc(bytes)
-	if addr == 0 do return 0
+	if addr == 0 || addr == max(u64) do return 0
+	assert(addr % shared.PAGE_SIZE == 0, "palloc_zeroed: unaligned allocation")
 	mem.zero(rawptr(uintptr(addr)), int(bytes))
 	return addr
 }

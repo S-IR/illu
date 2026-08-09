@@ -65,26 +65,22 @@ execution_release :: proc(exec: ^Execution) {
 	if domain == nil do return
 	print.kassert(domain.pml4 != 0, "execution_release: domain PML4 already gone")
 
-	destroy_domain := false
-	{
-		spinlock.lock(&domain.executionLock)
-		defer spinlock.unlock(&domain.executionLock)
-
-		for {
-			count := intrinsics.atomic_load(&domain.executionCount)
-			print.kassert(count > 0, "execution_release: execution count underflow")
-			if count == 0 do return
-			if intrinsics.atomic_compare_exchange_strong(
-				&domain.executionCount,
-				count,
-				count - 1,
-			) == count {
-				destroy_domain = count == 1
-				break
-			}
-		}
+	spinlock.lock(&domain.executionLock)
+	count := intrinsics.atomic_load(&domain.executionCount)
+	print.kassert(count > 0, "execution_release: execution count underflow")
+	if count == 0 {
+		spinlock.unlock(&domain.executionLock)
+		return
 	}
-	if destroy_domain do domain_destroy(domain)
+	intrinsics.atomic_store(&domain.executionCount, count - 1)
+	if count != 1 {
+		spinlock.unlock(&domain.executionLock)
+		return
+	}
+
+	domain_reclaim_locked(domain)
+	spinlock.unlock(&domain.executionLock)
+	free(domain)
 }
 
 restore_current_domain_cr3 :: proc "contextless" () {
@@ -192,12 +188,25 @@ cpu_clear_sleeping :: proc "c" () {
 domain_destroy :: proc(domain: ^ProtectionDomain) {
 	print.kassert(domain != nil, "domain_destroy: nil domain")
 	if domain == nil do return
+	spinlock.lock(&domain.executionLock)
 	count := intrinsics.atomic_load(&domain.executionCount)
 	print.kassert(count == 0, "domain_destroy: executions still attached")
-	if count != 0 do return
+	if count != 0 {
+		spinlock.unlock(&domain.executionLock)
+		return
+	}
+	domain_reclaim_locked(domain)
+	spinlock.unlock(&domain.executionLock)
+	free(domain)
+}
+
+domain_reclaim_locked :: proc(domain: ^ProtectionDomain) {
+	print.kassert(domain != nil, "domain_reclaim_locked: nil domain")
+	if domain == nil do return
+	print.kassert(intrinsics.atomic_load(&domain.executionCount) == 0,
+		"domain_reclaim_locked: executions still attached")
 	print.kassert(domain.pml4 != 0, "domain_destroy: paging already destroyed")
 	print.kassert(domain.pml4 != pmm.kernelPML4, "domain_destroy: kernel PML4 passed")
-	defer free(domain)
 	defer delete(domain.allocs)
 
 	ah.write_cr3(pmm.kernelPML4)
