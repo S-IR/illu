@@ -32,28 +32,6 @@ execution_run :: proc "contextless" (domain: ^ProtectionDomain, state: ^SavedSta
 	run_domain(state)
 }
 
-// Syscalls arrive with the domain CR3 still loaded.  Keep the transition in
-// one kernel-side entry point so the assembly boundary does not need to know
-// about scheduler/domain state.
-@(export)
-syscall_enter_kernel :: proc "c" () -> u64 {
-	cpu := gs_read_cpustate()
-	print.kassert(cpu != nil, "syscall_enter_kernel: cpu nil")
-	exec := cpu.rrCurrent
-	print.kassert(exec != nil, "syscall_enter_kernel: no execution")
-	print.kassert(exec.domain != nil, "syscall_enter_kernel: no domain")
-
-	domainPML4 := exec.domain.pml4
-	ah.write_cr3(pmm.kernelPML4)
-	return domainPML4
-}
-
-@(export)
-syscall_restore_domain :: proc "c" (domainPML4: u64) {
-	print.kassert(domainPML4 != 0, "syscall_restore_domain: zero pml4")
-	ah.write_cr3(domainPML4)
-}
-
 restore_current_domain_cr3 :: proc "contextless" () {
 	cpu := gs_read_cpustate()
 	if cpu == nil || cpu.rrCurrent == nil do return

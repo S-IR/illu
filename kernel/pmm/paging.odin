@@ -22,6 +22,7 @@ PAGE_RW :: PageFlags{.Present, .User, .Write, .NX}
 PAGE_R :: PageFlags{.Present, .User, .NX}
 PAGE_MMIO :: PageFlags{.Present, .Write, .PWT, .PCD}
 
+@(export, link_name = "kernelPML4")
 kernelPML4: u64
 
 paging_init :: proc(
