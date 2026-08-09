@@ -17,6 +17,54 @@ pml4_deep_copy :: proc(dstPML4Phys, srcPML4Phys: u64, removeUserBit := true) {
 	}
 }
 
+// pml4_destroy releases the page-table hierarchy owned by one protection
+// domain. It releases table pages only; entries pointing at mapped memory are
+// leaves and are owned by the caller's allocation ledger.
+pml4_destroy :: proc(pml4Phys: u64) {
+	assert(pml4Phys != 0)
+
+	pml4 := ([^]u64)(uintptr(pml4Phys))
+	for i in 0 ..< 512 {
+		entry := pml4[i]
+		if .Present not_in transmute(PageFlags)entry do continue
+		assert(.PS not_in transmute(PageFlags)entry, "pml4_destroy: invalid PML4 large page")
+		destroy_pdpt(entry)
+	}
+	pfree(pml4Phys, shared.PAGE_SIZE)
+}
+
+@(private)
+destroy_pdpt :: proc(pdpte: u64) {
+	pdptPhys := pdpte & ENTRY_ADDR_MASK
+	pdpt := ([^]u64)(uintptr(pdptPhys))
+	for i in 0 ..< 512 {
+		entry := pdpt[i]
+		if .Present not_in transmute(PageFlags)entry do continue
+		if .PS in transmute(PageFlags)entry do continue
+		destroy_pd(entry)
+	}
+	pfree(pdptPhys, shared.PAGE_SIZE)
+}
+
+@(private)
+destroy_pd :: proc(pde: u64) {
+	pdPhys := pde & ENTRY_ADDR_MASK
+	pd := ([^]u64)(uintptr(pdPhys))
+	for i in 0 ..< 512 {
+		entry := pd[i]
+		if .Present not_in transmute(PageFlags)entry do continue
+		if .PS in transmute(PageFlags)entry do continue
+		destroy_pt(entry)
+	}
+	pfree(pdPhys, shared.PAGE_SIZE)
+}
+
+@(private)
+destroy_pt :: proc(pte: u64) {
+	ptPhys := pte & ENTRY_ADDR_MASK
+	pfree(ptPhys, shared.PAGE_SIZE)
+}
+
 @(private)
 copy_pdpt :: proc(pml4e: u64, removeUserBit: bool) -> u64 {
 	flags := transmute(PageFlags)pml4e

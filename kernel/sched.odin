@@ -20,8 +20,10 @@ Alloc :: struct {
 }
 
 ProtectionDomain :: struct {
-	pml4:   u64,
-	allocs: [dynamic]Alloc,
+	pml4:          u64,
+	executionCount: u64,
+	executionLock:  spinlock.Spinlock,
+	allocs:        [dynamic]Alloc,
 }
 
 CpuState :: struct {

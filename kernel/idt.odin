@@ -261,8 +261,7 @@ exec_kill_current :: proc() {
 	if exec == nil do return
 
 	cpu.rrCurrent = nil
-	domain_destroy(exec.domain)
-	free(exec)
+	execution_release(exec)
 	run_abort(cpu.schedulerResumeRsp)
 
 }

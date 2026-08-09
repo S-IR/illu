@@ -56,12 +56,12 @@ adam_init :: proc(adamImg: elf.Image) {
 		Alloc{phys = stackPhys, pages = (ADAM_STACK_SIZE + shared.PAGE_SIZE) / shared.PAGE_SIZE},
 	)
 
-	execMem, eErr := mem.alloc(size_of(Execution), 16)
-	print.kensure(eErr == nil, "adam_init: Execution alloc failed")
-
-	exec := cast(^Execution)execMem
-	exec.domain = domain
-	exec.state = saved_state_fresh(adamImg.entry, stackTop)
+	exec := execution_create(domain, saved_state_fresh(adamImg.entry, stackTop))
+	print.kensure(exec != nil, "adam_init: Execution alloc failed")
+	if exec == nil {
+		domain_destroy(domain)
+		return
+	}
 
 	idx := u32(intrinsics.atomic_add(&rrCpuNext, 1)) % u32(len(cpus))
 	execution_enqueue(exec, &cpus[idx])
