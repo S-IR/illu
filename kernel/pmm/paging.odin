@@ -115,11 +115,11 @@ ensure_table :: #force_inline proc(parent: [^]u64, index: u64, user := false) ->
 }
 ENTRY_ADDR_MASK :: u64(0x000F_FFFF_FFFF_F000)
 
+@(private)
 pmm_alloc_zeroed_page :: proc() -> u64 {
 	if buddyInitialized do return palloc_zeroed(shared.PAGE_SIZE)
 	return early_alloc_zeroed_page()
 }
-
 
 @(private)
 early_alloc_zeroed_page :: proc() -> u64 {

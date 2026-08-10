@@ -13,7 +13,7 @@ adam_init :: proc(adamImg: elf.Image) {
 
 	print.serial_write("adam: starting init \n")
 
-	newPML4 := pmm.pmm_alloc_zeroed_page()
+	newPML4 := pmm.alloc_zeroed(shared.PAGE_SIZE)
 	print.kensure(newPML4 != 0, "adam_init: pml4 alloc failed")
 	pmm.pml4_deep_copy(newPML4, pmm.kernelPML4, true)
 
@@ -30,7 +30,7 @@ adam_init :: proc(adamImg: elf.Image) {
 		}
 	}
 
-	stackPhys := pmm.palloc_zeroed(ADAM_STACK_SIZE + shared.PAGE_SIZE)
+	stackPhys := pmm.alloc_zeroed(ADAM_STACK_SIZE + shared.PAGE_SIZE)
 	print.kensure(stackPhys != 0, "adam_init: stack alloc failed")
 	if stackPhys == 0 {
 		pmm.pml4_destroy(newPML4)
@@ -49,7 +49,7 @@ adam_init :: proc(adamImg: elf.Image) {
 	domain, dErr := new(ProtectionDomain)
 	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")
 	if dErr != nil {
-		pmm.pfree(stackPhys, ADAM_STACK_SIZE + shared.PAGE_SIZE)
+		pmm.free_pages(stackPhys, ADAM_STACK_SIZE + shared.PAGE_SIZE)
 		pmm.pml4_destroy(newPML4)
 		return
 	}

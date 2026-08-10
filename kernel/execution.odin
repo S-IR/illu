@@ -212,7 +212,7 @@ domain_reclaim_locked :: proc(domain: ^ProtectionDomain) {
 	ah.write_cr3(pmm.kernelPML4)
 
 	for a in domain.allocs {
-		pmm.pfree(a.phys, a.pages * shared.PAGE_SIZE)
+		pmm.free_pages(a.phys, a.pages * shared.PAGE_SIZE)
 	}
 	pmm.pml4_destroy(domain.pml4)
 	domain.pml4 = 0

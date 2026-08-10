@@ -212,6 +212,7 @@ order_for :: proc(n: u64) -> (order: u8 = 0) {
 	}
 	return order
 }
+@(private)
 palloc :: proc(sizeInBytes: u64) -> u64 {
 	assert(sizeInBytes != 0, "palloc: zero-size allocation")
 	spinlock.lock(&state.lock)
@@ -221,6 +222,7 @@ palloc :: proc(sizeInBytes: u64) -> u64 {
 	order := order_for(pages)
 	return buddy_alloc(order)
 }
+@(private)
 palloc_zeroed :: proc(bytes: u64) -> u64 {
 	addr := palloc(bytes)
 	if addr == 0 || addr == max(u64) do return 0
@@ -229,6 +231,7 @@ palloc_zeroed :: proc(bytes: u64) -> u64 {
 	return addr
 }
 
+@(private)
 pfree :: proc(addr: u64, bytes: u64) {
 	assert(addr != 0, "pfree: null physical address")
 	assert(addr % shared.PAGE_SIZE == 0, "pfree: unaligned physical address")
@@ -239,6 +242,24 @@ pfree :: proc(addr: u64, bytes: u64) {
 	pages := pages_needed(bytes)
 	order := order_for(pages)
 	buddy_free(addr, order)
+}
+
+// Public physical-memory interface. Callers must not depend on the buddy
+// allocator or on the palloc implementation behind these procedures.
+alloc_pages :: proc(bytes: u64) -> u64 {
+	assert(buddyInitialized, "alloc_pages: buddy allocator is not initialized")
+	return palloc(bytes)
+}
+
+free_pages :: proc(addr, bytes: u64) {
+	assert(buddyInitialized, "free_pages: buddy allocator is not initialized")
+	pfree(addr, bytes)
+}
+
+alloc_zeroed :: proc(bytes: u64) -> u64 {
+	assert(bytes != 0, "alloc_zeroed: zero-size allocation")
+	assert(buddyInitialized, "alloc_zeroed: buddy allocator is not initialized")
+	return palloc_zeroed(bytes)
 }
 mmap_desc :: #force_inline proc(
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,

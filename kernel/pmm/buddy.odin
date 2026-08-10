@@ -13,6 +13,7 @@ when ODIN_TEST {
 	freeLists: [PMM_BUDDY_MAX_ORDER]FreeBlock
 }
 
+@(private)
 buddy_init :: proc() {
 	for i in 0 ..< PMM_BUDDY_MAX_ORDER {
 		freeLists[i].next = &freeLists[i]
@@ -36,6 +37,7 @@ buddy_init :: proc() {
 	buddyInitialized = true
 }
 //max u64 is invalid
+@(private)
 buddy_alloc :: proc(order: u8) -> u64 {
 	found := order
 	for found < u8(PMM_BUDDY_MAX_ORDER) {
@@ -64,6 +66,7 @@ buddy_alloc :: proc(order: u8) -> u64 {
 	return u64(uintptr(page_to_rawptr(page)))
 
 }
+@(private)
 buddy_free :: proc(addr: u64, order: u8) {
 	page := rawptr_to_page(rawptr(uintptr(addr)))
 	for i in u64(0) ..< (u64(1) << order) {
