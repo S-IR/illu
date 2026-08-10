@@ -6,6 +6,7 @@ CPUIDResult :: struct {
 CPUIDLeaf :: enum u32 {
 	VENDOR_STRING         = 0x0,
 	FEATURE_INFO          = 0x1, // includes x2APIC, SSE, etc.
+	MONITOR_MWAIT         = 0x5,
 	EXTENDED_FEATURE_INFO = 0x8000_0001,
 	// more
 }

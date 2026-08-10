@@ -461,7 +461,9 @@ cpu_idle_loop:
     test %al, %al
     jz cpu_idle_loop             
     sti
-    hlt                         
+    mov kernel_mwait_hint(%rip), %eax
+    xor %ecx, %ecx
+    mwait
     call cpu_clear_sleeping
     jmp cpu_idle_loop
 
