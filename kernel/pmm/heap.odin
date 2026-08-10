@@ -95,8 +95,10 @@ new_heap_page :: proc() -> ^HeapBlock {
 }
 split_block :: proc(block: ^HeapBlock, requested: u64) {
 	assert(block != nil, "heap: splitting nil block")
-	assert(block.magic == HEAP_FREE_MAGIC || block.magic == HEAP_MAGIC,
-		"heap: splitting invalid block")
+	assert(
+		block.magic == HEAP_FREE_MAGIC || block.magic == HEAP_MAGIC,
+		"heap: splitting invalid block",
+	)
 	assert(block.page != nil, "heap: block has no owning page")
 	assert(requested % u64(BLOCK_HEADER_SIZE) == 0, "heap: unaligned split size")
 
@@ -141,19 +143,25 @@ find_free_block :: proc(size: u64) -> ^HeapBlock {
 find_adjacent_blocks :: proc(block: ^HeapBlock) -> (prev, next: ^HeapBlock) {
 	pageStart := block.page
 	assert(pageStart != nil, "heap: block has no owning page")
-	assert(uintptr(rawptr(pageStart)) % uintptr(shared.PAGE_SIZE) == 0,
-		"heap: unaligned owning page")
+	assert(
+		uintptr(rawptr(pageStart)) % uintptr(shared.PAGE_SIZE) == 0,
+		"heap: unaligned owning page",
+	)
 	pageEnd := uintptr(rawptr(pageStart)) + uintptr(shared.PAGE_SIZE)
 	cursor := pageStart
 
 	for cursor != block {
-		assert(cursor.magic == HEAP_MAGIC || cursor.magic == HEAP_FREE_MAGIC,
-			"heap: corrupt block metadata")
+		assert(
+			cursor.magic == HEAP_MAGIC || cursor.magic == HEAP_FREE_MAGIC,
+			"heap: corrupt block metadata",
+		)
 		assert(cursor.page == pageStart, "heap: corrupt page metadata")
 
 		nextAddr := uintptr(block_payload(cursor)) + uintptr(cursor.size)
-		assert(nextAddr > uintptr(rawptr(cursor)) && nextAddr < pageEnd,
-			"heap: corrupt block size")
+		assert(
+			nextAddr > uintptr(rawptr(cursor)) && nextAddr < pageEnd,
+			"heap: corrupt block size",
+		)
 		prev = cursor
 		cursor = (^HeapBlock)(nextAddr)
 	}
@@ -270,10 +278,7 @@ heap_alloc :: proc(size: int, alignment: int, zeroed: bool) -> (rawptr, runtime.
 		"heap: alignment larger than page size is unsupported",
 	)
 	if alignment > 0 {
-		assert(
-			alignment & (alignment - 1) == 0,
-			"heap: alignment must be a power of two",
-		)
+		assert(alignment & (alignment - 1) == 0, "heap: alignment must be a power of two")
 	}
 
 	if u64(size) < u64(shared.PAGE_SIZE) && u64(max(alignment, 1)) <= u64(BLOCK_HEADER_SIZE) {
@@ -287,13 +292,12 @@ heap_alloc :: proc(size: int, alignment: int, zeroed: bool) -> (rawptr, runtime.
 	return large_alloc(size, zeroed)
 }
 
-heap_free :: proc(p: rawptr, old_size: int) {
+heap_free :: proc(p: rawptr, oldSize: int) {
 	if p == nil do return
 
-	// Page-sized and specially aligned allocations have no heap header.
 	if uintptr(p) % uintptr(shared.PAGE_SIZE) == 0 {
-		assert(old_size > 0, "heap: invalid page allocation size")
-		pages := max(u64(1), (u64(old_size) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE)
+		assert(oldSize > 0, "heap: invalid page allocation size")
+		pages := max(u64(1), (u64(oldSize) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE)
 		free_pages(u64(uintptr(p)), pages * shared.PAGE_SIZE)
 		return
 	}
