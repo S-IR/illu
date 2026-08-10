@@ -1,5 +1,5 @@
 #!/bin/bash
-odin run build.odin -file -debug
+odin run build.odin -file -o:aggressive
 qemu-system-x86_64 -enable-kvm -m 512m \
   -nodefaults \
   -cpu host \
