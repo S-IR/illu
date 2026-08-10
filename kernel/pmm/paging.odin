@@ -82,7 +82,10 @@ map_page :: proc(pml4Idx: u64, phys: u64, size: PageSize, flags: PageFlags) {
 
 	if size == ._1GB {
 		pdpt := ensure_table(pml4, pml4eIdx, user)
-		assert(.Present not_in transmute(PageFlags)pdpt[pdpteIdx], "map_page: 1 GiB mapping conflicts")
+		assert(
+			.Present not_in transmute(PageFlags)pdpt[pdpteIdx],
+			"map_page: 1 GiB mapping conflicts",
+		)
 		pdpt[pdpteIdx] = phys | transmute(u64)(flags + {.Present, .PS})
 		return
 	}
@@ -102,7 +105,10 @@ map_page :: proc(pml4Idx: u64, phys: u64, size: PageSize, flags: PageFlags) {
 }
 
 ensure_table :: #force_inline proc(parent: [^]u64, index: u64, user := false) -> [^]u64 {
-	assert(.PS not_in transmute(PageFlags)parent[index], "ensure_table: large-page mapping conflicts")
+	assert(
+		.PS not_in transmute(PageFlags)parent[index],
+		"ensure_table: large-page mapping conflicts",
+	)
 	if .Present not_in transmute(PageFlags)parent[index] {
 		page := pmm_alloc_zeroed_page()
 		assert(page != 0, "ensure_table: out of page-table memory")

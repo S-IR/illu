@@ -15,10 +15,24 @@ main :: proc() {
 	os.remove_all(BUILD_DIR)
 	os.make_directory_all(BUILD_DIR)
 
+	when ODIN_DEBUG do run_tests()
+
 	when BUILD_BOOTLOADER do build_bootloader()
 	when BUILD_KERNEL do build_kernel()
 	when BUILD_ADAM do build_adam()
 
+}
+
+run_tests :: proc() {
+	exec(
+		[]string {
+			"odin",
+			"test",
+			"kernel/pmm",
+			"-debug",
+			"-out:build-dir/pmm-tests",
+		},
+	)
 }
 
 build_bootloader :: proc() {
