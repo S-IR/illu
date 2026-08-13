@@ -1,9 +1,43 @@
 package syscalls
+import "../lmem"
 
 Syscall :: enum {
 	Exit,
+	MMap,
+	MFree,
 }
 
-foreign _ {
-	syscall_exit :: proc(code: u64) -> ! ---
+Error :: enum u64 {
+	None,
+	MMapInvalidPageSize,
+	MMapOutOfMemory,
+	MMapInvalidSize,
+	MMapTrackingFailed,
+	MFreeInvalidAddress,
+	MFreeInvalidSize,
+}
+
+when !ODIN_TEST {
+	@(default_calling_convention = "c")
+	foreign _ {
+		syscall_exit :: proc(code: u64) -> ! ---
+		syscall_mmap :: proc(count: u64, size: u64, flags: u64) -> (err: u64, addr: u64) ---
+		syscall_mfree :: proc(addr: u64) -> (err: u64) ---
+	}
+}
+
+syscall_mmap_userspace :: proc "contextless" (
+	count: u64,
+	size: lmem.PageSize,
+	flags: lmem.PageFlags,
+) -> (
+	err: Error,
+	addr: rawptr,
+) {
+	rawErr, rawAddr := syscall_mmap(count, u64(size), transmute(u64)flags)
+	return Error(rawErr), rawptr(uintptr(rawAddr))
+}
+
+syscall_mfree_userspace :: proc "contextless" (addr: u64) -> (err: Error) {
+	return Error(syscall_mfree(addr))
 }

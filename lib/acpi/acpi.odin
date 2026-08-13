@@ -88,6 +88,10 @@ MadtLocalX2Apic :: struct #packed {
 	acpiUid:  u32,
 }
 
+Region :: struct {
+	base, size: u64,
+}
+
 collect_ap_ids :: proc(rsdp: ^Rsdp, bspId: u32, out: []u32) -> (count: int = 0) {
 	madt := cast(^MadtHeader)find_table(rsdp, {'A', 'P', 'I', 'C'})
 	if madt == nil do return 0

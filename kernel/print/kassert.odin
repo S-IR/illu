@@ -4,11 +4,12 @@ import ah "../../asm_helpers"
 import "base:runtime"
 
 when ODIN_TEST {
-	kassert :: proc(
+	kassert :: proc "contextless" (
 		condition: bool,
 		message := #caller_expression(condition),
 		loc := #caller_location,
 	) {
+		context = runtime.default_context()
 		assert(condition, message, loc)
 	}
 } else {
@@ -33,21 +34,24 @@ when ODIN_TEST {
 }
 
 when !ODIN_TEST {
-	kassert_failure_handler :: proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
-	serial_write("KASSERT failed: ")
-	serial_write(prefix)
-	serial_write(": ")
-	serial_write(message)
-	serial_write(" @ ")
-	serial_write(loc.file_path)
-	serial_write(":")
-	serial_write_u64(u64(loc.line))
-	serial_write(":")
-	serial_write_u64(u64(loc.column))
-	serial_write(" in ")
-	serial_writeln(loc.procedure)
-	ah.halt()
-}
+	kassert_failure_handler :: proc(
+		prefix, message: string,
+		loc: runtime.Source_Code_Location,
+	) -> ! {
+		serial_write("KASSERT failed: ")
+		serial_write(prefix)
+		serial_write(": ")
+		serial_write(message)
+		serial_write(" @ ")
+		serial_write(loc.file_path)
+		serial_write(":")
+		serial_write_u64(u64(loc.line))
+		serial_write(":")
+		serial_write_u64(u64(loc.column))
+		serial_write(" in ")
+		serial_writeln(loc.procedure)
+		ah.halt()
+	}
 }
 
 kensure :: proc(

@@ -25,7 +25,6 @@ heap_test_init :: proc() -> HeapTestMemory {
 	freeLists = {}
 	heapFreeList = nil
 	heapLock = {}
-	buddyInitialized = false
 	state.bitmap = bitmapMem
 	state.totalPages = TEST_PAGES_COUNT
 
@@ -66,7 +65,16 @@ test_pmm :: proc(t: ^testing.T) {
 	for i in 0 ..< bitmapWords do state.bitmap[i] = max(u64)
 	for pg in u64(1) ..< TEST_PAGES_COUNT do kclear(&state, pg)
 
+	// This models the UEFI memory-map buffer: it is page-backed but was not
+	// allocated by the buddy allocator, and its length need not be a power of 2.
+	reclaimStart :: u64(100)
+	reclaimEnd :: u64(107)
+	for page in reclaimStart ..< reclaimEnd do kset(&state, page)
+
 	buddy_init()
+
+	buddy_release_range(reclaimStart, reclaimEnd)
+	for page in reclaimStart ..< reclaimEnd do testing.expect(t, !is_used(&state, page))
 
 	oom := palloc(TEST_PAGES_COUNT * shared.PAGE_SIZE * 2)
 	testing.expect(t, oom == max(u64))
@@ -117,15 +125,7 @@ test_heap :: proc(t: ^testing.T) {
 	for &b in small do b = 0xA5
 
 	resizedSmall: []byte
-	resizedSmall, err = heap_proc(
-		nil,
-		.Resize,
-		48,
-		8,
-		raw_data(small),
-		len(small),
-		{},
-	)
+	resizedSmall, err = heap_proc(nil, .Resize, 48, 8, raw_data(small), len(small), {})
 	testing.expect(t, err == nil)
 	for b in resizedSmall[:len(small)] do testing.expect(t, b == 0xA5)
 	heap_proc(nil, .Free, 0, 0, raw_data(resizedSmall), len(resizedSmall), {})

@@ -207,12 +207,15 @@ domain_reclaim_locked :: proc(domain: ^ProtectionDomain) {
 		"domain_reclaim_locked: executions still attached")
 	print.kassert(domain.pml4 != 0, "domain_destroy: paging already destroyed")
 	print.kassert(domain.pml4 != pmm.kernelPML4, "domain_destroy: kernel PML4 passed")
-	defer delete(domain.allocs)
+	print.kassert(domain.allocs != nil, "domain_reclaim_locked: nil allocation map")
 
 	ah.write_cr3(pmm.kernelPML4)
 
-	for a in domain.allocs {
-		pmm.free_pages(a.phys, a.pages * shared.PAGE_SIZE)
+	if domain.allocs != nil {
+		for phys, a in domain.allocs {
+			pmm.free_pages(u64(phys), a.sizeBytes)
+		}
+		delete(domain.allocs)
 	}
 	pmm.pml4_destroy(domain.pml4)
 	domain.pml4 = 0

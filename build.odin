@@ -24,15 +24,7 @@ main :: proc() {
 }
 
 run_tests :: proc() {
-	exec(
-		[]string {
-			"odin",
-			"test",
-			"kernel/pmm",
-			"-debug",
-			"-out:build-dir/pmm-tests",
-		},
-	)
+	exec([]string{"odin", "test", "kernel/pmm", "-debug", "-out:build-dir/pmm-tests"})
 }
 
 build_bootloader :: proc() {

@@ -1,6 +1,7 @@
 package kernel
 import ah "../asm_helpers"
 import "../lib/acpi"
+import "../lib/lmem"
 import "../lib/shared"
 import "../lib/spinlock"
 import "base:intrinsics"
@@ -8,22 +9,24 @@ import "base:runtime"
 import "core:mem"
 import "pmm"
 import "print"
-
 SLICE_MS: u64 : 20
 KERNEL_STACK_PER_CPU_SIZE :: 16 * mem.Kilobyte
 #assert(KERNEL_STACK_PER_CPU_SIZE % 16 == 0)
 
 
 Alloc :: struct {
-	phys:  u64,
-	pages: u64,
+	sizeBytes: u64,
+	pageSize:  lmem.PageSize,
+	pageFlags: lmem.PageFlags,
 }
 
+ALLOC_INITIAL_CAPACITY :: 8
+
 ProtectionDomain :: struct {
-	pml4:          u64,
+	pml4:           u64,
 	executionCount: u64,
 	executionLock:  spinlock.Spinlock,
-	allocs:        [dynamic]Alloc,
+	allocs:         map[uintptr]Alloc,
 }
 
 CpuState :: struct {
@@ -63,7 +66,7 @@ SavedState :: struct #align (16) {
 
 MemRegion :: struct {
 	phys, size: u64,
-	flags:      pmm.PageFlags,
+	flags:      lmem.PageFlags,
 }
 gKernelCtx: runtime.Context
 gdts: []GDT

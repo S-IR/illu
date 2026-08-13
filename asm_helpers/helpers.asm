@@ -442,8 +442,8 @@ syscall_entry:
 
     pop %r11
     pop %rcx
-    pop %rdx
-    mov %rdx, %cr3
+    pop %r10
+    mov %r10, %cr3
     add $8, %rsp
     mov %gs:16, %rsp
     swapgs

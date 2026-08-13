@@ -34,11 +34,10 @@ buddy_init :: proc() {
 		p = end
 
 	}
-	buddyInitialized = true
 }
 //max u64 is invalid
 @(private)
-buddy_alloc :: proc(order: u8) -> u64 {
+buddy_alloc :: proc "contextless" (order: u8) -> u64 {
 	found := order
 	for found < u8(PMM_BUDDY_MAX_ORDER) {
 		if freeLists[found].next != &freeLists[found] do break
@@ -48,8 +47,8 @@ buddy_alloc :: proc(order: u8) -> u64 {
 
 	blk := freeLists[found].next
 
-	assert(blk != &freeLists[found])
-	assert(blk.free)
+	print.kassert(blk != &freeLists[found])
+	print.kassert(blk.free)
 
 	list_remove(blk)
 
@@ -67,7 +66,7 @@ buddy_alloc :: proc(order: u8) -> u64 {
 
 }
 @(private)
-buddy_free :: proc(addr: u64, order: u8) {
+buddy_free :: proc "contextless" (addr: u64, order: u8) {
 	page := rawptr_to_page(rawptr(uintptr(addr)))
 	for i in u64(0) ..< (u64(1) << order) {
 		kclear(&state, page + i)
@@ -94,8 +93,20 @@ buddy_free :: proc(addr: u64, order: u8) {
 	list_add(order = currOrder, page = currPage)
 
 }
+// Release pages that were reserved outside the buddy allocator.  Unlike
+// buddy_free, this must not round the range up: the pages may be adjacent to
+// blocks that are already on a free list.
+buddy_release_range :: proc "contextless" (start, end: u64) {
+	print.kassert(start != 0)
+	print.kassert(start < end)
+	print.kassert(end <= state.totalPages)
+
+	for page in start ..< end do kclear(&state, page)
+	buddy_add_range(start, end)
+}
+
 @(private)
-buddy_add_range :: proc(start, end: u64) {
+buddy_add_range :: proc "contextless" (start, end: u64) {
 	p := start
 	for p < end {
 		order := u8(0)
@@ -110,8 +121,8 @@ buddy_add_range :: proc(start, end: u64) {
 	}
 }
 @(private)
-list_add :: proc(order: u8, page: u64) {
-	assert(page != 0, "list_add: page 0 handed out")
+list_add :: proc "contextless" (order: u8, page: u64) {
+	print.kassert(page != 0, "list_add: page 0 handed out")
 
 	blk := (^FreeBlock)(page_to_rawptr(page))
 	blk.free = true
@@ -124,13 +135,13 @@ list_add :: proc(order: u8, page: u64) {
 	head.next = blk
 }
 @(private)
-list_remove :: proc(blk: ^FreeBlock) {
-	assert(blk != nil)
-	assert(blk.prev != nil)
-	assert(blk.next != nil)
+list_remove :: proc "contextless" (blk: ^FreeBlock) {
+	print.kassert(blk != nil)
+	print.kassert(blk.prev != nil)
+	print.kassert(blk.next != nil)
 
-	assert(blk.prev.next == blk)
-	assert(blk.next.prev == blk)
+	print.kassert(blk.prev.next == blk)
+	print.kassert(blk.next.prev == blk)
 
 	blk.prev.next = blk.next
 	blk.next.prev = blk.prev

@@ -17,7 +17,7 @@ when ODIN_TEST {
 	state: PMM
 
 }
-buddyInitialized: bool
+// buddyInitialized: bool
 trampolinePhys: u64 = 0x8000
 
 men_init :: proc(
@@ -110,11 +110,16 @@ men_init :: proc(
 	}
 
 
+	for seg in kernelImg.segments {
+		segmentStart := seg.base / shared.PAGE_SIZE
+		segmentEnd := pages_needed(seg.end)
+		for pg in segmentStart ..< segmentEnd {
+			kset(&state, pg)
+		}
+	}
 	kernelStart := kernelImg.base / shared.PAGE_SIZE
 	kernelEnd := pages_needed(kernelImg.end)
-	for pg in kernelStart ..< kernelEnd {
-		kset(&state, pg)
-	}
+	for pg in kernelStart ..< kernelEnd do kset(&state, pg)
 
 	adamStart := adamImg.base / shared.PAGE_SIZE
 	adamEnd := pages_needed(adamImg.end)
@@ -130,19 +135,22 @@ men_init :: proc(
 
 
 	mmapBase := u64(uintptr(rawptr(memoryMap)))
-	mmapPages := pages_needed(memoryMapSize)
 	mmapStart := mmapBase / shared.PAGE_SIZE
-	for pg in mmapStart ..< mmapStart + mmapPages {
+	mmapEnd := pages_needed(mmapBase + memoryMapSize)
+	for pg in mmapStart ..< mmapEnd {
 		kset(&state, pg)
 	}
 
-
+	buddyMetaStart := u64(uintptr(&freeLists[0])) / shared.PAGE_SIZE
+	buddyMetaEnd := pages_needed(u64(uintptr(&freeLists[0])) + size_of(freeLists))
+	for pg in buddyMetaStart ..< buddyMetaEnd {
+		kset(&state, pg)
+	}
 	paging_init(kernelImg, memoryMap, memoryMapSize, memoryMapDescSize)
 	buddy_init()
 
 
-	order := order_for(mmapPages)
-	buddy_free(mmapBase, order)
+	buddy_release_range(mmapStart, mmapEnd)
 
 	adamSize := adamImg.end - adamImg.base
 	newAdamBase := palloc_zeroed(pages_needed(adamSize) * shared.PAGE_SIZE)
@@ -165,37 +173,37 @@ men_init :: proc(
 
 }
 
-kset :: #force_inline proc(p: ^PMM, i: u64) {
-	assert(i < p.totalPages, "pmm set: page beyond bitmap")
+kset :: #force_inline proc "contextless" (p: ^PMM, i: u64) {
+	print.kassert(i < p.totalPages, "pmm set: page beyond bitmap")
 	p.bitmap[i / 64] |= u64(1) << (i % 64)
 }
-kclear :: #force_inline proc(p: ^PMM, i: u64) {
-	assert(i < p.totalPages, "pmm clear: page beyond bitmap")
+kclear :: #force_inline proc "contextless" (p: ^PMM, i: u64) {
+	print.kassert(i < p.totalPages, "pmm clear: page beyond bitmap")
 	p.bitmap[i / 64] &= ~(u64(1) << (i % 64))
 }
-is_used :: #force_inline proc(p: ^PMM, i: u64) -> bool {
-	assert(i < p.totalPages, "pmm test: page beyond bitmap")
+is_used :: #force_inline proc "contextless" (p: ^PMM, i: u64) -> bool {
+	print.kassert(i < p.totalPages, "pmm test: page beyond bitmap")
 	return p.bitmap[i / 64] >> (i % 64) & 1 != 0
 }
 
 when ODIN_TEST {
 	@(thread_local)
 	buddyMapBase: u64
-	page_to_rawptr :: #force_inline proc(page: u64) -> rawptr {
+	page_to_rawptr :: #force_inline proc "contextless" (page: u64) -> rawptr {
 		return rawptr(uintptr(buddyMapBase + page * shared.PAGE_SIZE))
 	}
-	rawptr_to_page :: #force_inline proc(ptr: rawptr) -> u64 {
+	rawptr_to_page :: #force_inline proc "contextless" (ptr: rawptr) -> u64 {
 		return (u64(uintptr(ptr)) - buddyMapBase) / shared.PAGE_SIZE
 	}
 } else {
-	page_to_rawptr :: #force_inline proc(page: u64) -> rawptr {
+	page_to_rawptr :: #force_inline proc "contextless" (page: u64) -> rawptr {
 		return rawptr(uintptr(page * shared.PAGE_SIZE))
 	}
-	rawptr_to_page :: #force_inline proc(ptr: rawptr) -> u64 {
+	rawptr_to_page :: #force_inline proc "contextless" (ptr: rawptr) -> u64 {
 		return u64(uintptr(ptr)) / shared.PAGE_SIZE
 	}
 }
-pages_needed :: proc(bytes: u64) -> u64 {
+pages_needed :: proc "contextless" (bytes: u64) -> u64 {
 	return (bytes + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
 }
 addr_round_up_to_page :: proc(addr: u64) -> u64 {
@@ -204,7 +212,7 @@ addr_round_up_to_page :: proc(addr: u64) -> u64 {
 addr_round_down_to_page :: proc(addr: u64) -> u64 {
 	return addr & ~u64(shared.PAGE_SIZE - 1)
 }
-order_for :: proc(n: u64) -> (order: u8 = 0) {
+order_for :: proc "contextless" (n: u64) -> (order: u8 = 0) {
 	size := u64(1)
 	for size < n {
 		size <<= 1
@@ -213,8 +221,8 @@ order_for :: proc(n: u64) -> (order: u8 = 0) {
 	return order
 }
 @(private)
-palloc :: proc(sizeInBytes: u64) -> u64 {
-	assert(sizeInBytes != 0, "palloc: zero-size allocation")
+palloc :: proc "contextless" (sizeInBytes: u64) -> u64 {
+	print.kassert(sizeInBytes != 0, "palloc: zero-size allocation")
 	spinlock.lock(&state.lock)
 	defer spinlock.unlock(&state.lock)
 
@@ -223,19 +231,19 @@ palloc :: proc(sizeInBytes: u64) -> u64 {
 	return buddy_alloc(order)
 }
 @(private)
-palloc_zeroed :: proc(bytes: u64) -> u64 {
+palloc_zeroed :: proc "contextless" (bytes: u64) -> u64 {
 	addr := palloc(bytes)
-	if addr == 0 || addr == max(u64) do return 0
-	assert(addr % shared.PAGE_SIZE == 0, "palloc_zeroed: unaligned allocation")
+	if addr == 0 || addr == max(u64) do return max(u64)
+	print.kassert(addr % shared.PAGE_SIZE == 0, "palloc_zeroed: unaligned allocation")
 	mem.zero(rawptr(uintptr(addr)), int(bytes))
 	return addr
 }
 
 @(private)
-pfree :: proc(addr: u64, bytes: u64) {
-	assert(addr != 0, "pfree: null physical address")
-	assert(addr % shared.PAGE_SIZE == 0, "pfree: unaligned physical address")
-	assert(bytes != 0, "pfree: zero-size allocation")
+pfree :: proc "contextless" (addr: u64, bytes: u64) {
+	print.kassert(addr != 0, "pfree: null physical address")
+	print.kassert(addr % shared.PAGE_SIZE == 0, "pfree: unaligned physical address")
+	print.kassert(bytes != 0, "pfree: zero-size allocation")
 	spinlock.lock(&state.lock)
 	defer spinlock.unlock(&state.lock)
 
@@ -244,21 +252,16 @@ pfree :: proc(addr: u64, bytes: u64) {
 	buddy_free(addr, order)
 }
 
-// Public physical-memory interface. Callers must not depend on the buddy
-// allocator or on the palloc implementation behind these procedures.
-alloc_pages :: proc(bytes: u64) -> u64 {
-	assert(buddyInitialized, "alloc_pages: buddy allocator is not initialized")
+alloc_pages :: proc "contextless" (bytes: u64) -> u64 {
 	return palloc(bytes)
 }
 
-free_pages :: proc(addr, bytes: u64) {
-	assert(buddyInitialized, "free_pages: buddy allocator is not initialized")
+free_pages :: proc "contextless" (addr, bytes: u64) {
 	pfree(addr, bytes)
 }
 
-alloc_zeroed :: proc(bytes: u64) -> u64 {
-	assert(bytes != 0, "alloc_zeroed: zero-size allocation")
-	assert(buddyInitialized, "alloc_zeroed: buddy allocator is not initialized")
+alloc_zeroed :: proc "contextless" (bytes: u64) -> u64 {
+	print.kassert(bytes != 0, "alloc_zeroed: zero-size allocation")
 	return palloc_zeroed(bytes)
 }
 mmap_desc :: #force_inline proc(
@@ -270,7 +273,6 @@ mmap_desc :: #force_inline proc(
 		uintptr(rawptr(memoryMap)) + uintptr(i * memoryMapDescSize),
 	)
 }
-// Temporary allocator: find a free page in the bitmap and mark it used.
 early_alloc_page :: proc() -> u64 {
 	for i in u64(0) ..< state.totalPages {
 		if !is_used(&state, i) {

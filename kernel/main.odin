@@ -51,7 +51,7 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	gKernelCtx = context
 
 	sched_init(params.rsdp)
-	adam_init(params.adamImg)
+	adam_init(params.adamImg, params.rsdp)
 
 	cpu_idle_loop()
 }
