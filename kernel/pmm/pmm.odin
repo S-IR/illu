@@ -166,9 +166,8 @@ men_init :: proc(
 		seg.base += delta
 		seg.end += delta
 	}
-	for pg in adamStart ..< adamEnd {
-		kclear(&state, pg)
-	}
+	buddy_release_range(adamStart, adamEnd)
+
 	print.serial_writeln("pmm: loaded")
 
 }

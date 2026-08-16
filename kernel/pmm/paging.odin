@@ -28,7 +28,7 @@ paging_init :: proc(
 	print.kensure(kernelPML4 < u64(4) * u64(mem.Gigabyte), "paging_init: kernel PML4 above 4 GiB")
 
 	for p in u64(1) ..< state.totalPages {
-		map_page(kernelPML4, p * shared.PAGE_SIZE, ._4KB, PAGE_RW)
+		map_page(kernelPML4, p * shared.PAGE_SIZE, ._4KB, PAGE_RW, true)
 	}
 
 	for seg in kernelImg.segments {
@@ -38,11 +38,11 @@ paging_init :: proc(
 		phys := addr_round_down_to_page(seg.base)
 		end := addr_round_up_to_page(seg.end)
 		for phys < end {
-			map_page(kernelPML4, phys, ._4KB, flags); phys += shared.PAGE_SIZE
+			map_page(kernelPML4, phys, ._4KB, flags, true); phys += shared.PAGE_SIZE
 		}
 	}
 
-	map_page(kernelPML4, trampolinePhys, ._4KB, {.Present, .Write})
+	map_page(kernelPML4, trampolinePhys, ._4KB, {.Present, .Write}, true)
 	ah.write_cr3(kernelPML4)
 }
 
@@ -58,6 +58,7 @@ map_page :: proc "contextless" (
 	phys: u64,
 	size: lmem.PageSize,
 	flags: lmem.PageFlags,
+	bootstrap := false,
 ) {
 	print.kassert(phys % shared.PAGE_SIZE == 0)
 	if size == ._2MB do print.kassert(phys % u64(2 * mem.Megabyte) == 0)
@@ -71,7 +72,7 @@ map_page :: proc "contextless" (
 	pml4 := ([^]u64)(uintptr(pml4Idx))
 
 	if size == ._1GB {
-		pdpt := ensure_table(pml4, pml4eIdx, user)
+		pdpt := ensure_table(pml4, pml4eIdx, user, bootstrap)
 		print.kassert(
 			.Present not_in transmute(lmem.PageFlags)pdpt[pdpteIdx],
 			"map_page: 1 GiB mapping conflicts",
@@ -80,10 +81,10 @@ map_page :: proc "contextless" (
 		return
 	}
 
-	pdpt := ensure_table(pml4, pml4eIdx, user)
+	pdpt := ensure_table(pml4, pml4eIdx, user, bootstrap)
 
 	if size == ._2MB {
-		pd := ensure_table(pdpt, pdpteIdx, user)
+		pd := ensure_table(pdpt, pdpteIdx, user, bootstrap)
 		print.kassert(
 			.Present not_in transmute(lmem.PageFlags)pd[pdeIdx],
 			"map_page: 2 MiB mapping conflicts",
@@ -92,8 +93,8 @@ map_page :: proc "contextless" (
 		return
 	}
 
-	pd := ensure_table(pdpt, pdpteIdx, user)
-	pt := ensure_table(pd, pdeIdx, user)
+	pd := ensure_table(pdpt, pdpteIdx, user, bootstrap)
+	pt := ensure_table(pd, pdeIdx, user, bootstrap)
 	pt[pteIdx] = phys | transmute(u64)(flags + {.Present})
 }
 
@@ -101,13 +102,19 @@ ensure_table :: #force_inline proc "contextless" (
 	parent: [^]u64,
 	index: u64,
 	user := false,
+	bootstrap := false,
 ) -> [^]u64 {
 	print.kassert(
 		.PS not_in transmute(lmem.PageFlags)parent[index],
 		"ensure_table: large-page mapping conflicts",
 	)
 	if .Present not_in transmute(lmem.PageFlags)parent[index] {
-		page := early_alloc_zeroed_page()
+		page := u64(0)
+		if bootstrap {
+			page = early_alloc_zeroed_page()
+		} else {
+			page = alloc_zeroed(shared.PAGE_SIZE)
+		}
 		print.kassert(page != 0, "ensure_table: out of page-table memory")
 		parent[index] = page | transmute(u64)(lmem.PageFlags{.Present, .Write})
 	}

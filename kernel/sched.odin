@@ -177,6 +177,7 @@ cpu_syscall_init :: proc() {
 	ah.wrmsr_asm(KERNELGSBASE, ah.rdmsr_asm(IA32_GS_BASE))
 }
 saved_state_fresh :: proc(entryRip, entryRsp: u64) -> SavedState {
+	assert(entryRsp % 16 == 8, "saved_state_fresh: unaligned entry stack")
 	return SavedState {
 		rip = entryRip,
 		rsp = entryRsp,

@@ -79,11 +79,12 @@ build_adam :: proc() {
 		"adam",
 		objOut,
 		{
-			"-reloc-mode:static",
+			"-reloc-mode:pic",
 			"-vet-shadowing",
 			"-target:freestanding_amd64_sysv",
 			"-no-entry-point",
 			"-no-crt",
+			"-disable-red-zone",
 			"-build-mode:obj",
 		},
 	)
@@ -92,7 +93,7 @@ build_adam :: proc() {
 	adamOut, _ := filepath.join({"diskimg", "adam.elf"})
 
 	linkCmd := make([dynamic]string, context.temp_allocator)
-	append(&linkCmd, "ld.lld", "--entry=_start", "-o", adamOut)
+	append(&linkCmd, "ld.lld", "-pie", "--entry=_start", "-o", adamOut)
 	for o in objs do append(&linkCmd, o)
 	exec(linkCmd[:])
 
@@ -127,6 +128,7 @@ build_kernel :: proc() {
 			"-no-entry-point",
 			"-no-crt",
 			"-build-mode:obj",
+			"-define:KERNEL_BUILD=true",
 		},
 	)
 

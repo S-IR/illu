@@ -404,6 +404,11 @@ read_rsp:
     mov %rsp, %rax
     ret
 
+.global read_rbp
+read_rbp:
+    mov %rbp, %rax
+    ret
+
 .global gs_write_base
 gs_write_base:
     movl $0xC0000101, %ecx
@@ -495,6 +500,25 @@ cpu_idle_loop:
 .global fxsave_asm
 fxsave_asm:
     fxsave (%rdi)
+    ret
+
+.global lock_asm
+.type lock_asm, @function
+lock_asm:
+.Lspinlock:
+    movl $1, %eax
+    xchgl %eax, (%rdi)
+    testl %eax, %eax
+    jz .Lspinlock_acquired
+    pause
+    jmp .Lspinlock
+.Lspinlock_acquired:
+    ret
+
+.global unlock_asm
+.type unlock_asm, @function
+unlock_asm:
+    movl $0, (%rdi)
     ret
 
 .global run_domain

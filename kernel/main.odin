@@ -1,6 +1,7 @@
 package kernel
 
 import ah "../asm_helpers"
+import "../lib/alloc"
 import "../uefi"
 import "base:runtime"
 import "core:mem"
@@ -41,7 +42,7 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 		adamImg = &params.adamImg,
 	)
 
-	context.allocator = pmm.heap_allocator()
+	context.allocator = alloc.heap_allocator()
 	gBootTlsEnd = u64(uintptr(&gBootTls)) + len(gBootTls)
 	ah.wrmsr_asm(IA32_FS_BASE, gBootTlsEnd)
 

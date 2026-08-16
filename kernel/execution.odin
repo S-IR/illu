@@ -41,7 +41,7 @@ execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execu
 	print.kassert(state.rsp != 0, "execution_create: zero entry RSP")
 	print.kassert(state.cs == 0x2B, "execution_create: bad code segment")
 	print.kassert(state.ss == 0x23, "execution_create: bad stack segment")
-	print.kassert(state.rsp % 16 == 0, "execution_create: unaligned entry stack")
+	print.kassert(state.rsp % 16 == 8, "execution_create: unaligned entry stack")
 
 	spinlock.lock(&domain.executionLock)
 	defer spinlock.unlock(&domain.executionLock)
@@ -163,7 +163,7 @@ run_next_execution :: proc "c" () -> bool {
 	print.kassert(exec.state.rsp != 0, "rn: rsp zero")
 	print.kassert(exec.state.cs == 0x2B, "rn: bad cs")
 	print.kassert(exec.state.ss == 0x23, "rn: bad ss")
-	print.kassert(exec.state.rsp % 16 == 0, "rn: rsp unaligned")
+	print.kassert(exec.state.rsp % 16 == 8, "run_next_execution: rsp unaligned")
 	execution_run(exec.domain, &exec.state)
 
 

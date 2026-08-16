@@ -8,7 +8,7 @@ FreeBlock :: struct {
 }
 when ODIN_TEST {
 	@(thread_local)
-	freeLists: [PMM_BUDDY_MAX_ORDER]FreeBlock
+freeLists: [PMM_BUDDY_MAX_ORDER]FreeBlock
 } else {
 	freeLists: [PMM_BUDDY_MAX_ORDER]FreeBlock
 }
@@ -135,13 +135,13 @@ list_add :: proc "contextless" (order: u8, page: u64) {
 	head.next = blk
 }
 @(private)
-list_remove :: proc "contextless" (blk: ^FreeBlock) {
+list_remove :: proc "contextless" (blk: ^FreeBlock, caller := #caller_location) {
 	print.kassert(blk != nil)
 	print.kassert(blk.prev != nil)
 	print.kassert(blk.next != nil)
 
-	print.kassert(blk.prev.next == blk)
-	print.kassert(blk.next.prev == blk)
+	print.kassert(blk.prev.next == blk, "buddy: previous link mismatch", caller)
+	print.kassert(blk.next.prev == blk, "buddy: next link mismatch", caller)
 
 	blk.prev.next = blk.next
 	blk.next.prev = blk.prev

@@ -45,6 +45,7 @@ when !ODIN_TEST {
 
 		sti_asm :: proc() ---
 		read_rsp :: proc() -> u64 ---
+		read_rbp :: proc() -> u64 ---
 
 
 	}
@@ -93,4 +94,5 @@ when !ODIN_TEST {
 
 	pit_delay_us :: proc "contextless" (us: u32) {}
 	read_rsp :: proc "contextless" () -> u64 {return 0}
+	read_rbp :: proc "contextless" () -> u64 {return 0}
 }

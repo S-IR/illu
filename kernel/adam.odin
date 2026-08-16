@@ -32,8 +32,6 @@ adam_init :: proc(adamImg: elf.Image, rsdp: ^acpi.Rsdp) {
 			phys += shared.PAGE_SIZE
 		}
 	}
-
-
 	{
 		acpiRegions := collect_all_acpi_regions(rsdp)
 		defer delete(acpiRegions)
@@ -60,8 +58,8 @@ adam_init :: proc(adamImg: elf.Image, rsdp: ^acpi.Rsdp) {
 	pmm.map_page(newPML4, stackPhys, ._4KB, {})
 
 	usableStart := stackPhys + shared.PAGE_SIZE
-	stackTop := usableStart + ADAM_STACK_SIZE
-	assert(stackTop % 16 == 0)
+	stackTop := usableStart + ADAM_STACK_SIZE - 8
+	assert(stackTop % 16 == 8)
 	for p := usableStart; p < stackTop; p += shared.PAGE_SIZE {
 		pmm.map_page(newPML4, p, ._4KB, {.Present, .User, .Write, .NX})
 	}

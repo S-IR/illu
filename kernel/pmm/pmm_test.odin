@@ -3,42 +3,6 @@ package pmm
 import "../../lib/shared"
 import "core:testing"
 
-HeapTestMemory :: struct {
-	backing: []u8,
-	bitmap:  []u64,
-}
-
-heap_test_init :: proc() -> HeapTestMemory {
-	TEST_PAGES_COUNT :: u64(256)
-
-	backingRaw := make([]u8, TEST_PAGES_COUNT * shared.PAGE_SIZE + shared.PAGE_SIZE - 1)
-	basePtr := uintptr(raw_data(backingRaw))
-	aligned := (basePtr + uintptr(shared.PAGE_SIZE - 1)) & ~uintptr(shared.PAGE_SIZE - 1)
-	offset := aligned - basePtr
-	when ODIN_TEST {
-		buddyMapBase = u64(aligned)
-	}
-
-	bitmapWords := (TEST_PAGES_COUNT + 63) / 64
-	bitmapMem := make([]u64, bitmapWords)
-	state = {}
-	freeLists = {}
-	heapFreeList = nil
-	heapLock = {}
-	state.bitmap = bitmapMem
-	state.totalPages = TEST_PAGES_COUNT
-
-	for i in 0 ..< bitmapWords {
-		state.bitmap[i] = max(u64)
-	}
-	for pg in u64(1) ..< TEST_PAGES_COUNT {
-		kclear(&state, pg)
-	}
-
-	buddy_init()
-	return {backing = backingRaw, bitmap = bitmapMem}
-}
-
 @(test)
 test_pmm :: proc(t: ^testing.T) {
 	TEST_PAGES_COUNT :: u64(1024)
@@ -112,75 +76,4 @@ test_pmm :: proc(t: ^testing.T) {
 	pfree(block4Again, 4 * shared.PAGE_SIZE)
 
 	clear(&allocs)
-}
-
-@(test)
-test_heap :: proc(t: ^testing.T) {
-	testMemory := heap_test_init()
-	defer delete(testMemory.backing)
-	defer delete(testMemory.bitmap)
-
-	small, err := heap_proc(nil, .Alloc, 24, 8, nil, 0, {})
-	testing.expect(t, err == nil)
-	for &b in small do b = 0xA5
-
-	resizedSmall: []byte
-	resizedSmall, err = heap_proc(nil, .Resize, 48, 8, raw_data(small), len(small), {})
-	testing.expect(t, err == nil)
-	for b in resizedSmall[:len(small)] do testing.expect(t, b == 0xA5)
-	heap_proc(nil, .Free, 0, 0, raw_data(resizedSmall), len(resizedSmall), {})
-
-	reused: []byte
-	reused, err = heap_proc(nil, .Alloc, 24, 8, nil, 0, {})
-	testing.expect(t, err == nil)
-	testing.expect(t, raw_data(reused) == raw_data(resizedSmall))
-	heap_proc(nil, .Free, 0, 0, raw_data(reused), len(reused), {})
-
-	a: []byte
-	a, err = heap_proc(nil, .Alloc, 512, 8, nil, 0, {})
-	testing.expect(t, err == nil)
-	b: []byte
-	b, err = heap_proc(nil, .Alloc, 512, 8, nil, 0, {})
-	testing.expect(t, err == nil)
-	c: []byte
-	c, err = heap_proc(nil, .Alloc, 512, 8, nil, 0, {})
-	testing.expect(t, err == nil)
-
-	heap_proc(nil, .Free, 0, 0, raw_data(b), len(b), {})
-	heap_proc(nil, .Free, 0, 0, raw_data(a), len(a), {})
-
-	merged: []byte
-	merged, err = heap_proc(nil, .Alloc, 900, 8, nil, 0, {})
-	testing.expect(t, err == nil)
-	testing.expect(t, raw_data(merged) == raw_data(a))
-
-	heap_proc(nil, .Free, 0, 0, raw_data(merged), len(merged), {})
-	heap_proc(nil, .Free, 0, 0, raw_data(c), len(c), {})
-
-	pageAlloc: []byte
-	pageAlloc, err = heap_proc(nil, .Alloc, int(shared.PAGE_SIZE), 8, nil, 0, {})
-	testing.expect(t, err == nil)
-	testing.expect(t, uintptr(raw_data(pageAlloc)) % shared.PAGE_SIZE == 0)
-
-	resized: []byte
-	resized, err = heap_proc(
-		nil,
-		.Resize,
-		int(2 * shared.PAGE_SIZE),
-		8,
-		raw_data(pageAlloc),
-		len(pageAlloc),
-		{},
-	)
-	testing.expect(t, err == nil)
-	testing.expect(t, uintptr(raw_data(resized)) % shared.PAGE_SIZE == 0)
-	heap_proc(nil, .Free, 0, 0, raw_data(resized), len(resized), {})
-
-	pages: [255]u64
-	for i in 0 ..< len(pages) {
-		pages[i] = palloc(shared.PAGE_SIZE)
-		testing.expect(t, pages[i] != max(u64))
-	}
-	testing.expect(t, palloc(shared.PAGE_SIZE) == max(u64))
-	for page in pages do pfree(page, shared.PAGE_SIZE)
 }

@@ -1,9 +1,6 @@
-package pmm
-import "../../lib/elf"
-import "../../lib/shared"
-import "../../lib/spinlock"
-import "../../uefi"
-import "../print"
+package alloc
+import "../shared"
+import "../spinlock"
 import "base:intrinsics"
 import "base:runtime"
 import "core:mem"
@@ -75,7 +72,7 @@ insert_free_block :: proc(block: ^HeapBlock) {
 	heapFreeList = block
 }
 new_heap_page :: proc() -> ^HeapBlock {
-	addr := alloc_zeroed(shared.PAGE_SIZE)
+	addr := backend_alloc_pages(1)
 	assert(addr != 0)
 	assert(addr != max(u64))
 
@@ -199,7 +196,7 @@ free_small_block :: proc(block: ^HeapBlock) {
 
 	if current == current.page && current.size == u64(shared.PAGE_SIZE) - u64(BLOCK_HEADER_SIZE) {
 		assert(current.next == nil && current.prev == nil, "heap: reclaimed block still linked")
-		free_pages(u64(uintptr(current.page)), shared.PAGE_SIZE)
+		backend_free_pages(u64(uintptr(current.page)), 1)
 		return
 	}
 
@@ -238,7 +235,7 @@ large_alloc :: proc(size: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error
 
 	pages := max(u64(1), (u64(size) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE)
 
-	addr := alloc_zeroed(pages * shared.PAGE_SIZE)
+	addr := backend_alloc_pages(pages)
 
 	if addr == 0 || addr == max(u64) {
 		return nil, .Out_Of_Memory
@@ -298,7 +295,7 @@ heap_free :: proc(p: rawptr, oldSize: int) {
 	if uintptr(p) % uintptr(shared.PAGE_SIZE) == 0 {
 		assert(oldSize > 0, "heap: invalid page allocation size")
 		pages := max(u64(1), (u64(oldSize) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE)
-		free_pages(u64(uintptr(p)), pages * shared.PAGE_SIZE)
+		backend_free_pages(u64(uintptr(p)), pages)
 		return
 	}
 
@@ -430,3 +427,4 @@ heap_proc :: proc(
 
 	return nil, nil
 }
+

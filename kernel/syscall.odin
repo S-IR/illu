@@ -102,7 +102,7 @@ syscall_mmap :: proc "contextless" (
 
 }
 
-syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.Error) {
+	syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.Error) {
 	context = gKernelCtx
 
 	cpu := gs_read_cpustate()
