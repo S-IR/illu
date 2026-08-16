@@ -177,6 +177,8 @@ cpu_prepare_sleep :: proc "c" () -> bool {
 
 	if cpu.rrHead != nil do return false
 	cpu.sleeping = true
+	lapic_disable_deadline()
+	ah.monitor_asm(rawptr(&cpu.rrHead))
 	return true
 
 }

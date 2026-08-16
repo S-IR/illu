@@ -251,7 +251,7 @@ timer_tick :: proc(frame: ^InterruptFrame) {
 		s.valid = true
 		run_abort(cpu.schedulerResumeRsp)
 	}
-	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
+	lapic_disable_deadline()
 }
 
 //should not return

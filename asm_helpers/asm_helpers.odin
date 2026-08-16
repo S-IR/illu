@@ -44,6 +44,7 @@ when !ODIN_TEST {
 		inb :: proc(port: u16) -> u8 ---
 
 		sti_asm :: proc() ---
+		monitor_asm :: proc(addr: rawptr) ---
 		read_rsp :: proc() -> u64 ---
 		read_rbp :: proc() -> u64 ---
 
@@ -91,6 +92,7 @@ when !ODIN_TEST {
 	inb :: proc "contextless" (port: u16) -> u8 {return 0}
 
 	sti_asm :: proc "contextless" () {}
+	monitor_asm :: proc "contextless" (addr: rawptr) {}
 
 	pit_delay_us :: proc "contextless" (us: u32) {}
 	read_rsp :: proc "contextless" () -> u64 {return 0}

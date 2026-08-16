@@ -502,6 +502,14 @@ fxsave_asm:
     fxsave (%rdi)
     ret
 
+.global monitor_asm
+monitor_asm:
+    mov %rdi, %rax
+    xor %ecx, %ecx
+    xor %edx, %edx
+    monitor
+    ret
+
 .global lock_asm
 .type lock_asm, @function
 lock_asm:
