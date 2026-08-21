@@ -3,3 +3,4 @@ diskimg/
 build-test.
 ovmf/
 *.txt
+*.ignorethis.*

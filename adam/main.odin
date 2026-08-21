@@ -2,10 +2,12 @@ package adam
 
 import "../lib/acpi"
 import "../lib/alloc"
+import "../lib/pci"
 import "../lib/syscalls"
 import "base:runtime"
+import "core:mem"
 @(export)
-_start :: proc "c" (rsdp: ^acpi.Rsdp) -> ! {
+_start :: proc "c" (pciesPtr: ^pci.Device, pciesLen: u64) -> ! {
 	context = runtime.default_context()
 	context.allocator = alloc.heap_allocator()
 
@@ -22,6 +24,13 @@ _start :: proc "c" (rsdp: ^acpi.Rsdp) -> ! {
 	myTEST := make([dynamic]u32)
 	for i in 0 ..< u32(10) do append(&myTEST, i)
 	delete(myTEST)
+
+	devices := mem.slice_ptr(pciesPtr, int(pciesLen))
+	sum: u32 = 0
+	for &device in devices {
+		sum += u32(device.bus)
+		device.bus = 0
+	}
 	// Smoke test passed.
 	syscalls.syscall_exit(42)
 }

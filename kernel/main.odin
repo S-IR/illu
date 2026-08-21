@@ -52,7 +52,9 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	gKernelCtx = context
 
 	sched_init(params.rsdp)
-	adam_init(params.adamImg, params.rsdp)
+
+	pcies := find_pci_devices(params.rsdp)
+	adam_init(params.adamImg, pcies)
 
 	cpu_idle_loop()
 }
