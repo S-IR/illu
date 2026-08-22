@@ -38,6 +38,12 @@ when !ODIN_TEST {
 		rdmsr_asm :: proc(msr: u32) -> u64 ---
 
 		rdtsc_asm :: proc() -> u64 ---
+		mmio_read_u8 :: proc(addr: rawptr) -> u8 ---
+		mmio_read_u16 :: proc(addr: rawptr) -> u16 ---
+		mmio_read_u32 :: proc(addr: rawptr) -> u32 ---
+		mmio_write_u8 :: proc(addr: rawptr, value: u8) ---
+		mmio_write_u16 :: proc(addr: rawptr, value: u16) ---
+		mmio_write_u32 :: proc(addr: rawptr, value: u32) ---
 		apic_stub_table: [6]uintptr
 
 		outb :: proc(port: u16, val: u8) ---
@@ -86,6 +92,12 @@ when !ODIN_TEST {
 	rdmsr_asm :: proc "contextless" (msr: u32) -> u64 {return 0}
 
 	rdtsc_asm :: proc "contextless" () -> u64 {return 0}
+	mmio_read_u8 :: proc "contextless" (addr: rawptr) -> u8 {return 0}
+	mmio_read_u16 :: proc "contextless" (addr: rawptr) -> u16 {return 0}
+	mmio_read_u32 :: proc "contextless" (addr: rawptr) -> u32 {return 0}
+	mmio_write_u8 :: proc "contextless" (addr: rawptr, value: u8) {}
+	mmio_write_u16 :: proc "contextless" (addr: rawptr, value: u16) {}
+	mmio_write_u32 :: proc "contextless" (addr: rawptr, value: u32) {}
 	apic_stub_table: [6]uintptr
 
 	outb :: proc "contextless" (port: u16, val: u8) {}

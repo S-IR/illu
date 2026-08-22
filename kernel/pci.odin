@@ -3,6 +3,7 @@ package kernel
 import "../lib/acpi"
 import "../lib/pci"
 import "../lib/shared"
+import ah "../asm_helpers"
 import "base:intrinsics"
 import "core:mem"
 import "pmm"
@@ -36,8 +37,8 @@ find_pci_devices :: proc(rsdp: ^acpi.Rsdp) -> (devices: [dynamic]pci.Device) {
 			for device in u8(0) ..< 32 {
 				functionCount := u8(1)
 				header0 := kernel_pci_header(entry.baseAddr, entry.startBus, bus, device, 0)
-				if header0.vendorId == pci.PCI_NO_DEVICE do continue
-				if header0.headerType & pci.PCI_MULTIFUNCTIONAL != 0 do functionCount = 8
+				if kernel_pci_read_u16(header0, 0x00) == pci.PCI_NO_DEVICE do continue
+				if kernel_pci_read_u8(header0, 0x0E) & pci.PCI_MULTIFUNCTIONAL != 0 do functionCount = 8
 				for function in u8(0) ..< functionCount {
 					header := kernel_pci_header(
 						entry.baseAddr,
@@ -46,30 +47,30 @@ find_pci_devices :: proc(rsdp: ^acpi.Rsdp) -> (devices: [dynamic]pci.Device) {
 						device,
 						function,
 					)
-					if header.vendorId == pci.PCI_NO_DEVICE do continue
+					if kernel_pci_read_u16(header, 0x00) == pci.PCI_NO_DEVICE do continue
 					barCount: u32 = 6
-					if (header.headerType & 0x7F) == 0x01 do barCount = 2
+					if (kernel_pci_read_u8(header, 0x0E) & 0x7F) == 0x01 do barCount = 2
 					info := pci.Device {
 						segment           = entry.segmentGroup,
 						bus               = bus,
 						device            = device,
 						function          = function,
-						vendorId          = header.vendorId,
-						deviceId          = header.deviceId,
-						classCode         = header.classCode,
-						subclass          = header.subclass,
-						progIf            = header.progIf,
+						vendorId          = kernel_pci_read_u16(header, 0x00),
+						deviceId          = kernel_pci_read_u16(header, 0x02),
+						classCode         = pci.Class(kernel_pci_read_u8(header, 0x0B)),
+						subclass          = pci.Subclass(kernel_pci_read_u8(header, 0x0A)),
+						progIf            = kernel_pci_read_u8(header, 0x09),
 						configBase        = u64(uintptr(header)),
-						revisionId        = header.revisionId,
-						headerType        = header.headerType,
-						command           = header.command,
-						status            = header.status,
-						subsystemVendorId = header.subsystemVendorId,
-						subsystemDeviceId = header.subsystemDeviceId,
-						interruptLine     = header.interruptLine,
-						interruptPin      = header.interruptPin,
+						revisionId        = kernel_pci_read_u8(header, 0x08),
+						headerType        = kernel_pci_read_u8(header, 0x0E),
+						command           = kernel_pci_read_u16(header, 0x04),
+						status            = kernel_pci_read_u16(header, 0x06),
+						subsystemVendorId = kernel_pci_read_u16(header, 0x2C),
+						subsystemDeviceId = kernel_pci_read_u16(header, 0x2E),
+						interruptLine     = kernel_pci_read_u8(header, 0x3C),
+						interruptPin      = kernel_pci_read_u8(header, 0x3D),
 						bars              = {},
-						capabilitiesPtr   = header.capabilitiesPtr,
+						capabilitiesPtr   = kernel_pci_read_u8(header, 0x34),
 						capabilityCount   = 0,
 						capabilities      = {},
 					}
@@ -108,12 +109,28 @@ kernel_pci_header :: proc(base: u64, start, bus, device, function: u8) -> ^pci.H
 	return (^pci.Header)(uintptr(address))
 }
 
+kernel_pci_read_u8 :: proc(header: ^pci.Header, offset: uintptr) -> u8 {
+	return ah.mmio_read_u8(rawptr(uintptr(header) + offset))
+}
+
+kernel_pci_read_u16 :: proc(header: ^pci.Header, offset: uintptr) -> u16 {
+	return ah.mmio_read_u16(rawptr(uintptr(header) + offset))
+}
+
+kernel_pci_read_u32 :: proc(header: ^pci.Header, offset: uintptr) -> u32 {
+	return ah.mmio_read_u32(rawptr(uintptr(header) + offset))
+}
+
+kernel_pci_write_u32 :: proc(header: ^pci.Header, offset: uintptr, value: u32) {
+	ah.mmio_write_u32(rawptr(uintptr(header) + offset), value)
+}
+
 kernel_pci_bar_read :: proc(header: ^pci.Header, index: u32) -> u32 {
-	return (^u32)(uintptr(&header.bar0) + uintptr(index * 4))^
+	return kernel_pci_read_u32(header, uintptr(0x10) + uintptr(index * 4))
 }
 
 kernel_pci_bar_write :: proc(header: ^pci.Header, index: u32, value: u32) {
-	(^u32)(uintptr(&header.bar0) + uintptr(index * 4))^ = value
+	kernel_pci_write_u32(header, uintptr(0x10) + uintptr(index * 4), value)
 }
 
 kernel_pci_bar_size :: proc(header: ^pci.Header, index: u32, is64: bool) -> u64 {
@@ -148,7 +165,7 @@ kernel_pci_capabilities :: proc(h: ^pci.Header, out: ^[64]pci.Capability) -> (co
 
 		seen[ptr] = true
 
-		capHeader := (^u16)(uintptr(h) + uintptr(ptr))^
+		capHeader := ah.mmio_read_u16(rawptr(uintptr(h) + uintptr(ptr)))
 
 		out[count] = pci.Capability {
 			id     = u8(capHeader & 0xFF),
