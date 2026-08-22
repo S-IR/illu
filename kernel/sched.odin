@@ -35,12 +35,13 @@ PCIAddress :: bit_field u64 {
 	device:   u8  | 8,
 	function: u8  | 8,
 }
-CpuState :: struct {
+CpuState :: struct #align(16) {
 	self:               ^CpuState,
 	kernelStackTop:     u64,
 	userSyscallRsp:     u64,
 	runState:           ^SavedState,
 	schedulerResumeRsp: u64, // 32 -- saved mid-call %rsp inside domain_pick_and_enter; where run_abort jumps back to
+	syscallFrame:       ^SavedState,
 	apicId:             u32,
 	index:              u32,
 	rrCurrent:          ^Execution,
@@ -52,6 +53,7 @@ CpuState :: struct {
 #assert(offset_of(CpuState, userSyscallRsp) == 16)
 #assert(offset_of(CpuState, runState) == 24)
 #assert(offset_of(CpuState, schedulerResumeRsp) == 32)
+#assert(offset_of(CpuState, syscallFrame) == 40)
 
 SavedState :: struct #align (16) {
 	rax, rbx, rcx, rdx:       u64,

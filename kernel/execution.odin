@@ -9,9 +9,15 @@ import "core:mem"
 import "pmm"
 import "print"
 Execution :: struct {
-	state:  SavedState,
+	schedulerState: ExecutionState,
+	state:          SavedState,
 	domain: ^ProtectionDomain,
 	next:   ^Execution,
+}
+
+ExecutionState :: enum {
+	Runnable,
+	WaitingOnInterrupt,
 }
 
 when !ODIN_TEST {
@@ -50,7 +56,7 @@ execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execu
 	if err != nil do return nil
 
 	exec := cast(^Execution)execMem
-	exec^ = Execution{state = state, domain = domain}
+	exec^ = Execution{schedulerState = .Runnable, state = state, domain = domain}
 	intrinsics.atomic_add(&domain.executionCount, 1)
 	return exec
 }
@@ -59,6 +65,7 @@ execution_release :: proc(exec: ^Execution) {
 	print.kassert(exec != nil, "execution_release: nil execution")
 	if exec == nil do return
 	defer free(exec)
+	interrupt_release_execution(exec)
 
 	domain := exec.domain
 	print.kassert(domain != nil, "execution_release: nil domain")
@@ -115,6 +122,26 @@ execution_enqueue :: proc "contextless" (e: ^Execution, cpu: ^CpuState) {
 	if cpu.sleeping do send_ipi(cpu.apicId, VECTOR_APIC_IPI)
 
 
+}
+
+execution_enqueue_front :: proc "contextless" (e: ^Execution, cpu: ^CpuState) {
+	print.kassert(e != nil, "execution_enqueue_front: nil execution")
+	print.kassert(cpu != nil, "execution_enqueue_front: nil CPU")
+	if e == nil || cpu == nil do return
+	print.kassert(e.domain != nil, "execution_enqueue_front: nil domain")
+	if e.domain == nil do return
+	print.kassert(intrinsics.atomic_load(&e.domain.executionCount) > 0,
+		"execution_enqueue_front: domain has no executions")
+
+	{
+		spinlock.lock(&cpu.rrLock)
+		defer spinlock.unlock(&cpu.rrLock)
+
+		e.next = cpu.rrHead
+		cpu.rrHead = e
+		if cpu.rrTail == nil do cpu.rrTail = e
+	}
+	if cpu.sleeping do send_ipi(cpu.apicId, VECTOR_APIC_IPI)
 }
 execution_dequeue :: proc "contextless" (cpu: ^CpuState) -> (e: ^Execution) {
 	spinlock.lock(&cpu.rrLock)

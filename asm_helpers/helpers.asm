@@ -635,14 +635,50 @@ syscall_entry:
 
     push %rcx
     push %r11
+    sub $688, %rsp
+    mov %rsp, %gs:40
+
+    mov 712(%rsp), %rax
+    mov %rax, SS_RAX(%rsp)
+    mov %rbx, SS_RBX(%rsp)
+    mov 696(%rsp), %rax
+    mov %rax, SS_RCX(%rsp)
+    mov %rdx, SS_RDX(%rsp)
+    mov %rsi, SS_RSI(%rsp)
+    mov %rdi, SS_RDI(%rsp)
+    mov %rbp, SS_RBP(%rsp)
+    mov %r8, SS_R8(%rsp)
+    mov %r9, SS_R9(%rsp)
+    mov %r10, SS_R10(%rsp)
+    mov 688(%rsp), %rax
+    mov %rax, SS_R11(%rsp)
+    mov %r12, SS_R12(%rsp)
+    mov %r13, SS_R13(%rsp)
+    mov %r14, SS_R14(%rsp)
+    mov %r15, SS_R15(%rsp)
+    mov 696(%rsp), %rax
+    mov %rax, SS_RIP(%rsp)
+    mov $0x2B, %rax
+    mov %rax, SS_CS(%rsp)
+    mov 688(%rsp), %rax
+    mov %rax, SS_RFLAGS(%rsp)
+    mov %gs:16, %rax
+    mov %rax, SS_RSP(%rsp)
+    mov $0x23, %rax
+    mov %rax, SS_SS(%rsp)
+    mov $1, %rax
+    mov %rax, 672(%rsp)
+
     mov %r8,  %r9
     mov %r10, %r8
     mov %rdx, %rcx
     mov %rsi, %rdx
     mov %rdi, %rsi
-    mov 24(%rsp), %rdi
+    mov 712(%rsp), %rdi
     call syscall_dispatch
 
+    movq $0, %gs:40
+    add $688, %rsp
     pop %r11
     pop %rcx
     pop %r10

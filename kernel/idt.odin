@@ -1,5 +1,6 @@
 package kernel
 import ah "../asm_helpers"
+import "../lib/spinlock"
 import "base:runtime"
 import "pmm"
 import "print"
@@ -18,6 +19,8 @@ IdtEntry :: struct #packed {
 
 idt: [256]IdtEntry
 GIDTDescriptor: ah.X86TableDescriptor
+interruptLock: spinlock.Spinlock
+interruptExecutions: [256]^Execution
 
 idt_init :: proc() {
 	for isrTable, i in ah.isr_table {
@@ -114,10 +117,14 @@ InterruptFrame :: struct #packed {
 	ss:                 u64,
 }
 
+interrupt_frame_from_user :: #force_inline proc "contextless" (frame: ^InterruptFrame) -> bool {
+	return (frame.cs & 3) == 3
+}
+
 
 @(export)
 exception_handler :: proc "c" (frame: ^InterruptFrame) {
-	userMode := (frame.cs & 3) == 3
+	userMode := interrupt_frame_from_user(frame)
 	if userMode {
 		ah.write_cr3(pmm.kernelPML4)
 	}
@@ -215,11 +222,11 @@ print_reg :: proc "contextless" (name: string, val: u64) {
 	print.serial_writeln("")
 }
 irq_handler :: proc(frame: ^InterruptFrame) {
-	defer lapic_send_eoi()
 	v := int(frame.interruptNumber)
-	switch v {
+	reschedule := false
+	vectorValueSwitch: switch v {
 	case VECTOR_APIC_TIMER:
-		timer_tick(frame)
+		reschedule = timer_tick(frame)
 	case VECTOR_APIC_ERROR:
 		print.serial_writeln("lapic: error fired")
 	case VECTOR_APIC_THERMAL:
@@ -229,29 +236,110 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 	case VECTOR_APIC_LINT1:
 		print.serial_writeln("lapic: lint1 fired")
 	case VECTOR_APIC_IPI:
-		return
+		break
 	case:
+		if v >= MSI_VECTOR_FIRST && v < MSI_VECTOR_FIRST + MSI_VECTOR_COUNT {
+			reschedule = interrupt_wake(v, frame)
+			break vectorValueSwitch
+		}
 		print.serial_write("lapic: unhandled irq=")
 		print.serial_write_hex(u64(v))
 		print.serial_writeln("")
 	}
-}
-timer_tick :: proc(frame: ^InterruptFrame) {
-	cpu := gs_read_cpustate()
-	exec := cpu.rrCurrent
-	if exec != nil && cpu.schedulerResumeRsp != 0 {
-		s := &exec.state
-		s.rax = frame.rax; s.rbx = frame.rbx; s.rcx = frame.rcx; s.rdx = frame.rdx
-		s.rsi = frame.rsi; s.rdi = frame.rdi; s.rbp = frame.rbp
-		s.r8 = frame.r8; s.r9 = frame.r9; s.r10 = frame.r10; s.r11 = frame.r11
-		s.r12 = frame.r12; s.r13 = frame.r13; s.r14 = frame.r14; s.r15 = frame.r15
-		s.rip = frame.rip; s.cs = frame.cs; s.rflags = frame.rflags
-		s.rsp = frame.rsp; s.ss = frame.ss
-		fxsave_asm(&s.fxsave)
-		s.valid = true
-		run_abort(cpu.schedulerResumeRsp)
+
+	lapic_send_eoi()
+	if reschedule {
+		cpu := gs_read_cpustate()
+		if cpu != nil && cpu.schedulerResumeRsp != 0 {
+			run_abort(cpu.schedulerResumeRsp)
+		}
 	}
-	lapic_disable_deadline()
+}
+
+save_execution_from_interrupt :: proc(execution: ^Execution, frame: ^InterruptFrame) {
+	state := &execution.state
+	state.rax = frame.rax
+	state.rbx = frame.rbx
+	state.rcx = frame.rcx
+	state.rdx = frame.rdx
+	state.rsi = frame.rsi
+	state.rdi = frame.rdi
+	state.rbp = frame.rbp
+	state.r8 = frame.r8
+	state.r9 = frame.r9
+	state.r10 = frame.r10
+	state.r11 = frame.r11
+	state.r12 = frame.r12
+	state.r13 = frame.r13
+	state.r14 = frame.r14
+	state.r15 = frame.r15
+	state.rip = frame.rip
+	state.cs = frame.cs
+	state.rflags = frame.rflags
+	state.rsp = frame.rsp
+	state.ss = frame.ss
+	fxsave_asm(&state.fxsave)
+	state.valid = true
+}
+
+interrupt_wake :: proc(vector: int, frame: ^InterruptFrame) -> (reschedule: bool) {
+	cpu := gs_read_cpustate()
+	if cpu == nil do return false
+
+	{
+		spinlock.lock(&interruptLock)
+		defer spinlock.unlock(&interruptLock)
+
+		target := interruptExecutions[vector]
+		when ODIN_DEBUG {
+			assert(target != nil)
+			assert(target.schedulerState == .WaitingOnInterrupt)
+		}
+		if target == nil || target.schedulerState != .WaitingOnInterrupt do return false
+
+		current := cpu.rrCurrent
+		if current != nil && interrupt_frame_from_user(frame) {
+			save_execution_from_interrupt(current, frame)
+			current.schedulerState = .Runnable
+			cpu.rrCurrent = nil
+			execution_enqueue(current, cpu)
+			reschedule = true
+		}
+
+		target.schedulerState = .Runnable
+		execution_enqueue_front(target, cpu)
+	}
+
+	return reschedule
+}
+
+timer_tick :: proc(frame: ^InterruptFrame) -> (reschedule: bool) {
+	cpu := gs_read_cpustate()
+	if cpu == nil do return false
+
+	current := cpu.rrCurrent
+	if current == nil || !interrupt_frame_from_user(frame) do return false
+
+	save_execution_from_interrupt(current, frame)
+	current.schedulerState = .Runnable
+	cpu.rrCurrent = nil
+	execution_enqueue(current, cpu)
+	return true
+}
+
+interrupt_release_execution :: proc "contextless" (execution: ^Execution) {
+	if execution == nil do return
+
+	{
+		spinlock.lock(&interruptLock)
+		defer spinlock.unlock(&interruptLock)
+
+		for vector in 0 ..< len(interruptExecutions) {
+			if interruptExecutions[vector] == execution {
+				interruptExecutions[vector] = nil
+			}
+		}
+	}
 }
 
 //should not return

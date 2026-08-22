@@ -1,11 +1,12 @@
 package kernel
 import "../lib/lmem"
 import "../lib/syscalls"
+import "../lib/spinlock"
 import "core:mem"
 import "pmm"
 import "print"
 @(export)
-syscall_dispatch :: proc "c" (nr, a1, a2, a3, a4, a5: u64) -> (err: syscalls.Error, r1: u64) {
+syscall_dispatch :: proc "c" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: u64) {
 	switch syscalls.Syscall(nr) {
 	case .Exit:
 		print.serial_write("exit code: ")
@@ -14,32 +15,36 @@ syscall_dispatch :: proc "c" (nr, a1, a2, a3, a4, a5: u64) -> (err: syscalls.Err
 		exec_exit_current()
 	case .MMap:
 		count := a1
-		if count == 0 do return .MMapInvalidSize, 0
+		if count == 0 do return u64(syscalls.MMapError.InvalidSize), 0
 
-		if a2 >= len(lmem.PageSize) do return .MMapInvalidPageSize, 0
+		if a2 >= len(lmem.PageSize) do return u64(syscalls.MMapError.InvalidPageSize), 0
 		pageSize := transmute(lmem.PageSize)a2
 
 		pageFlags := transmute(lmem.PageFlags)a3
 		pageFlags += {.User}
 
-		return syscall_mmap(count, pageSize, pageFlags)
+		mmapErr, addr := syscall_mmap(count, pageSize, pageFlags)
+		return u64(mmapErr), addr
 	case .MFree:
-		return syscall_mfree(a1), 0
+		return u64(syscall_mfree(a1)), 0
 	case .InterruptVectorGet:
-		return syscall_interrupt_vector_get(a1)
+		interruptErr, vector := syscall_interrupt_vector_get(a1)
+		return u64(interruptErr), vector
+	case .InterruptWait:
+		return u64(syscall_interrupt_wait(a1)), 0
 	}
-	return .None, 0
+	return 0, 0
 }
 syscall_mmap :: proc "contextless" (
 	count: u64,
 	size: lmem.PageSize,
 	flags: lmem.PageFlags,
 ) -> (
-	err: syscalls.Error,
+	err: syscalls.MMapError,
 	phys: u64,
 ) {
 	context = gKernelCtx
-	if count == 0 do return .MMapInvalidSize, 0
+	if count == 0 do return .InvalidSize, 0
 
 	pageBytes: u64
 	switch size {
@@ -50,8 +55,8 @@ syscall_mmap :: proc "contextless" (
 	case ._1GB:
 		pageBytes = mem.Gigabyte
 	}
-	if pageBytes == 0 do return .MMapInvalidPageSize, 0
-	if count > max(u64) / pageBytes do return .MMapInvalidSize, 0
+	if pageBytes == 0 do return .InvalidPageSize, 0
+	if count > max(u64) / pageBytes do return .InvalidSize, 0
 	totalBytes := count * pageBytes
 
 	cpu := gs_read_cpustate()
@@ -64,12 +69,12 @@ syscall_mmap :: proc "contextless" (
 	assert(cpu.rrCurrent.domain != nil)
 
 	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
-		return .MMapInvalidSize, 0
+		return .InvalidSize, 0
 	}
 	domain := cpu.rrCurrent.domain
 	assert(domain.allocs != nil)
 	if domain.allocs == nil {
-		return .MMapTrackingFailed, 0
+		return .TrackingFailed, 0
 	}
 
 	// Present and PS are controlled by map_page. User is mandatory for this
@@ -79,7 +84,7 @@ syscall_mmap :: proc "contextless" (
 	mapFlags += {.User}
 
 	allocatedPhys := uintptr(pmm.alloc_pages(totalBytes))
-	if allocatedPhys == 0 || allocatedPhys == max(uintptr) do return .MMapOutOfMemory, 0
+	if allocatedPhys == 0 || allocatedPhys == max(uintptr) do return .OutOfMemory, 0
 
 	for i in u64(0) ..< count {
 		pmm.map_page(domain.pml4, u64(allocatedPhys) + i * pageBytes, size, mapFlags)
@@ -87,11 +92,11 @@ syscall_mmap :: proc "contextless" (
 	_, allocation, inserted, allocErr := map_entry(&domain.allocs, allocatedPhys)
 	if allocErr != nil {
 		pmm.free_pages(u64(allocatedPhys), totalBytes)
-		return .MMapTrackingFailed, 0
+		return .TrackingFailed, 0
 	}
 	if !inserted {
 		pmm.free_pages(u64(allocatedPhys), totalBytes)
-		return .MMapTrackingFailed, 0
+		return .TrackingFailed, 0
 	}
 
 	allocation^ = {
@@ -104,7 +109,7 @@ syscall_mmap :: proc "contextless" (
 
 }
 
-syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.Error) {
+syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.MFreeError) {
 	context = gKernelCtx
 
 	cpu := gs_read_cpustate()
@@ -112,17 +117,17 @@ syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.Error) {
 	assert(cpu.rrCurrent != nil)
 	assert(cpu.rrCurrent.domain != nil)
 	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
-		return .MFreeInvalidAddress
+		return .InvalidAddress
 	}
 	domain := cpu.rrCurrent.domain
 
 	if domain.allocs == nil {
-		return .MFreeInvalidAddress
+		return .InvalidAddress
 	}
 
 	allocation, found := domain.allocs[uintptr(addr)]
 	if !found {
-		return .MFreeInvalidAddress
+		return .InvalidAddress
 	}
 
 	pageBytes: u64
@@ -146,21 +151,20 @@ syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.Error) {
 
 MSI_VECTOR_FIRST :: 32
 MSI_VECTOR_COUNT :: 208
-msiVectorUsed: [MSI_VECTOR_COUNT]bool
 
 syscall_interrupt_vector_get :: proc "contextless" (
 	pciAddrRaw: u64,
 ) -> (
-	err: syscalls.Error,
+	err: syscalls.InterruptVectorGetError,
 	vector: u64,
 ) {
 	cpu := gs_read_cpustate()
 	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
-		return .InterruptNoPermission, 0
+		return .NoPermission, 0
 	}
 
 	domain := cpu.rrCurrent.domain
-	if domain.devices == nil do return .InterruptNoPermission, 0
+	if domain.devices == nil do return .NoPermission, 0
 
 	wanted := transmute(PCIAddress)pciAddrRaw
 	hasDevice := false
@@ -170,13 +174,54 @@ syscall_interrupt_vector_get :: proc "contextless" (
 			break
 		}
 	}
-	if !hasDevice do return .InterruptNoPermission, 0
+	if !hasDevice do return .NoPermission, 0
 
-	for i in 0 ..< MSI_VECTOR_COUNT {
-		if msiVectorUsed[i] do continue
-		msiVectorUsed[i] = true
-		return .None, u64(MSI_VECTOR_FIRST + i)
+	{
+		spinlock.lock(&interruptLock)
+		defer spinlock.unlock(&interruptLock)
+
+		for i in 0 ..< MSI_VECTOR_COUNT {
+			vector := MSI_VECTOR_FIRST + i
+			if interruptExecutions[vector] != nil do continue
+			interruptExecutions[vector] = cpu.rrCurrent
+			return .None, u64(vector)
+		}
 	}
 
-	return .InterruptNoVectors, 0
+	return .NoVectors, 0
+}
+
+syscall_interrupt_wait :: proc "contextless" (vectorRaw: u64) -> (err: syscalls.InterruptWaitError) {
+	cpu := gs_read_cpustate()
+	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+		return .NoPermission
+	}
+	if vectorRaw >= 256 do return .InvalidVector
+	if cpu.syscallFrame == nil do return .NoPermission
+
+	execution := cpu.rrCurrent
+	vector := int(vectorRaw)
+
+	{
+		spinlock.lock(&interruptLock)
+		defer spinlock.unlock(&interruptLock)
+
+		if interruptExecutions[vector] != execution {
+			return .NoPermission
+		}
+		if execution.schedulerState == .WaitingOnInterrupt {
+			return .AlreadyWaiting
+		}
+
+		execution.state = cpu.syscallFrame^
+		fxsave_asm(&execution.state.fxsave)
+		execution.state.rax = u64(syscalls.InterruptWaitError.None)
+		execution.state.rdx = 0
+		execution.schedulerState = .WaitingOnInterrupt
+		cpu.rrCurrent = nil
+	}
+
+	lapic_disable_deadline()
+	run_abort(cpu.schedulerResumeRsp)
+	return .None
 }
