@@ -18,3 +18,4 @@
 SYSCALL_NORET syscall_exit,  0
 SYSCALL_STUB  syscall_mmap,  1
 SYSCALL_STUB  syscall_mfree, 2
+SYSCALL_STUB  syscall_interrupt_vector_get, 3

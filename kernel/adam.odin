@@ -86,11 +86,27 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")
 
 	allocs, allocMapErr := make(map[uintptr]Alloc, ALLOC_INITIAL_CAPACITY, context.allocator)
+	print.kensure(allocMapErr == nil, "adam_init: failed to alloc adam alloc map")
 
+	devices: [dynamic]PCIAddress
+	devices, allocMapErr = make([dynamic]PCIAddress, len(pcies), context.allocator)
+	print.kensure(allocMapErr == nil, "adam_init: failed to alloc adam devices array")
 
+	for pcieDevice in pcies {
+		append(
+			&devices,
+			PCIAddress {
+				segment = pcieDevice.segment,
+				bus = pcieDevice.bus,
+				device = pcieDevice.device,
+				function = pcieDevice.function,
+			},
+		)
+	}
 	domain^ = ProtectionDomain {
-		pml4   = newPML4,
-		allocs = allocs,
+		pml4    = newPML4,
+		allocs  = allocs,
+		devices = devices,
 	}
 
 	_, adamAlloc, adamInserted, adamAllocErr := map_entry(&domain.allocs, uintptr(adamImg.base))

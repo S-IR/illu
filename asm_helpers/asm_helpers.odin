@@ -26,7 +26,7 @@ when !ODIN_TEST {
 		load_tss_asm :: proc(sel: u16) ---
 
 		isr_table: [32]uintptr
-		irq_stub_table: [32]uintptr
+		irq_stub_table: [208]uintptr
 
 		lidt_asm :: proc(desc: ^X86TableDescriptor) ---
 
@@ -74,7 +74,7 @@ when !ODIN_TEST {
 	load_tss_asm :: proc "contextless" (sel: u16) {}
 
 	isr_table: [32]uintptr
-	irq_stub_table: [32]uintptr
+	irq_stub_table: [208]uintptr
 
 	lidt_asm :: proc "contextless" (desc: ^X86TableDescriptor) {}
 

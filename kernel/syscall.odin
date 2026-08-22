@@ -6,7 +6,7 @@ import "pmm"
 import "print"
 @(export)
 syscall_dispatch :: proc "c" (nr, a1, a2, a3, a4, a5: u64) -> (err: syscalls.Error, r1: u64) {
-	#partial switch syscalls.Syscall(nr) {
+	switch syscalls.Syscall(nr) {
 	case .Exit:
 		print.serial_write("exit code: ")
 		print.serial_write_u64(a1)
@@ -25,6 +25,8 @@ syscall_dispatch :: proc "c" (nr, a1, a2, a3, a4, a5: u64) -> (err: syscalls.Err
 		return syscall_mmap(count, pageSize, pageFlags)
 	case .MFree:
 		return syscall_mfree(a1), 0
+	case .InterruptVectorGet:
+		return syscall_interrupt_vector_get(a1)
 	}
 	return .None, 0
 }
@@ -102,7 +104,7 @@ syscall_mmap :: proc "contextless" (
 
 }
 
-	syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.Error) {
+syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.Error) {
 	context = gKernelCtx
 
 	cpu := gs_read_cpustate()
@@ -140,4 +142,41 @@ syscall_mmap :: proc "contextless" (
 	_, aErr := shrink(&domain.allocs)
 	assert(aErr == nil)
 	return .None
+}
+
+MSI_VECTOR_FIRST :: 32
+MSI_VECTOR_COUNT :: 208
+msiVectorUsed: [MSI_VECTOR_COUNT]bool
+
+syscall_interrupt_vector_get :: proc "contextless" (
+	pciAddrRaw: u64,
+) -> (
+	err: syscalls.Error,
+	vector: u64,
+) {
+	cpu := gs_read_cpustate()
+	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+		return .InterruptNoPermission, 0
+	}
+
+	domain := cpu.rrCurrent.domain
+	if domain.devices == nil do return .InterruptNoPermission, 0
+
+	wanted := transmute(PCIAddress)pciAddrRaw
+	hasDevice := false
+	for device in domain.devices {
+		if device == wanted {
+			hasDevice = true
+			break
+		}
+	}
+	if !hasDevice do return .InterruptNoPermission, 0
+
+	for i in 0 ..< MSI_VECTOR_COUNT {
+		if msiVectorUsed[i] do continue
+		msiVectorUsed[i] = true
+		return .None, u64(MSI_VECTOR_FIRST + i)
+	}
+
+	return .InterruptNoVectors, 0
 }

@@ -27,8 +27,14 @@ ProtectionDomain :: struct {
 	executionCount: u64,
 	executionLock:  spinlock.Spinlock,
 	allocs:         map[uintptr]Alloc,
+	devices:        [dynamic]PCIAddress,
 }
-
+PCIAddress :: bit_field u64 {
+	segment:  u16 | 16,
+	bus:      u8  | 8,
+	device:   u8  | 8,
+	function: u8  | 8,
+}
 CpuState :: struct {
 	self:               ^CpuState,
 	kernelStackTop:     u64,
