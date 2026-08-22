@@ -12,6 +12,9 @@ import "print"
 
 ADAM_STACK_SIZE :: 16 * mem.Kilobyte
 MMIO_FLAGS :: lmem.PageFlags{.Present, .User, .Write, .PWT, .PCD, .NX}
+
+CONFIG_FLAGS :: MMIO_FLAGS
+
 adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 	assert((adamImg.end - adamImg.base) > 0)
 
@@ -35,8 +38,11 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 	}
 
 	for device in pcies {
+		configPage := pmm.addr_round_down_to_page(device.configBase)
+		pmm.map_page(newPML4, configPage, ._4KB, CONFIG_FLAGS)
+
 		for bar in device.bars {
-			if bar.addr == 0 || bar.size == 0 do continue
+			if !bar.isMemory || bar.addr == 0 || bar.size == 0 do continue
 
 			start := pmm.addr_round_down_to_page(bar.addr)
 			end := pmm.addr_round_up_to_page(bar.addr + bar.size)

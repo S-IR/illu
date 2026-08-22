@@ -28,8 +28,41 @@ _start :: proc "c" (pciesPtr: ^pci.Device, pciesLen: u64) -> ! {
 	devices := mem.slice_ptr(pciesPtr, int(pciesLen))
 	sum: u32 = 0
 	for &device in devices {
-		sum += u32(device.bus)
-		device.bus = 0
+		config := (^pci.Header)(uintptr(device.configBase))
+
+
+		command := pci.config_read_u16(&device, 0x04)
+		command |= pci.COMMAND_MEMORY
+		// command |= pci.COMMAND_BUS_MASTER
+
+		pci.config_write_u16(&device, pci.CONFIG_COMMAND_OFFSET, command)
+
+		updated := pci.config_read_u16(&device, pci.CONFIG_COMMAND_OFFSET)
+
+		msiOffset, hasMsi := pci.find_capability(&device, pci.CAPABILITY_MSI)
+
+		if !hasMsi do continue
+		command = pci.config_read_u16(&device, 0x04)
+		command |= pci.COMMAND_BUS_MASTER
+		pci.config_write_u16(&device, pci.CONFIG_COMMAND_OFFSET, command)
+
+		control := pci.config_read_u16(&device, uintptr(msiOffset) + pci.MSI_CONTROL)
+		is64Bit := control & pci.MSI_CONTROL_64BIT != 0
+		maskable := control & pci.MSI_CONTROL_MASK_CAPABLE != 0
+
+		addressLow := pci.config_read_u32(&device, uintptr(msiOffset) + pci.MSI_MESSAGE_ADDR)
+
+		addressHigh: u32 = 0
+		dataOffset := pci.MSI_MESSAGE_DATA32
+
+		if is64Bit {
+			addressHigh = pci.config_read_u32(&device, uintptr(msiOffset) + uintptr(0x08))
+			dataOffset = pci.MSI_MESSAGE_DATA64
+
+		}
+		messageData := pci.config_read_u16(&device, uintptr(msiOffset) + dataOffset)
+
+
 	}
 	// Smoke test passed.
 	syscalls.syscall_exit(42)
