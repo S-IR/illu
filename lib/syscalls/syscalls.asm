@@ -38,3 +38,5 @@ syscall_multiplexed_memory_write:
     mov $7, %eax
     syscall
     ret
+
+SYSCALL_STUB  syscall_debug_print, 1000

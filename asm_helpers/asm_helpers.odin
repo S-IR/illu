@@ -48,6 +48,7 @@ when !ODIN_TEST {
 
 		outb :: proc(port: u16, val: u8) ---
 		inb :: proc(port: u16) -> u8 ---
+		cpu_pause :: proc() ---
 
 		sti_asm :: proc() ---
 		monitor_asm :: proc(addr: rawptr) ---
@@ -102,6 +103,7 @@ when !ODIN_TEST {
 
 	outb :: proc "contextless" (port: u16, val: u8) {}
 	inb :: proc "contextless" (port: u16) -> u8 {return 0}
+	cpu_pause :: proc "contextless" () {}
 
 	sti_asm :: proc "contextless" () {}
 	monitor_asm :: proc "contextless" (addr: rawptr) {}

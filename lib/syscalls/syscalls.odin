@@ -10,6 +10,10 @@ Syscall :: enum {
 	MultiplexedMemoryCreate,
 	MultiplexedMemoryRead,
 	MultiplexedMemoryWrite,
+	// Parked at a high, isolated number (debug-build only, see ODIN_DEBUG
+	// below) so it never collides with a real syscall number as the table
+	// above grows.
+	DebugPrint = 1000,
 }
 
 MMapError :: enum u64 {
@@ -63,6 +67,24 @@ when !ODIN_TEST {
 			syscall_multiplexed_memory_create :: proc(phys, size: u64) -> (err: u64, handle: u64) ---
 			syscall_multiplexed_memory_read :: proc(handle, offset, dest, size, width: u64) -> (err: u64) ---
 			syscall_multiplexed_memory_write :: proc(handle, offset, source, size, width: u64) -> (err: u64) ---
+		}
+
+		// Debug-only: writes `label: value (0xvalue)` to the kernel serial
+		// log. `label` is read directly out of adam's (identity-mapped)
+		// memory by the kernel -- same trust model as every other pointer
+		// adam already hands the kernel elsewhere in this syscall table, and
+		// fine for a debug-only path. Not gated by a protection domain
+		// permission, and only linked into -debug builds (see ODIN_DEBUG)
+		// -- never reachable from a release binary.
+		when ODIN_DEBUG {
+			@(default_calling_convention = "sysv")
+			foreign _ {
+				syscall_debug_print :: proc(labelPtr: rawptr, labelLen: u64, value: u64) ---
+			}
+
+			syscall_debug_print_userspace :: proc "contextless" (label: string, value: u64) {
+				syscall_debug_print(raw_data(label), u64(len(label)), value)
+			}
 		}
 
 		syscall_mmap_userspace :: proc "contextless" (

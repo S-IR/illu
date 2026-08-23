@@ -45,6 +45,24 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: 
 		return u64(syscall_multiplexed_memory_read(a1, a2, a3, a4, a5)), 0
 	case .MultiplexedMemoryWrite:
 		return u64(syscall_multiplexed_memory_write(a1, a2, a3, a4, a5)), 0
+	case .DebugPrint:
+		// Debug-only: prints "dbg: <label>: <value> (0x<value>)" to the
+		// serial log. a1/a2 are a (ptr, len) string read straight out of
+		// adam's identity-mapped memory -- fine for a debug-only path, same
+		// trust model as every other pointer adam hands the kernel. Compiled
+		// out entirely in non -debug builds, and unreachable from userspace
+		// there too (lib/syscalls only emits the caller-side stub under
+		// ODIN_DEBUG).
+		when ODIN_DEBUG {
+			label := string(([^]u8)(uintptr(a1))[:a2])
+			print.serial_write("dbg: ")
+			print.serial_write(label)
+			print.serial_write(": ")
+			print.serial_write_u64(a3)
+			print.serial_write(" (0x")
+			print.serial_write_hex(a3)
+			print.serial_writeln(")")
+		}
 	}
 	return 0, 0
 }
@@ -232,6 +250,25 @@ syscall_mmap :: proc "contextless" (
 
 	for i in u64(0) ..< count {
 		pmm.map_page(domain.pml4, u64(allocatedPhys) + i * pageBytes, size, mapFlags)
+	}
+	if .Write in flags {
+		pml4 := ([^]u64)(uintptr(domain.pml4))
+		pml4e := pml4[(allocatedPhys >> 39) & 0x1FF]
+		pdpt := ([^]u64)(uintptr(pml4e & 0x000F_FFFF_FFFF_F000))
+		pdpte := pdpt[(allocatedPhys >> 30) & 0x1FF]
+		pd := ([^]u64)(uintptr(pdpte & 0x000F_FFFF_FFFF_F000))
+		pde := pd[(allocatedPhys >> 21) & 0x1FF]
+		pt := ([^]u64)(uintptr(pde & 0x000F_FFFF_FFFF_F000))
+		pte := pt[(allocatedPhys >> 12) & 0x1FF]
+		print.serial_write("mmap ptes ")
+		print.serial_write_hex(pml4e)
+		print.serial_write(" ")
+		print.serial_write_hex(pdpte)
+		print.serial_write(" ")
+		print.serial_write_hex(pde)
+		print.serial_write(" ")
+		print.serial_write_hex(pte)
+		print.serial_writeln("")
 	}
 	_, allocation, inserted, allocErr := map_entry(&domain.resources, allocatedPhys)
 	if allocErr != nil {

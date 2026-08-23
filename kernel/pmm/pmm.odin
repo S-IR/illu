@@ -152,12 +152,24 @@ men_init :: proc(
 
 	buddy_release_range(mmapStart, mmapEnd)
 
-	adamSize := adamImg.end - adamImg.base
+	oldAdamBase := adamImg.base
+	oldAdamEnd := adamImg.end
+	adamSize := oldAdamEnd - oldAdamBase
 	newAdamBase := palloc_zeroed(pages_needed(adamSize) * shared.PAGE_SIZE)
 	print.kensure(newAdamBase != 0, "pmm: failed adam reallocation")
 	mem.copy(rawptr(uintptr(newAdamBase)), rawptr(uintptr(adamImg.base)), int(adamSize))
 
 	delta := newAdamBase - adamImg.base
+	for seg in adamImg.segments {
+		if .W not_in seg.perms do continue
+		newSegBase := seg.base + delta
+		for addr := newSegBase; addr + 8 <= seg.end + delta; addr += 8 {
+			value := (^u64)(uintptr(addr))^
+			if value >= oldAdamBase && value < oldAdamEnd {
+				(^u64)(uintptr(addr))^ = value + delta
+			}
+		}
+	}
 	adamImg.entry += delta
 	adamImg.base = newAdamBase
 	adamImg.end = newAdamBase + adamSize

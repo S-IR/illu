@@ -72,7 +72,7 @@ map_page :: proc "contextless" (
 	pml4 := ([^]u64)(uintptr(pml4Idx))
 
 	if size == ._1GB {
-		pdpt := ensure_table(pml4, pml4eIdx, user, bootstrap)
+		pdpt := ensure_table(pml4, pml4eIdx, user, .Write in flags, bootstrap)
 		print.kassert(
 			.Present not_in transmute(lmem.PageFlags)pdpt[pdpteIdx],
 			"map_page: 1 GiB mapping conflicts",
@@ -81,10 +81,10 @@ map_page :: proc "contextless" (
 		return
 	}
 
-	pdpt := ensure_table(pml4, pml4eIdx, user, bootstrap)
+	pdpt := ensure_table(pml4, pml4eIdx, user, .Write in flags, bootstrap)
 
 	if size == ._2MB {
-		pd := ensure_table(pdpt, pdpteIdx, user, bootstrap)
+		pd := ensure_table(pdpt, pdpteIdx, user, .Write in flags, bootstrap)
 		print.kassert(
 			.Present not_in transmute(lmem.PageFlags)pd[pdeIdx],
 			"map_page: 2 MiB mapping conflicts",
@@ -93,10 +93,11 @@ map_page :: proc "contextless" (
 		return
 	}
 
-	pd := ensure_table(pdpt, pdpteIdx, user, bootstrap)
-	pt := ensure_table(pd, pdeIdx, user, bootstrap)
+	pd := ensure_table(pdpt, pdpteIdx, user, .Write in flags, bootstrap)
+	pt := ensure_table(pd, pdeIdx, user, .Write in flags, bootstrap)
 	pt[pteIdx] = phys | transmute(u64)(flags + {.Present})
 }
+
 
 unmap_page :: proc "contextless" (pml4Idx, virt: u64) -> bool {
 	pml4eIdx := (virt >> PT_SHIFT_PML4) & PT_INDEX_MASK
@@ -126,6 +127,7 @@ ensure_table :: #force_inline proc "contextless" (
 	parent: [^]u64,
 	index: u64,
 	user := false,
+	write := false,
 	bootstrap := false,
 ) -> [^]u64 {
 	print.kassert(
@@ -144,6 +146,9 @@ ensure_table :: #force_inline proc "contextless" (
 	}
 	if user {
 		parent[index] |= transmute(u64)(lmem.PageFlags{.User})
+	}
+	if write {
+		parent[index] |= transmute(u64)(lmem.PageFlags{.Write})
 	}
 	return ([^]u64)(uintptr(parent[index] & ENTRY_ADDR_MASK))
 }

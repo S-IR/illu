@@ -14,9 +14,9 @@ adam_dispatch_pci_device :: proc(device: ^pci.Device) -> (result: DriverResult, 
 	case .NETWORK:
 		switch device.subclass {
 		case .WIFI:
-			switch device.vendorId {
-			case RTL8822BE_VENDOR, RTL8822BE_DEVICE:
-				return rtl8822be_probe(device)
+			if device.vendorId == RTL8822BE_VENDOR &&
+			   device.deviceId == RTL8822BE_DEVICE {
+				return rtl8822be_init(device)
 			}
 		case .ETHERNET:
 			// Future: return e1000_probe(device)

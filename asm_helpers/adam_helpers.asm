@@ -29,3 +29,8 @@ mmio_write_u16:
 mmio_write_u32:
     movl %esi, (%rdi)
     ret
+
+.global cpu_pause
+cpu_pause:
+    pause
+    ret

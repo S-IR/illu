@@ -137,6 +137,10 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 			if !bar.isMemory || bar.addr == 0 || bar.size == 0 do continue
 			barStart := pmm.addr_round_down_to_page(bar.addr)
 			barEnd := pmm.addr_round_up_to_page(bar.addr + bar.size)
+			barFlags := lmem.PageFlags{.Present, .User, .Write, .PWT, .PCD, .NX}
+			for page := barStart; page < barEnd; page += shared.PAGE_SIZE {
+				pmm.map_page(newPML4, page, ._4KB, barFlags)
+			}
 			_, barResource, barInserted, barErr := map_entry(&resources, uintptr(barStart))
 			print.kensure(
 				barErr == nil && barInserted,
@@ -147,7 +151,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 				barStart,
 				barEnd - barStart,
 				._4KB,
-				{.Present, .User, .Write, .PWT, .PCD, .NX},
+				barFlags,
 				{.Volatile},
 				.DeviceMMIO,
 			)
