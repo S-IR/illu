@@ -28,8 +28,10 @@ syscall_dispatch :: proc "c" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: u64
 	case .MFree:
 		return u64(syscall_mfree(a1)), 0
 	case .InterruptVectorGet:
-		interruptErr, vector := syscall_interrupt_vector_get(a1)
-		return u64(interruptErr), vector
+		interruptErr, vector, lapicID := syscall_interrupt_vector_get(a1)
+		// Preserve the two-register syscall ABI. RDX contains the vector
+		// in bits 0..7 and the destination LAPIC ID in bits 8..39.
+		return u64(interruptErr), u64(vector) | (u64(lapicID) << 8)
 	case .InterruptWait:
 		return u64(syscall_interrupt_wait(a1)), 0
 	}
@@ -157,14 +159,15 @@ syscall_interrupt_vector_get :: proc "contextless" (
 ) -> (
 	err: syscalls.InterruptVectorGetError,
 	vector: u64,
+	lapicID: u32,
 ) {
 	cpu := gs_read_cpustate()
 	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
-		return .NoPermission, 0
+		return .NoPermission, 0, 0
 	}
 
 	domain := cpu.rrCurrent.domain
-	if domain.devices == nil do return .NoPermission, 0
+	if domain.devices == nil do return .NoPermission, 0, 0
 
 	wanted := transmute(PCIAddress)pciAddrRaw
 	hasDevice := false
@@ -174,7 +177,7 @@ syscall_interrupt_vector_get :: proc "contextless" (
 			break
 		}
 	}
-	if !hasDevice do return .NoPermission, 0
+	if !hasDevice do return .NoPermission, 0, 0
 
 	{
 		spinlock.lock(&interruptLock)
@@ -184,11 +187,11 @@ syscall_interrupt_vector_get :: proc "contextless" (
 			vector := MSI_VECTOR_FIRST + i
 			if interruptExecutions[vector] != nil do continue
 			interruptExecutions[vector] = cpu.rrCurrent
-			return .None, u64(vector)
+			return .None, u64(vector), cpu.apicId
 		}
 	}
 
-	return .NoVectors, 0
+	return .NoVectors, 0, 0
 }
 
 syscall_interrupt_wait :: proc "contextless" (vectorRaw: u64) -> (err: syscalls.InterruptWaitError) {

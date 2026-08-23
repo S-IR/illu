@@ -68,12 +68,20 @@ when !ODIN_TEST {
 
 		syscall_interrupt_vector_get_userspace :: proc "contextless" (
 			pci_addr: u64,
-		) -> (err: InterruptVectorGetError, vector: u8) {
-			rawErr, rawVector := syscall_interrupt_vector_get(pci_addr)
-			return InterruptVectorGetError(rawErr), u8(rawVector)
+		) -> (
+			err: InterruptVectorGetError,
+			vector: u8,
+			lapic_id: u32,
+		) {
+			rawErr, packed := syscall_interrupt_vector_get(pci_addr)
+			return InterruptVectorGetError(rawErr), u8(packed & 0xFF), u32(packed >> 8)
 		}
 
-		syscall_interrupt_wait_userspace :: proc "contextless" (vector: u8) -> (err: InterruptWaitError) {
+		syscall_interrupt_wait_userspace :: proc "contextless" (
+			vector: u8,
+		) -> (
+			err: InterruptWaitError,
+		) {
 			return InterruptWaitError(syscall_interrupt_wait(u64(vector)))
 		}
 	}

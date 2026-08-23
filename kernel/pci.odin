@@ -125,6 +125,10 @@ kernel_pci_write_u32 :: proc(header: ^pci.Header, offset: uintptr, value: u32) {
 	ah.mmio_write_u32(rawptr(uintptr(header) + offset), value)
 }
 
+kernel_pci_write_u16 :: proc(header: ^pci.Header, offset: uintptr, value: u16) {
+	ah.mmio_write_u16(rawptr(uintptr(header) + offset), value)
+}
+
 kernel_pci_bar_read :: proc(header: ^pci.Header, index: u32) -> u32 {
 	return kernel_pci_read_u32(header, uintptr(0x10) + uintptr(index * 4))
 }
@@ -137,13 +141,17 @@ kernel_pci_bar_size :: proc(header: ^pci.Header, index: u32, is64: bool) -> u64 
 	low := kernel_pci_bar_read(header, index)
 	high: u32 = 0
 	if is64 do high = kernel_pci_bar_read(header, index + 1)
+	command := kernel_pci_read_u16(header, pci.CONFIG_COMMAND_OFFSET)
+	disabledCommand := command & ~(pci.COMMAND_IO_SPACE | pci.COMMAND_MEMORY | pci.COMMAND_BUS_MASTER)
+	kernel_pci_write_u16(header, pci.CONFIG_COMMAND_OFFSET, disabledCommand)
 	kernel_pci_bar_write(header, index, 0xFFFF_FFFF)
 	if is64 do kernel_pci_bar_write(header, index + 1, 0xFFFF_FFFF)
 	maskLow := kernel_pci_bar_read(header, index)
 	mask := u64(maskLow & (0xFFFF_FFF0 if (maskLow & 1) == 0 else 0xFFFF_FFFC))
 	if is64 do mask |= u64(kernel_pci_bar_read(header, index + 1)) << 32
-	kernel_pci_bar_write(header, index, low)
 	if is64 do kernel_pci_bar_write(header, index + 1, high)
+	kernel_pci_bar_write(header, index, low)
+	kernel_pci_write_u16(header, pci.CONFIG_COMMAND_OFFSET, command)
 	if mask == 0 do return 0
 	return (~mask) + 1
 }

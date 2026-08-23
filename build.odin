@@ -62,7 +62,20 @@ build_adam :: proc() {
 	adamDir, _ := filepath.join({BUILD_DIR, "adam"})
 	os.make_directory_all(adamDir)
 
-	asmOut, _ := filepath.join({adamDir, "syscall_exit.o"})
+	asmOut, _ := filepath.join({adamDir, "adam_helpers.o"})
+	exec(
+		[]string {
+			"clang",
+			"-target",
+			"x86_64-unknown-none-elf",
+			"-c",
+			"asm_helpers/adam_helpers.asm",
+			"-o",
+			asmOut,
+		},
+	)
+
+	syscallAsmOut, _ := filepath.join({adamDir, "syscall_exit.o"})
 	exec(
 		[]string {
 			"clang",
@@ -71,7 +84,7 @@ build_adam :: proc() {
 			"-c",
 			"lib/syscalls/syscalls.asm",
 			"-o",
-			asmOut,
+			syscallAsmOut,
 		},
 	)
 	objOut, _ := filepath.join({adamDir, "adam.o"})
