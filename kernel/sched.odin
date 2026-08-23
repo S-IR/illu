@@ -15,7 +15,6 @@ KERNEL_STACK_PER_CPU_SIZE :: 16 * mem.Kilobyte
 
 
 MemoryResourceFlag :: enum {
-	OwnedByDomain,
 	Multiplexed,
 	Volatile,
 	InterruptSource,
@@ -29,6 +28,28 @@ MemoryResource :: struct {
 	pageSize:    lmem.PageSize,
 	pageFlags:   lmem.PageFlags,
 	flags:       MemoryResourceFlags,
+	memory:      MemoryHandle,
+}
+
+memory_resource_init :: proc(
+	resource: ^MemoryResource,
+	phys, size: u64,
+	pageSize: lmem.PageSize,
+	pageFlags: lmem.PageFlags,
+	flags: MemoryResourceFlags,
+	backend: MemorySlotBackend,
+) {
+	assert(resource != nil)
+	if resource == nil do return
+
+	resource^ = MemoryResource{
+		phys      = phys,
+		size      = size,
+		pageSize  = pageSize,
+		pageFlags = pageFlags,
+		flags     = flags,
+		memory    = memory_slot_create(phys, size, backend),
+	}
 }
 
 ALLOC_INITIAL_CAPACITY :: 8

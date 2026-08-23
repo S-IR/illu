@@ -241,10 +241,8 @@ domain_reclaim_locked :: proc(domain: ^ProtectionDomain) {
 	ah.write_cr3(pmm.kernelPML4)
 
 	if domain.resources != nil {
-		for phys, resource in domain.resources {
-			if .OwnedByDomain in resource.flags {
-				pmm.free_pages(u64(phys), resource.size)
-			}
+		for _, resource in domain.resources {
+			memory_object_release(resource.memory)
 		}
 		delete(domain.resources)
 	}

@@ -40,13 +40,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 			pmm.map_page(newPML4, phys, ._4KB, flags)
 			_, resource, inserted, err := map_entry(&resources, uintptr(phys))
 			print.kensure(err == nil && inserted, "adam_init: failed to track ELF page")
-			resource^ = MemoryResource {
-				phys      = phys,
-				size      = shared.PAGE_SIZE,
-				pageSize  = ._4KB,
-				pageFlags = flags,
-				flags     = {.OwnedByDomain},
-			}
+			memory_resource_init(resource, phys, shared.PAGE_SIZE, ._4KB, flags, {}, .AllocatedRAM)
 			phys += shared.PAGE_SIZE
 		}
 	}
@@ -56,13 +50,15 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 		pmm.map_page(newPML4, configPage, ._4KB, CONFIG_FLAGS)
 		_, resource, inserted, err := map_entry(&resources, uintptr(configPage))
 		print.kensure(err == nil && inserted, "adam_init: failed to track PCI config page")
-		resource^ = MemoryResource {
-			phys      = configPage,
-			size      = shared.PAGE_SIZE,
-			pageSize  = ._4KB,
-			pageFlags = CONFIG_FLAGS,
-			flags     = {.Volatile, .InterruptSource},
-		}
+		memory_resource_init(
+			resource,
+			configPage,
+			shared.PAGE_SIZE,
+			._4KB,
+			CONFIG_FLAGS,
+			{.Volatile, .InterruptSource},
+			.DeviceMMIO,
+		)
 	}
 
 
@@ -77,12 +73,15 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 		pmm.map_page(newPML4, addr, ._4KB, {.Present, .User, .Write, .NX})
 		_, resource, inserted, err := map_entry(&resources, uintptr(addr))
 		print.kensure(err == nil && inserted, "adam_init: failed to track PCI device-list page")
-		resource^ = MemoryResource {
-			phys      = addr,
-			size      = shared.PAGE_SIZE,
-			pageSize  = ._4KB,
-			pageFlags = {.Present, .User, .Write, .NX},
-		}
+		memory_resource_init(
+			resource,
+			addr,
+			shared.PAGE_SIZE,
+			._4KB,
+			{.Present, .User, .Write, .NX},
+			{},
+			.ExternalPhysical,
+		)
 	}
 
 
@@ -99,13 +98,15 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 		stackGuardErr == nil && stackGuardInserted,
 		"adam_init: failed to track stack guard page",
 	)
-	stackGuardResource^ = MemoryResource {
-		phys      = stackPhys,
-		size      = shared.PAGE_SIZE,
-		pageSize  = ._4KB,
-		pageFlags = {},
-		flags     = {.OwnedByDomain},
-	}
+	memory_resource_init(
+		stackGuardResource,
+		stackPhys,
+		shared.PAGE_SIZE,
+		._4KB,
+		{},
+		{},
+		.AllocatedRAM,
+	)
 
 	usableStart := stackPhys + shared.PAGE_SIZE
 	stackTop := usableStart + ADAM_STACK_SIZE - 8
@@ -117,13 +118,15 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 			stackPageErr == nil && stackPageInserted,
 			"adam_init: failed to track stack page",
 		)
-		stackPageResource^ = MemoryResource {
-			phys      = p,
-			size      = shared.PAGE_SIZE,
-			pageSize  = ._4KB,
-			pageFlags = {.Present, .User, .Write, .NX},
-			flags     = {.OwnedByDomain},
-		}
+		memory_resource_init(
+			stackPageResource,
+			p,
+			shared.PAGE_SIZE,
+			._4KB,
+			{.Present, .User, .Write, .NX},
+			{},
+			.AllocatedRAM,
+		)
 	}
 
 	domain, dErr := new(ProtectionDomain)
@@ -139,13 +142,15 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 				barErr == nil && barInserted,
 				"adam_init: failed to track PCI BAR resource",
 			)
-			barResource^ = MemoryResource {
-				phys      = barStart,
-				size      = barEnd - barStart,
-				pageSize  = ._4KB,
-				pageFlags = {.Present, .User, .Write, .PWT, .PCD, .NX},
-				flags     = {.Volatile},
-			}
+			memory_resource_init(
+				barResource,
+				barStart,
+				barEnd - barStart,
+				._4KB,
+				{.Present, .User, .Write, .PWT, .PCD, .NX},
+				{.Volatile},
+				.DeviceMMIO,
+			)
 		}
 	}
 	domain^ = ProtectionDomain {

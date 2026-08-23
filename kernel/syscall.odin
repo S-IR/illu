@@ -1,9 +1,9 @@
 package kernel
-import "../lib/lmem"
-import "../lib/syscalls"
-import "../lib/spinlock"
-import "../lib/shared"
 import ah "../asm_helpers"
+import "../lib/lmem"
+import "../lib/shared"
+import "../lib/spinlock"
+import "../lib/syscalls"
 import "core:mem"
 import "pmm"
 import "print"
@@ -53,7 +53,10 @@ multiplexedMemoryLock: spinlock.Spinlock
 
 syscall_multiplexed_memory_create :: proc "contextless" (
 	phys, size: u64,
-) -> (err: syscalls.MultiplexedMemoryError, handle: u64) {
+) -> (
+	err: syscalls.MultiplexedMemoryError,
+	handle: u64,
+) {
 	context = gKernelCtx
 	cpu := gs_read_cpustate()
 	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
@@ -95,7 +98,8 @@ syscall_multiplexed_memory_write :: proc "contextless" (
 }
 
 syscall_multiplexed_memory_access :: proc "contextless" (
-	handle, offset, userPtr, size, width: u64, writeTarget: bool,
+	handle, offset, userPtr, size, width: u64,
+	writeTarget: bool,
 ) -> syscalls.MultiplexedMemoryError {
 	context = gKernelCtx
 	cpu := gs_read_cpustate()
@@ -109,6 +113,27 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 
 	resource, found := cpu.rrCurrent.domain.resources[uintptr(handle)]
 	if !found || .Multiplexed not_in resource.flags do return .InvalidHandle
+
+	// memory_slot_get returns a pointer into the growable slot array. Keep it
+	// only while the manager lock is held; copy the fields needed below.
+	memoryPhys, memorySize: u64
+	{
+		spinlock.lock(&memoryManager.lock)
+		defer spinlock.unlock(&memoryManager.lock)
+		slot := memory_slot_get(resource.memory)
+		assert(slot != nil)
+		if slot == nil {
+			return .InvalidHandle
+		}
+		memoryPhys = slot.phys
+		memorySize = slot.size
+	}
+
+	assert(memoryPhys == resource.phys)
+	assert(memorySize == resource.size)
+	if memoryPhys != resource.phys || memorySize != resource.size {
+		return .InvalidHandle
+	}
 	if offset > resource.size || size > resource.size - offset do return .InvalidRange
 	userBufferOK := pmm.user_range_accessible(
 		cpu.rrCurrent.domain.pml4,
@@ -123,7 +148,7 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 
 	for pos in u64(0) ..< size {
 		if pos % width != 0 do continue
-		target := rawptr(uintptr(resource.phys + offset + pos))
+		target := rawptr(uintptr(memoryPhys + offset + pos))
 		user := rawptr(uintptr(userPtr + pos))
 		if .Volatile in resource.flags {
 			switch width {
@@ -210,21 +235,29 @@ syscall_mmap :: proc "contextless" (
 	}
 	_, allocation, inserted, allocErr := map_entry(&domain.resources, allocatedPhys)
 	if allocErr != nil {
+		for i in u64(0) ..< count {
+			pmm.unmap_page(domain.pml4, u64(allocatedPhys) + i * pageBytes)
+		}
 		pmm.free_pages(u64(allocatedPhys), totalBytes)
 		return .TrackingFailed, 0
 	}
 	if !inserted {
+		for i in u64(0) ..< count {
+			pmm.unmap_page(domain.pml4, u64(allocatedPhys) + i * pageBytes)
+		}
 		pmm.free_pages(u64(allocatedPhys), totalBytes)
 		return .TrackingFailed, 0
 	}
 
-	allocation^ = {
-		phys      = u64(allocatedPhys),
-		size      = totalBytes,
-		pageFlags = mapFlags,
-		pageSize  = size,
-		flags     = {.OwnedByDomain},
-	}
+	memory_resource_init(
+		allocation,
+		u64(allocatedPhys),
+		totalBytes,
+		size,
+		mapFlags,
+		{},
+		.AllocatedRAM,
+	)
 
 	return .None, u64(allocatedPhys)
 
@@ -247,7 +280,7 @@ syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.MFreeError) {
 	}
 
 	allocation, found := domain.resources[uintptr(addr)]
-	if !found || .OwnedByDomain not_in allocation.flags {
+	if !found {
 		return .InvalidAddress
 	}
 
@@ -262,7 +295,7 @@ syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.MFreeError) {
 	}
 
 
-	pmm.free_pages(addr, allocation.size)
+	memory_object_release(allocation.memory)
 	delete_key(&domain.resources, uintptr(addr))
 
 	_, aErr := shrink(&domain.resources)
@@ -306,7 +339,11 @@ syscall_interrupt_vector_get :: proc "contextless" (
 	return .NoVectors, 0, 0
 }
 
-syscall_interrupt_wait :: proc "contextless" (vectorRaw: u64) -> (err: syscalls.InterruptWaitError) {
+syscall_interrupt_wait :: proc "contextless" (
+	vectorRaw: u64,
+) -> (
+	err: syscalls.InterruptWaitError,
+) {
 	cpu := gs_read_cpustate()
 	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
 		return .NoPermission
