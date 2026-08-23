@@ -6,3 +6,5 @@ ovmf/
 *.ignorethis.*
 
 firmware/
+
+.agents/
