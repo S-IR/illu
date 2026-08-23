@@ -1,6 +1,7 @@
 .macro SYSCALL_STUB name, nr
 .global \name
 \name:
+    # System V callers enter here; the CPU syscall ABI is rax,rdi,rsi,rdx,r10,r8,r9.
     mov $\nr, %eax
     syscall
     ret
@@ -20,3 +21,20 @@ SYSCALL_STUB  syscall_mmap,  1
 SYSCALL_STUB  syscall_mfree, 2
 SYSCALL_STUB  syscall_interrupt_vector_get, 3
 SYSCALL_STUB  syscall_interrupt_wait, 4
+SYSCALL_STUB  syscall_multiplexed_memory_create, 5
+
+.global syscall_multiplexed_memory_read
+syscall_multiplexed_memory_read:
+    # System V arg4 is rcx; syscall arg4 is r10.
+    mov %rcx, %r10
+    mov $6, %eax
+    syscall
+    ret
+
+.global syscall_multiplexed_memory_write
+syscall_multiplexed_memory_write:
+    # System V arg4 is rcx; syscall arg4 is r10.
+    mov %rcx, %r10
+    mov $7, %eax
+    syscall
+    ret

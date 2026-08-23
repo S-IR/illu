@@ -98,6 +98,30 @@ map_page :: proc "contextless" (
 	pt[pteIdx] = phys | transmute(u64)(flags + {.Present})
 }
 
+unmap_page :: proc "contextless" (pml4Idx, virt: u64) -> bool {
+	pml4eIdx := (virt >> PT_SHIFT_PML4) & PT_INDEX_MASK
+	pdpteIdx := (virt >> PT_SHIFT_PDPT) & PT_INDEX_MASK
+	pdeIdx := (virt >> PT_SHIFT_PD) & PT_INDEX_MASK
+	pteIdx := (virt >> PT_SHIFT_PT) & PT_INDEX_MASK
+
+	pml4 := ([^]u64)(uintptr(pml4Idx))
+	pml4e := transmute(lmem.PageFlags)pml4[pml4eIdx]
+	if .Present not_in pml4e || .PS in pml4e do return false
+
+	pdpt := ([^]u64)(uintptr(pml4[pml4eIdx] & ENTRY_ADDR_MASK))
+	pdpte := transmute(lmem.PageFlags)pdpt[pdpteIdx]
+	if .Present not_in pdpte || .PS in pdpte do return false
+
+	pd := ([^]u64)(uintptr(pdpt[pdpteIdx] & ENTRY_ADDR_MASK))
+	pde := transmute(lmem.PageFlags)pd[pdeIdx]
+	if .Present not_in pde || .PS in pde do return false
+
+	pt := ([^]u64)(uintptr(pd[pdeIdx] & ENTRY_ADDR_MASK))
+	if .Present not_in transmute(lmem.PageFlags)pt[pteIdx] do return false
+	pt[pteIdx] = 0
+	return true
+}
+
 ensure_table :: #force_inline proc "contextless" (
 	parent: [^]u64,
 	index: u64,

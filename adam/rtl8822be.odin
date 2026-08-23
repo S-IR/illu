@@ -1,6 +1,5 @@
 package adam
 
-import ah "../asm_helpers"
 import "../lib/pci"
 import "../lib/syscalls"
 
@@ -8,8 +7,8 @@ RTL8822BE_VENDOR :: u16(0x10EC)
 RTL8822BE_DEVICE :: u16(0xB822)
 
 RTL8822BE_State :: struct {
-	regs:   rawptr,
-	vector: u8,
+	mmioHandle: u64,
+	vector:     u8,
 }
 
 rtl8822be_probe :: proc(device: ^pci.Device) -> (DriverResult, u64) {
@@ -23,8 +22,9 @@ rtl8822be_probe :: proc(device: ^pci.Device) -> (DriverResult, u64) {
 		(u64(device.device) << 24) |
 		(u64(device.function) << 32)
 
+	configPage := device.configBase & ~u64(0xFFF)
 	vectorErr, vector, lapicID :=
-		syscalls.syscall_interrupt_vector_get_userspace(pciAddress)
+		syscalls.syscall_interrupt_vector_get_userspace(configPage)
 	if vectorErr != .None do return .Failed, 11 + u64(vectorErr)
 
 	command := pci.config_read_u16(device, pci.CONFIG_COMMAND_OFFSET)
@@ -65,16 +65,26 @@ rtl8822be_probe :: proc(device: ^pci.Device) -> (DriverResult, u64) {
 	if !foundMMIO do return .Failed, 110
 	if mmioBar.addr & 3 != 0 do return .Failed, 113
 
-	// Read-only MMIO smoke test. Realtek register semantics belong below
-	// this probe, in the RTL8822BE implementation.
-	value := ah.mmio_read_u32(rawptr(uintptr(mmioBar.addr)))
-	_ = value
+	mmioErr, mmioHandle :=
+		syscalls.syscall_multiplexed_memory_create_userspace(mmioBar.addr, mmioBar.size)
+	if mmioErr != .None do return .Failed, 114 + u64(mmioErr)
+
+	// Read-only MMIO smoke test through a caller-owned stack buffer.
+	value: u32
+	readErr := syscalls.syscall_multiplexed_memory_read_userspace(
+		mmioHandle,
+		0,
+		rawptr(&value),
+		size_of(u32),
+		4,
+	)
+	if readErr != .None do return .Failed, 121 + u64(readErr)
 
 	state, stateErr := new(RTL8822BE_State)
-	if stateErr != nil do return .Failed, 121
+	if stateErr != nil do return .Failed, 130
 	state^ = {
-		regs   = rawptr(uintptr(mmioBar.addr)),
-		vector = vector,
+		mmioHandle = mmioHandle,
+		vector     = vector,
 	}
 
 	registered := wifi_register(WifiDevice {

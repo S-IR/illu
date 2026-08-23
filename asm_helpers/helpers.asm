@@ -623,6 +623,8 @@ gs_read_cpustate:
 
 .global syscall_entry
 syscall_entry:
+    # Kernel syscall ABI on entry:
+    # rax = number, rdi/rsi/rdx/r10/r8/r9 = arguments 1..6.
     swapgs
     mov %rsp, %gs:16
     mov %gs:8, %rsp

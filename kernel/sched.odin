@@ -14,10 +14,21 @@ KERNEL_STACK_PER_CPU_SIZE :: 16 * mem.Kilobyte
 #assert(KERNEL_STACK_PER_CPU_SIZE % 16 == 0)
 
 
-Alloc :: struct {
-	sizeBytes: u64,
-	pageSize:  lmem.PageSize,
-	pageFlags: lmem.PageFlags,
+MemoryResourceFlag :: enum {
+	OwnedByDomain,
+	Multiplexed,
+	Volatile,
+	InterruptSource,
+}
+
+MemoryResourceFlags :: bit_set[MemoryResourceFlag; u64]
+
+MemoryResource :: struct {
+	phys:        u64,
+	size:        u64,
+	pageSize:    lmem.PageSize,
+	pageFlags:   lmem.PageFlags,
+	flags:       MemoryResourceFlags,
 }
 
 ALLOC_INITIAL_CAPACITY :: 8
@@ -26,8 +37,7 @@ ProtectionDomain :: struct {
 	pml4:           u64,
 	executionCount: u64,
 	executionLock:  spinlock.Spinlock,
-	allocs:         map[uintptr]Alloc,
-	devices:        [dynamic]PCIAddress,
+	resources:      map[uintptr]MemoryResource,
 }
 PCIAddress :: bit_field u64 {
 	segment:  u16 | 16,
