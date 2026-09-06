@@ -83,8 +83,8 @@ syscall_multiplexed_memory_create :: proc "contextless" (
 	if size == 0 || phys + size < phys do return .InvalidRange, 0
 
 	domain := cpu.rrCurrent.domain
-	resource, found := domain.resources[uintptr(phys)]
-	if !found || resource.phys != phys || resource.size != size {
+	resource, found := resource_find_exact(domain.resources[:], phys)
+	if !found || resource.size != size {
 		return .InvalidRange, 0
 	}
 
@@ -96,7 +96,6 @@ syscall_multiplexed_memory_create :: proc "contextless" (
 	}
 
 	resource.flags += {.Multiplexed}
-	domain.resources[uintptr(phys)] = resource
 	for page := phys; page < phys + size; page += shared.PAGE_SIZE {
 		pmm.unmap_page(domain.pml4, page)
 	}
@@ -129,7 +128,8 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 	if size == 0 || size % width != 0 do return .InvalidRange
 	if offset + size < offset do return .InvalidRange
 
-	resource, found := cpu.rrCurrent.domain.resources[uintptr(handle)]
+	domain := cpu.rrCurrent.domain
+	resource, found := resource_find_exact(domain.resources[:], handle)
 	if !found || .Multiplexed not_in resource.flags do return .InvalidHandle
 
 	// memory_slot_get returns a pointer into the growable slot array. Keep it
@@ -154,7 +154,7 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 	}
 	if offset > resource.size || size > resource.size - offset do return .InvalidRange
 	userBufferOK := pmm.user_range_accessible(
-		cpu.rrCurrent.domain.pml4,
+		domain.pml4,
 		userPtr,
 		size,
 		write = !writeTarget,
@@ -235,9 +235,6 @@ syscall_mmap :: proc "contextless" (
 	}
 	domain := cpu.rrCurrent.domain
 	assert(domain.resources != nil)
-	if domain.resources == nil {
-		return .TrackingFailed, 0
-	}
 
 	// Present and PS are controlled by map_page. User is mandatory for this
 	// syscall; the remaining flags are supplied by the caller.
@@ -270,24 +267,10 @@ syscall_mmap :: proc "contextless" (
 		print.serial_write_hex(pte)
 		print.serial_writeln("")
 	}
-	_, allocation, inserted, allocErr := map_entry(&domain.resources, allocatedPhys)
-	if allocErr != nil {
-		for i in u64(0) ..< count {
-			pmm.unmap_page(domain.pml4, u64(allocatedPhys) + i * pageBytes)
-		}
-		pmm.free_pages(u64(allocatedPhys), totalBytes)
-		return .TrackingFailed, 0
-	}
-	if !inserted {
-		for i in u64(0) ..< count {
-			pmm.unmap_page(domain.pml4, u64(allocatedPhys) + i * pageBytes)
-		}
-		pmm.free_pages(u64(allocatedPhys), totalBytes)
-		return .TrackingFailed, 0
-	}
 
+	resource: MemoryResource
 	memory_resource_init(
-		allocation,
+		&resource,
 		u64(allocatedPhys),
 		totalBytes,
 		size,
@@ -295,6 +278,14 @@ syscall_mmap :: proc "contextless" (
 		{},
 		.AllocatedRAM,
 	)
+	_, inserted := resource_insert(&domain.resources, resource)
+	if !inserted {
+		for i in u64(0) ..< count {
+			pmm.unmap_page(domain.pml4, u64(allocatedPhys) + i * pageBytes)
+		}
+		pmm.free_pages(u64(allocatedPhys), totalBytes)
+		return .TrackingFailed, 0
+	}
 
 	return .None, u64(allocatedPhys)
 
@@ -312,31 +303,12 @@ syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.MFreeError) {
 	}
 	domain := cpu.rrCurrent.domain
 
-	if domain.resources == nil {
-		return .InvalidAddress
-	}
-
-	allocation, found := domain.resources[uintptr(addr)]
+	allocation, found := resource_remove(&domain.resources, addr)
 	if !found {
 		return .InvalidAddress
 	}
 
-	pageBytes: u64
-	switch allocation.pageSize {
-	case ._4KB:
-		pageBytes = 4 * mem.Kilobyte
-	case ._2MB:
-		pageBytes = 2 * mem.Megabyte
-	case ._1GB:
-		pageBytes = mem.Gigabyte
-	}
-
-
 	memory_object_release(allocation.memory)
-	delete_key(&domain.resources, uintptr(addr))
-
-	_, aErr := shrink(&domain.resources)
-	assert(aErr == nil)
 	return .None
 }
 
@@ -356,7 +328,7 @@ syscall_interrupt_vector_get :: proc "contextless" (
 	}
 
 	domain := cpu.rrCurrent.domain
-	resource, found := domain.resources[uintptr(resourcePhys)]
+	resource, found := resource_find_exact(domain.resources[:], resourcePhys)
 	if !found || .InterruptSource not_in resource.flags {
 		return .NoPermission, 0, 0
 	}
@@ -366,10 +338,10 @@ syscall_interrupt_vector_get :: proc "contextless" (
 		defer spinlock.unlock(&interruptLock)
 
 		for i in 0 ..< MSI_VECTOR_COUNT {
-			vector := MSI_VECTOR_FIRST + i
-			if interruptExecutions[vector] != nil do continue
-			interruptExecutions[vector] = cpu.rrCurrent
-			return .None, u64(vector), cpu.apicId
+			v := MSI_VECTOR_FIRST + i
+			if interruptExecutions[v] != nil do continue
+			interruptExecutions[v] = cpu.rrCurrent
+			return .None, u64(v), cpu.apicId
 		}
 	}
 

@@ -11,8 +11,8 @@ import "print"
 Execution :: struct {
 	schedulerState: ExecutionState,
 	state:          SavedState,
-	domain: ^ProtectionDomain,
-	next:   ^Execution,
+	domain:         ^ProtectionDomain,
+	next:           ^Execution,
 }
 
 ExecutionState :: enum {
@@ -33,7 +33,10 @@ when !ODIN_TEST {
 
 execution_run :: proc "contextless" (domain: ^ProtectionDomain, state: ^SavedState) {
 	print.kassert(domain != nil, "execution_run: nil domain")
-	print.kassert(intrinsics.atomic_load(&domain.executionCount) > 0, "execution_run: domain has no executions")
+	print.kassert(
+		intrinsics.atomic_load(&domain.executionCount) > 0,
+		"execution_run: domain has no executions",
+	)
 	ah.write_cr3(domain.pml4)
 	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
 	run_domain(state)
@@ -49,14 +52,18 @@ execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execu
 	print.kassert(state.ss == 0x23, "execution_create: bad stack segment")
 	print.kassert(state.rsp % 16 == 8, "execution_create: unaligned entry stack")
 
-	spinlock.lock(&domain.executionLock)
-	defer spinlock.unlock(&domain.executionLock)
+	spinlock.rw_write_lock(&domain.lock)
+	defer spinlock.rw_write_unlock(&domain.lock)
 	execMem, err := mem.alloc(size_of(Execution), 16)
 	print.kensure(err == nil, "execution_create: allocation failure")
 	if err != nil do return nil
 
 	exec := cast(^Execution)execMem
-	exec^ = Execution{schedulerState = .Runnable, state = state, domain = domain}
+	exec^ = Execution {
+		schedulerState = .Runnable,
+		state          = state,
+		domain         = domain,
+	}
 	intrinsics.atomic_add(&domain.executionCount, 1)
 	return exec
 }
@@ -72,21 +79,21 @@ execution_release :: proc(exec: ^Execution) {
 	if domain == nil do return
 	print.kassert(domain.pml4 != 0, "execution_release: domain PML4 already gone")
 
-	spinlock.lock(&domain.executionLock)
+	spinlock.rw_write_lock(&domain.lock)
 	count := intrinsics.atomic_load(&domain.executionCount)
 	print.kassert(count > 0, "execution_release: execution count underflow")
 	if count == 0 {
-		spinlock.unlock(&domain.executionLock)
+		spinlock.rw_write_unlock(&domain.lock)
 		return
 	}
 	intrinsics.atomic_store(&domain.executionCount, count - 1)
 	if count != 1 {
-		spinlock.unlock(&domain.executionLock)
+		spinlock.rw_write_unlock(&domain.lock)
 		return
 	}
 
 	domain_reclaim_locked(domain)
-	spinlock.unlock(&domain.executionLock)
+	spinlock.rw_write_unlock(&domain.lock)
 	free(domain)
 }
 
@@ -103,8 +110,10 @@ execution_enqueue :: proc "contextless" (e: ^Execution, cpu: ^CpuState) {
 	if e == nil || cpu == nil do return
 	print.kassert(e.domain != nil, "execution_enqueue: nil domain")
 	if e.domain == nil do return
-	print.kassert(intrinsics.atomic_load(&e.domain.executionCount) > 0,
-		"execution_enqueue: domain has no executions")
+	print.kassert(
+		intrinsics.atomic_load(&e.domain.executionCount) > 0,
+		"execution_enqueue: domain has no executions",
+	)
 
 	{
 		spinlock.lock(&cpu.rrLock)
@@ -130,8 +139,10 @@ execution_enqueue_front :: proc "contextless" (e: ^Execution, cpu: ^CpuState) {
 	if e == nil || cpu == nil do return
 	print.kassert(e.domain != nil, "execution_enqueue_front: nil domain")
 	if e.domain == nil do return
-	print.kassert(intrinsics.atomic_load(&e.domain.executionCount) > 0,
-		"execution_enqueue_front: domain has no executions")
+	print.kassert(
+		intrinsics.atomic_load(&e.domain.executionCount) > 0,
+		"execution_enqueue_front: domain has no executions",
+	)
 
 	{
 		spinlock.lock(&cpu.rrLock)
@@ -217,35 +228,34 @@ cpu_clear_sleeping :: proc "c" () {
 domain_destroy :: proc(domain: ^ProtectionDomain) {
 	print.kassert(domain != nil, "domain_destroy: nil domain")
 	if domain == nil do return
-	spinlock.lock(&domain.executionLock)
+	spinlock.rw_write_lock(&domain.lock)
 	count := intrinsics.atomic_load(&domain.executionCount)
 	print.kassert(count == 0, "domain_destroy: executions still attached")
 	if count != 0 {
-		spinlock.unlock(&domain.executionLock)
+		spinlock.rw_write_unlock(&domain.lock)
 		return
 	}
 	domain_reclaim_locked(domain)
-	spinlock.unlock(&domain.executionLock)
+	spinlock.rw_write_unlock(&domain.lock)
 	free(domain)
 }
 
 domain_reclaim_locked :: proc(domain: ^ProtectionDomain) {
 	print.kassert(domain != nil, "domain_reclaim_locked: nil domain")
 	if domain == nil do return
-	print.kassert(intrinsics.atomic_load(&domain.executionCount) == 0,
-		"domain_reclaim_locked: executions still attached")
+	print.kassert(
+		intrinsics.atomic_load(&domain.executionCount) == 0,
+		"domain_reclaim_locked: executions still attached",
+	)
 	print.kassert(domain.pml4 != 0, "domain_destroy: paging already destroyed")
 	print.kassert(domain.pml4 != pmm.kernelPML4, "domain_destroy: kernel PML4 passed")
-	print.kassert(domain.resources != nil, "domain_reclaim_locked: nil resource map")
 
 	ah.write_cr3(pmm.kernelPML4)
 
-	if domain.resources != nil {
-		for _, resource in domain.resources {
-			memory_object_release(resource.memory)
-		}
-		delete(domain.resources)
+	for resource in domain.resources {
+		memory_object_release(resource.memory)
 	}
+	delete(domain.resources)
 	pmm.pml4_destroy(domain.pml4)
 	domain.pml4 = 0
 }

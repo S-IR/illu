@@ -32,3 +32,35 @@ when KERNEL_BUILD && !ODIN_TEST {
 		intrinsics.atomic_store(&l.locked, u32(0))
 	}
 }
+
+RWLock :: struct {
+	state: u32, // bit 31 = writer held; bits 0-30 = reader count
+}
+
+RW_WRITER_BIT :: 0x8000_0000
+
+rw_read_lock :: #force_inline proc "contextless" (l: ^RWLock) {
+	for {
+		s := intrinsics.atomic_load(&l.state)
+		if s & RW_WRITER_BIT == 0 {
+			if intrinsics.atomic_compare_exchange_strong(&l.state, s, s + 1) == s {
+				return
+			}
+		}
+		intrinsics.cpu_relax()
+	}
+}
+
+rw_read_unlock :: #force_inline proc "contextless" (l: ^RWLock) {
+	intrinsics.atomic_sub(&l.state, 1)
+}
+
+rw_write_lock :: #force_inline proc "contextless" (l: ^RWLock) {
+	for intrinsics.atomic_compare_exchange_strong(&l.state, 0, RW_WRITER_BIT) != 0 {
+		intrinsics.cpu_relax()
+	}
+}
+
+rw_write_unlock :: #force_inline proc "contextless" (l: ^RWLock) {
+	intrinsics.atomic_store(&l.state, u32(0))
+}

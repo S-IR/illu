@@ -22,12 +22,9 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 	print.kensure(newPML4 != 0, "adam_init: pml4 alloc failed")
 	pmm.pml4_deep_copy(newPML4, pmm.kernelPML4, true)
 
-	resources, resourceErr := make(
-		map[uintptr]MemoryResource,
-		ALLOC_INITIAL_CAPACITY + len(pcies) * 2,
-		context.allocator,
-	)
-	print.kensure(resourceErr == nil, "adam_init: failed to alloc adam resource map")
+	pd, dErr := new(ProtectionDomain)
+	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")
+	pd.pml4 = newPML4
 
 	for seg in adamImg.segments {
 		flags := lmem.PageFlags{.Present, .User, .NX}
@@ -38,9 +35,10 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 		end := pmm.addr_round_up_to_page(seg.end)
 		for phys < end {
 			pmm.map_page(newPML4, phys, ._4KB, flags)
-			_, resource, inserted, err := map_entry(&resources, uintptr(phys))
-			print.kensure(err == nil && inserted, "adam_init: failed to track ELF page")
-			memory_resource_init(resource, phys, shared.PAGE_SIZE, ._4KB, flags, {}, .AllocatedRAM)
+			resource: MemoryResource
+			memory_resource_init(&resource, phys, shared.PAGE_SIZE, ._4KB, flags, {}, .AllocatedRAM)
+			_, inserted := resource_insert(&pd.resources, resource)
+			print.kensure(inserted, "adam_init: failed to track ELF page")
 			phys += shared.PAGE_SIZE
 		}
 	}
@@ -48,10 +46,9 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 	for device in pcies {
 		configPage := pmm.addr_round_down_to_page(device.configBase)
 		pmm.map_page(newPML4, configPage, ._4KB, CONFIG_FLAGS)
-		_, resource, inserted, err := map_entry(&resources, uintptr(configPage))
-		print.kensure(err == nil && inserted, "adam_init: failed to track PCI config page")
+		resource: MemoryResource
 		memory_resource_init(
-			resource,
+			&resource,
 			configPage,
 			shared.PAGE_SIZE,
 			._4KB,
@@ -59,6 +56,8 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 			{.Volatile, .InterruptSource},
 			.DeviceMMIO,
 		)
+		_, inserted := resource_insert(&pd.resources, resource)
+		print.kensure(inserted, "adam_init: failed to track PCI config page")
 	}
 
 
@@ -71,10 +70,9 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 
 	for addr := start; addr < end; addr += shared.PAGE_SIZE {
 		pmm.map_page(newPML4, addr, ._4KB, {.Present, .User, .Write, .NX})
-		_, resource, inserted, err := map_entry(&resources, uintptr(addr))
-		print.kensure(err == nil && inserted, "adam_init: failed to track PCI device-list page")
+		resource: MemoryResource
 		memory_resource_init(
-			resource,
+			&resource,
 			addr,
 			shared.PAGE_SIZE,
 			._4KB,
@@ -82,6 +80,8 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 			{},
 			.ExternalPhysical,
 		)
+		_, inserted := resource_insert(&pd.resources, resource)
+		print.kensure(inserted, "adam_init: failed to track PCI device-list page")
 	}
 
 
@@ -90,36 +90,21 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 
 
 	pmm.map_page(newPML4, stackPhys, ._4KB, {})
-	_, stackGuardResource, stackGuardInserted, stackGuardErr := map_entry(
-		&resources,
-		uintptr(stackPhys),
-	)
-	print.kensure(
-		stackGuardErr == nil && stackGuardInserted,
-		"adam_init: failed to track stack guard page",
-	)
-	memory_resource_init(
-		stackGuardResource,
-		stackPhys,
-		shared.PAGE_SIZE,
-		._4KB,
-		{},
-		{},
-		.AllocatedRAM,
-	)
+	{
+		resource: MemoryResource
+		memory_resource_init(&resource, stackPhys, shared.PAGE_SIZE, ._4KB, {}, {}, .AllocatedRAM)
+		_, inserted := resource_insert(&pd.resources, resource)
+		print.kensure(inserted, "adam_init: failed to track stack guard page")
+	}
 
 	usableStart := stackPhys + shared.PAGE_SIZE
 	stackTop := usableStart + ADAM_STACK_SIZE - 8
 	assert(stackTop % 16 == 8)
 	for p := usableStart; p < stackTop; p += shared.PAGE_SIZE {
 		pmm.map_page(newPML4, p, ._4KB, {.Present, .User, .Write, .NX})
-		_, stackPageResource, stackPageInserted, stackPageErr := map_entry(&resources, uintptr(p))
-		print.kensure(
-			stackPageErr == nil && stackPageInserted,
-			"adam_init: failed to track stack page",
-		)
+		resource: MemoryResource
 		memory_resource_init(
-			stackPageResource,
+			&resource,
 			p,
 			shared.PAGE_SIZE,
 			._4KB,
@@ -127,10 +112,9 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 			{},
 			.AllocatedRAM,
 		)
+		_, inserted := resource_insert(&pd.resources, resource)
+		print.kensure(inserted, "adam_init: failed to track stack page")
 	}
-
-	domain, dErr := new(ProtectionDomain)
-	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")
 
 	for pcieDevice in pcies {
 		for bar in pcieDevice.bars {
@@ -141,13 +125,9 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 			for page := barStart; page < barEnd; page += shared.PAGE_SIZE {
 				pmm.map_page(newPML4, page, ._4KB, barFlags)
 			}
-			_, barResource, barInserted, barErr := map_entry(&resources, uintptr(barStart))
-			print.kensure(
-				barErr == nil && barInserted,
-				"adam_init: failed to track PCI BAR resource",
-			)
+			resource: MemoryResource
 			memory_resource_init(
-				barResource,
+				&resource,
 				barStart,
 				barEnd - barStart,
 				._4KB,
@@ -155,17 +135,15 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 				{.Volatile},
 				.DeviceMMIO,
 			)
+			_, inserted := resource_insert(&pd.resources, resource)
+			print.kensure(inserted, "adam_init: failed to track PCI BAR resource")
 		}
-	}
-	domain^ = ProtectionDomain {
-		pml4      = newPML4,
-		resources = resources,
 	}
 
 	savedState := saved_state_fresh(adamImg.entry, stackTop)
 	savedState.rdi = u64(uintptr(raw_data(pcies)))
 	savedState.rsi = u64(len(pcies))
-	exec := execution_create(domain, savedState)
+	exec := execution_create(pd, savedState)
 	print.kensure(exec != nil, "adam_init: Execution alloc failed")
 
 	idx := u32(intrinsics.atomic_add(&rrCpuNext, 1)) % u32(len(cpus))

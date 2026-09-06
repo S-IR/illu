@@ -20,15 +20,15 @@ MemoryResourceFlag :: enum {
 	InterruptSource,
 }
 
-MemoryResourceFlags :: bit_set[MemoryResourceFlag; u64]
+MemoryResourceFlags :: bit_set[MemoryResourceFlag;u64]
 
 MemoryResource :: struct {
-	phys:        u64,
-	size:        u64,
-	pageSize:    lmem.PageSize,
-	pageFlags:   lmem.PageFlags,
-	flags:       MemoryResourceFlags,
-	memory:      MemoryHandle,
+	phys:      u64,
+	size:      u64,
+	pageSize:  lmem.PageSize,
+	pageFlags: lmem.PageFlags,
+	flags:     MemoryResourceFlags,
+	memory:    MemoryHandle,
 }
 
 memory_resource_init :: proc(
@@ -42,7 +42,7 @@ memory_resource_init :: proc(
 	assert(resource != nil)
 	if resource == nil do return
 
-	resource^ = MemoryResource{
+	resource^ = MemoryResource {
 		phys      = phys,
 		size      = size,
 		pageSize  = pageSize,
@@ -54,19 +54,13 @@ memory_resource_init :: proc(
 
 ALLOC_INITIAL_CAPACITY :: 8
 
-ProtectionDomain :: struct {
-	pml4:           u64,
-	executionCount: u64,
-	executionLock:  spinlock.Spinlock,
-	resources:      map[uintptr]MemoryResource,
-}
 PCIAddress :: bit_field u64 {
 	segment:  u16 | 16,
 	bus:      u8  | 8,
 	device:   u8  | 8,
 	function: u8  | 8,
 }
-CpuState :: struct #align(16) {
+CpuState :: struct #align (16) {
 	self:               ^CpuState,
 	kernelStackTop:     u64,
 	userSyscallRsp:     u64,

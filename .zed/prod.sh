@@ -1,6 +1,6 @@
 #!/bin/bash
 odin run build.odin -file -o:aggressive
-sudo qemu-system-x86_64 -enable-kvm -m 512m \
+qemu-system-x86_64 -enable-kvm -m 512m \
   -machine q35 \
   -nodefaults \
   -cpu host \
@@ -11,5 +11,4 @@ sudo qemu-system-x86_64 -enable-kvm -m 512m \
   -drive format=raw,file=fat:rw:diskimg,if=ide \
   -serial stdio \
   -nographic \
-  -device vfio-pci,host=07:00.0 \
   -no-shutdown
