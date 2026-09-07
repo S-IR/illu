@@ -242,7 +242,7 @@ syscall_mmap :: proc "contextless" (
 	mapFlags -= {.Present, .PS}
 	mapFlags += {.User}
 
-	allocatedPhys := uintptr(pmm.alloc_pages(totalBytes))
+	allocatedPhys := uintptr(pmm.alloc_zeroed(totalBytes))
 	if allocatedPhys == 0 || allocatedPhys == max(uintptr) do return .OutOfMemory, 0
 
 	for i in u64(0) ..< count {

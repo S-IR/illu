@@ -94,6 +94,7 @@ execution_release :: proc(exec: ^Execution) {
 
 	domain_reclaim_locked(domain)
 	spinlock.rw_write_unlock(&domain.lock)
+	protdomain_unregister(domain)
 	free(domain)
 }
 
@@ -237,6 +238,7 @@ domain_destroy :: proc(domain: ^ProtectionDomain) {
 	}
 	domain_reclaim_locked(domain)
 	spinlock.rw_write_unlock(&domain.lock)
+	protdomain_unregister(domain)
 	free(domain)
 }
 

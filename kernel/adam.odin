@@ -25,6 +25,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 	pd, dErr := new(ProtectionDomain)
 	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")
 	pd.pml4 = newPML4
+	protdomain_register(pd)
 
 	for seg in adamImg.segments {
 		flags := lmem.PageFlags{.Present, .User, .NX}
