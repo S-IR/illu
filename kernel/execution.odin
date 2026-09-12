@@ -229,15 +229,16 @@ cpu_clear_sleeping :: proc "c" () {
 domain_destroy :: proc(domain: ^ProtectionDomain) {
 	print.kassert(domain != nil, "domain_destroy: nil domain")
 	if domain == nil do return
-	spinlock.rw_write_lock(&domain.lock)
-	count := intrinsics.atomic_load(&domain.executionCount)
-	print.kassert(count == 0, "domain_destroy: executions still attached")
-	if count != 0 {
-		spinlock.rw_write_unlock(&domain.lock)
-		return
+
+	{
+		spinlock.rw_write_lock(&domain.lock)
+		defer spinlock.rw_write_unlock(&domain.lock)
+		count := intrinsics.atomic_load(&domain.executionCount)
+		print.kassert(count == 0, "domain_destroy: executions still attached")
+		if count != 0 do return
+		domain_reclaim_locked(domain)
 	}
-	domain_reclaim_locked(domain)
-	spinlock.rw_write_unlock(&domain.lock)
+
 	protdomain_unregister(domain)
 	free(domain)
 }

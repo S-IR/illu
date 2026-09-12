@@ -4,6 +4,7 @@ import "../lib/acpi"
 import "../lib/lmem"
 import "../lib/shared"
 import "../lib/spinlock"
+import "../lib/syscalls"
 import "base:intrinsics"
 import "base:runtime"
 import "core:mem"
@@ -23,12 +24,9 @@ MemoryResourceFlag :: enum {
 MemoryResourceFlags :: bit_set[MemoryResourceFlag;u64]
 
 MemoryResource :: struct {
-	phys:      u64,
-	size:      u64,
-	pageSize:  lmem.PageSize,
-	pageFlags: lmem.PageFlags,
-	flags:     MemoryResourceFlags,
-	memory:    MemoryHandle,
+	region: syscalls.MemRegion,
+	flags:  MemoryResourceFlags,
+	memory: MemoryHandle,
 }
 
 memory_resource_init :: proc(
@@ -43,12 +41,15 @@ memory_resource_init :: proc(
 	if resource == nil do return
 
 	resource^ = MemoryResource {
-		phys      = phys,
-		size      = size,
-		pageSize  = pageSize,
-		pageFlags = pageFlags,
-		flags     = flags,
-		memory    = memory_slot_create(phys, size, backend),
+		region = {
+			phys = phys,
+			logical = phys,
+			size = size,
+			pageSize = pageSize,
+			flags = pageFlags,
+		},
+		flags = flags,
+		memory = memory_slot_create(phys, size, backend),
 	}
 }
 
@@ -97,10 +98,6 @@ SavedState :: struct #align (16) {
 #assert(offset_of(SavedState, valid) == 672)
 
 
-MemRegion :: struct {
-	phys, size: u64,
-	flags:      lmem.PageFlags,
-}
 gKernelCtx: runtime.Context
 gdts: []GDT
 cpus: []CpuState
@@ -188,9 +185,9 @@ cpu_init :: proc(cpus: []CpuState, idx: u32, apicId: u32, tssRSP0: ^u64) {
 	paddedStart := u64(uintptr(raw_data(kernelStack)))
 	end := paddedStart + u64(len(kernelStack))
 
-	pmm.map_page(pmm.kernelPML4, paddedStart, ._4KB, {})
+	pmm.map_page(pmm.kernelPML4, paddedStart, paddedStart, ._4KB, {})
 	for p := paddedStart + shared.PAGE_SIZE; p < end; p += shared.PAGE_SIZE {
-		pmm.map_page(pmm.kernelPML4, p, ._4KB, {.NX, .Present, .Write})
+		pmm.map_page(pmm.kernelPML4, p, p, ._4KB, {.NX, .Present, .Write})
 	}
 
 	cpu.kernelStackTop = end

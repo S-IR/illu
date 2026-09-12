@@ -39,4 +39,16 @@ syscall_multiplexed_memory_write:
     syscall
     ret
 
+SYSCALL_STUB  syscall_prot_domain_create, 8
+SYSCALL_STUB  syscall_prot_domain_edit, 9
+SYSCALL_STUB  syscall_prot_domain_destroy, 10
+
+.global syscall_execution_start
+syscall_execution_start:
+    # System V arg4 is rcx; syscall arg4 is r10.
+    mov %rcx, %r10
+    mov $11, %eax
+    syscall
+    ret
+
 SYSCALL_STUB  syscall_debug_print, 1000

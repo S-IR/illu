@@ -30,6 +30,7 @@ find_pci_devices :: proc(rsdp: ^acpi.Rsdp) -> (devices: [dynamic]pci.Device) {
 				pmm.map_page(
 					pmm.kernelPML4,
 					busBase + offset,
+					busBase + offset,
 					._4KB,
 					{.Present, .Write, .PWT, .PCD, .NX},
 				)

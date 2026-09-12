@@ -28,7 +28,8 @@ paging_init :: proc(
 	print.kensure(kernelPML4 < u64(4) * u64(mem.Gigabyte), "paging_init: kernel PML4 above 4 GiB")
 
 	for p in u64(1) ..< state.totalPages {
-		map_page(kernelPML4, p * shared.PAGE_SIZE, ._4KB, PAGE_RW, true)
+		phys := p * shared.PAGE_SIZE
+		map_page(kernelPML4, phys, phys, ._4KB, PAGE_RW, true)
 	}
 
 	for seg in kernelImg.segments {
@@ -38,11 +39,11 @@ paging_init :: proc(
 		phys := addr_round_down_to_page(seg.base)
 		end := addr_round_up_to_page(seg.end)
 		for phys < end {
-			map_page(kernelPML4, phys, ._4KB, flags, true); phys += shared.PAGE_SIZE
+			map_page(kernelPML4, phys, phys, ._4KB, flags, true); phys += shared.PAGE_SIZE
 		}
 	}
 
-	map_page(kernelPML4, trampolinePhys, ._4KB, {.Present, .Write}, true)
+	map_page(kernelPML4, trampolinePhys, trampolinePhys, ._4KB, {.Present, .Write}, true)
 	ah.write_cr3(kernelPML4)
 }
 
@@ -55,19 +56,26 @@ ADDR_MASK :: u64(0x000F_FFFF_FFFF_F000)
 
 map_page :: proc "contextless" (
 	pml4Idx: u64,
-	phys: u64,
+	phys, logical: u64,
 	size: lmem.PageSize,
 	flags: lmem.PageFlags,
 	bootstrap := false,
 ) {
 	print.kassert(phys % shared.PAGE_SIZE == 0)
-	if size == ._2MB do print.kassert(phys % u64(2 * mem.Megabyte) == 0)
-	if size == ._1GB do print.kassert(phys % u64(mem.Gigabyte) == 0)
+	print.kassert(logical % shared.PAGE_SIZE == 0)
+	if size == ._2MB {
+		print.kassert(phys % u64(2 * mem.Megabyte) == 0)
+		print.kassert(logical % u64(2 * mem.Megabyte) == 0)
+	}
+	if size == ._1GB {
+		print.kassert(phys % u64(mem.Gigabyte) == 0)
+		print.kassert(logical % u64(mem.Gigabyte) == 0)
+	}
 	user := .User in flags
-	pml4eIdx := (phys >> PT_SHIFT_PML4) & PT_INDEX_MASK
-	pdpteIdx := (phys >> PT_SHIFT_PDPT) & PT_INDEX_MASK
-	pdeIdx := (phys >> PT_SHIFT_PD) & PT_INDEX_MASK
-	pteIdx := (phys >> PT_SHIFT_PT) & PT_INDEX_MASK
+	pml4eIdx := (logical >> PT_SHIFT_PML4) & PT_INDEX_MASK
+	pdpteIdx := (logical >> PT_SHIFT_PDPT) & PT_INDEX_MASK
+	pdeIdx := (logical >> PT_SHIFT_PD) & PT_INDEX_MASK
+	pteIdx := (logical >> PT_SHIFT_PT) & PT_INDEX_MASK
 
 	pml4 := ([^]u64)(uintptr(pml4Idx))
 

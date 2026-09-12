@@ -1,6 +1,16 @@
 package syscalls
 import "../lmem"
 
+MemRegionOp :: enum u8 {
+	Add,
+	Delete,
+}
+MemRegion :: struct #packed {
+	phys, logical, size: u64,
+	pageSize:            lmem.PageSize,
+	flags:               lmem.PageFlags,
+	op:                  MemRegionOp,
+}
 Syscall :: enum {
 	Exit,
 	MMap,
@@ -10,6 +20,10 @@ Syscall :: enum {
 	MultiplexedMemoryCreate,
 	MultiplexedMemoryRead,
 	MultiplexedMemoryWrite,
+	ProtDomainCreate,
+	ProtDomainEdit,
+	ProtDomainDestroy,
+	ExecutionStart,
 	// Parked at a high, isolated number (debug-build only, see ODIN_DEBUG
 	// below) so it never collides with a real syscall number as the table
 	// above grows.
@@ -52,6 +66,40 @@ MultiplexedMemoryError :: enum u64 {
 	InvalidWidth,
 }
 
+ProtDomainCreateError :: enum u64 {
+	None,
+	NoPermission,
+	InvalidRegionCount,
+	InvalidRegion,
+	NotOwned,
+	OutOfMemory,
+	TrackingFailed,
+}
+
+ProtDomainEditError :: enum u64 {
+	None,
+	NoPermission,
+	InvalidHandle,
+	InvalidRegionCount,
+	InvalidRegion,
+	NotOwned,
+	NotFound,
+	TrackingFailed,
+}
+
+ProtDomainDestroyError :: enum u64 {
+	None,
+	InvalidHandle,
+}
+
+ExecutionStartError :: enum u64 {
+	None,
+	NoPermission,
+	InvalidHandle,
+	InvalidEntry,
+	OutOfMemory,
+}
+
 KERNEL_BUILD :: #config(KERNEL_BUILD, false)
 
 
@@ -67,6 +115,10 @@ when !ODIN_TEST {
 			syscall_multiplexed_memory_create :: proc(phys, size: u64) -> (err: u64, handle: u64) ---
 			syscall_multiplexed_memory_read :: proc(handle, offset, dest, size, width: u64) -> (err: u64) ---
 			syscall_multiplexed_memory_write :: proc(handle, offset, source, size, width: u64) -> (err: u64) ---
+			syscall_prot_domain_create :: proc(regionsPtr, count: u64) -> (err: u64, handle: u64) ---
+			syscall_prot_domain_edit :: proc(handle, regionsPtr, count: u64) -> (err: u64) ---
+			syscall_prot_domain_destroy :: proc(handle: u64) -> (err: u64) ---
+			syscall_execution_start :: proc(handle, entryRip, entryRsp, arg0, arg1: u64) -> (err: u64) ---
 		}
 
 		// Debug-only: writes `label: value (0xvalue)` to the kernel serial
@@ -124,7 +176,10 @@ when !ODIN_TEST {
 
 		syscall_multiplexed_memory_create_userspace :: proc "contextless" (
 			phys, size: u64,
-		) -> (err: MultiplexedMemoryError, handle: u64) {
+		) -> (
+			err: MultiplexedMemoryError,
+			handle: u64,
+		) {
 			rawErr, rawHandle := syscall_multiplexed_memory_create(phys, size)
 			return MultiplexedMemoryError(rawErr), rawHandle
 		}
@@ -134,9 +189,9 @@ when !ODIN_TEST {
 			dest: rawptr,
 			size, width: u64,
 		) -> MultiplexedMemoryError {
-			return MultiplexedMemoryError(syscall_multiplexed_memory_read(
-				handle, offset, u64(uintptr(dest)), size, width,
-			))
+			return MultiplexedMemoryError(
+				syscall_multiplexed_memory_read(handle, offset, u64(uintptr(dest)), size, width),
+			)
 		}
 
 		syscall_multiplexed_memory_write_userspace :: proc "contextless" (
@@ -144,9 +199,61 @@ when !ODIN_TEST {
 			source: rawptr,
 			size, width: u64,
 		) -> MultiplexedMemoryError {
-			return MultiplexedMemoryError(syscall_multiplexed_memory_write(
-				handle, offset, u64(uintptr(source)), size, width,
-			))
+			return MultiplexedMemoryError(
+				syscall_multiplexed_memory_write(
+					handle,
+					offset,
+					u64(uintptr(source)),
+					size,
+					width,
+				),
+			)
+		}
+
+		syscall_prot_domain_create_userspace :: proc "contextless" (
+			regions: []MemRegion,
+		) -> (
+			err: ProtDomainCreateError,
+			handle: u64,
+		) {
+			rawErr, rawHandle := syscall_prot_domain_create(
+				u64(uintptr(raw_data(regions))),
+				u64(len(regions)),
+			)
+			return ProtDomainCreateError(rawErr), rawHandle
+		}
+
+		syscall_prot_domain_edit_userspace :: proc "contextless" (
+			handle: u64,
+			regions: []MemRegion,
+		) -> (
+			err: ProtDomainEditError,
+		) {
+			return ProtDomainEditError(
+				syscall_prot_domain_edit(
+					handle,
+					u64(uintptr(raw_data(regions))),
+					u64(len(regions)),
+				),
+			)
+		}
+
+		syscall_prot_domain_destroy_userspace :: proc "contextless" (
+			handle: u64,
+		) -> (
+			err: ProtDomainDestroyError,
+		) {
+			return ProtDomainDestroyError(syscall_prot_domain_destroy(handle))
+		}
+
+		syscall_execution_start_userspace :: proc "contextless" (
+			handle, entryRip, entryRsp, arg0, arg1: u64,
+		) -> (
+			err: ExecutionStartError,
+		) {
+			return ExecutionStartError(
+				syscall_execution_start(handle, entryRip, entryRsp, arg0, arg1),
+			)
 		}
 	}
 }
