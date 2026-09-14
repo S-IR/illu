@@ -1,15 +1,10 @@
 package syscalls
 import "../lmem"
 
-MemRegionOp :: enum u8 {
-	Add,
-	Delete,
-}
 MemRegion :: struct #packed {
 	phys, logical, size: u64,
 	pageSize:            lmem.PageSize,
 	flags:               lmem.PageFlags,
-	op:                  MemRegionOp,
 }
 Syscall :: enum {
 	Exit,
@@ -76,6 +71,11 @@ ProtDomainCreateError :: enum u64 {
 	TrackingFailed,
 }
 
+MemRegionOp :: enum u8 {
+	Add,
+	Delete,
+}
+
 ProtDomainEditError :: enum u64 {
 	None,
 	NoPermission,
@@ -84,6 +84,7 @@ ProtDomainEditError :: enum u64 {
 	InvalidRegion,
 	NotOwned,
 	NotFound,
+	InvalidOp,
 	TrackingFailed,
 }
 
@@ -108,7 +109,7 @@ when !ODIN_TEST {
 		@(default_calling_convention = "sysv")
 		foreign _ {
 			syscall_exit :: proc(code: u64) -> ! ---
-			syscall_mmap :: proc(count: u64, size: u64, flags: u64) -> (err: u64, addr: u64) ---
+			syscall_mmap :: proc(count: u64, size: u64, flagsPtr: u64) -> (err: u64, addr: u64) ---
 			syscall_mfree :: proc(addr: u64) -> (err: u64) ---
 			syscall_interrupt_vector_get :: proc(resource_phys: u64) -> (err: u64, vector: u64) ---
 			syscall_interrupt_wait :: proc(vector: u64) -> (err: u64) ---
@@ -116,7 +117,7 @@ when !ODIN_TEST {
 			syscall_multiplexed_memory_read :: proc(handle, offset, dest, size, width: u64) -> (err: u64) ---
 			syscall_multiplexed_memory_write :: proc(handle, offset, source, size, width: u64) -> (err: u64) ---
 			syscall_prot_domain_create :: proc(regionsPtr, count: u64) -> (err: u64, handle: u64) ---
-			syscall_prot_domain_edit :: proc(handle, regionsPtr, count: u64) -> (err: u64) ---
+			syscall_prot_domain_edit :: proc(handle, regionsPtr, count, op: u64) -> (err: u64) ---
 			syscall_prot_domain_destroy :: proc(handle: u64) -> (err: u64) ---
 			syscall_execution_start :: proc(handle, entryRip, entryRsp, arg0, arg1: u64) -> (err: u64) ---
 		}
@@ -226,6 +227,7 @@ when !ODIN_TEST {
 		syscall_prot_domain_edit_userspace :: proc "contextless" (
 			handle: u64,
 			regions: []MemRegion,
+			op: MemRegionOp,
 		) -> (
 			err: ProtDomainEditError,
 		) {
@@ -234,6 +236,7 @@ when !ODIN_TEST {
 					handle,
 					u64(uintptr(raw_data(regions))),
 					u64(len(regions)),
+					u64(op),
 				),
 			)
 		}

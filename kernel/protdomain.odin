@@ -10,6 +10,8 @@ ProtectionDomain :: struct {
 	executionCount: int,
 	slotIdx:        int,
 	generation:     u32,
+	executions:     [dynamic]^Execution,
+	killed:         bool,
 }
 
 // Registry of all live protection domains, so they can be enumerated later
@@ -59,6 +61,16 @@ protdomain_handle_resolve :: proc "contextless" (handle: u64) -> ^ProtectionDoma
 	pd := currentProtDomains.prots[idx]
 	if pd == nil || pd.generation != gen do return nil
 	return pd
+}
+
+// handle == 0 means "the caller's own domain" -- 0 can never be a real
+// encoded handle since generation starts at 1 and only increases.
+protdomain_resolve_target :: proc "contextless" (
+	handle: u64,
+	callerDomain: ^ProtectionDomain,
+) -> ^ProtectionDomain {
+	if handle == 0 do return callerDomain
+	return protdomain_handle_resolve(handle)
 }
 
 protdomain_unregister :: proc(pd: ^ProtectionDomain) {

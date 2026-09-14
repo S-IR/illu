@@ -236,7 +236,14 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 	case VECTOR_APIC_LINT1:
 		print.serial_writeln("lapic: lint1 fired")
 	case VECTOR_APIC_IPI:
-		break
+		if ipiCpu := gs_read_cpustate(); ipiCpu != nil {
+			cur := ipiCpu.rrCurrent
+			if cur != nil && cur.domain.killed && interrupt_frame_from_user(frame) {
+				ipiCpu.rrCurrent = nil
+				execution_release(cur)
+				reschedule = true
+			}
+		}
 	case:
 		if v >= MSI_VECTOR_FIRST && v < MSI_VECTOR_FIRST + MSI_VECTOR_COUNT {
 			reschedule = interrupt_wake(v, frame)
@@ -327,19 +334,19 @@ timer_tick :: proc(frame: ^InterruptFrame) -> (reschedule: bool) {
 	return true
 }
 
-interrupt_release_execution :: proc "contextless" (execution: ^Execution) {
-	if execution == nil do return
+interrupt_release_execution :: proc "contextless" (execution: ^Execution) -> (found: bool) {
+	if execution == nil do return false
 
-	{
-		spinlock.lock(&interruptLock)
-		defer spinlock.unlock(&interruptLock)
+	spinlock.lock(&interruptLock)
+	defer spinlock.unlock(&interruptLock)
 
-		for vector in 0 ..< len(interruptExecutions) {
-			if interruptExecutions[vector] == execution {
-				interruptExecutions[vector] = nil
-			}
+	for vector in 0 ..< len(interruptExecutions) {
+		if interruptExecutions[vector] == execution {
+			interruptExecutions[vector] = nil
+			found = true
 		}
 	}
+	return found
 }
 
 //should not return

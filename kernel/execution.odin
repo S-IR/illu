@@ -54,6 +54,8 @@ execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execu
 
 	spinlock.rw_write_lock(&domain.lock)
 	defer spinlock.rw_write_unlock(&domain.lock)
+	if domain.killed do return nil
+
 	execMem, err := mem.alloc(size_of(Execution), 16)
 	print.kensure(err == nil, "execution_create: allocation failure")
 	if err != nil do return nil
@@ -65,6 +67,7 @@ execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execu
 		domain         = domain,
 	}
 	intrinsics.atomic_add(&domain.executionCount, 1)
+	append(&domain.executions, exec)
 	return exec
 }
 
@@ -87,13 +90,21 @@ execution_release :: proc(exec: ^Execution) {
 		return
 	}
 	intrinsics.atomic_store(&domain.executionCount, count - 1)
+	for e, i in domain.executions {
+		if e == exec {
+			unordered_remove(&domain.executions, i)
+			break
+		}
+	}
 	if count != 1 {
 		spinlock.rw_write_unlock(&domain.lock)
 		return
 	}
 
 	domain_reclaim_locked(domain)
+	wasKilled := domain.killed
 	spinlock.rw_write_unlock(&domain.lock)
+	if wasKilled do return
 	protdomain_unregister(domain)
 	free(domain)
 }
@@ -182,7 +193,7 @@ execution_steal :: proc "contextless" (thief: ^CpuState) -> ^Execution {
 rrCpuNext: uint = 0
 @(export)
 run_next_execution :: proc "c" () -> bool {
-	// context = runtime.default_context()
+	context = gKernelCtx
 	cpu := gs_read_cpustate()
 	print.kassert(cpu != nil, "rn: cpu nil")
 	print.kassert(cpu.self == cpu, "rn: cpu self corrupt")
@@ -197,6 +208,13 @@ run_next_execution :: proc "c" () -> bool {
 	exec := cpu.rrCurrent
 	print.kassert(exec != nil, "rn: exec nil")
 	print.kassert(exec.domain != nil, "rn: domain nil")
+
+	if exec.domain.killed {
+		cpu.rrCurrent = nil
+		execution_release(exec)
+		return true
+	}
+
 	print.kassert(exec.domain.pml4 != 0, "rn: pml4 zero")
 	print.kassert(exec.state.rip != 0, "rn: rip zero")
 	print.kassert(exec.state.rsp != 0, "rn: rsp zero")
@@ -230,13 +248,51 @@ domain_destroy :: proc(domain: ^ProtectionDomain) {
 	print.kassert(domain != nil, "domain_destroy: nil domain")
 	if domain == nil do return
 
+	alreadyKilled: bool
+	execs: [dynamic]^Execution
 	{
 		spinlock.rw_write_lock(&domain.lock)
 		defer spinlock.rw_write_unlock(&domain.lock)
-		count := intrinsics.atomic_load(&domain.executionCount)
-		print.kassert(count == 0, "domain_destroy: executions still attached")
-		if count != 0 do return
-		domain_reclaim_locked(domain)
+
+		if domain.killed {
+			alreadyKilled = true
+		} else {
+			domain.killed = true
+			execs = make([dynamic]^Execution, len(domain.executions))
+			copy(execs[:], domain.executions[:])
+			if len(execs) == 0 {
+				domain_reclaim_locked(domain)
+			}
+		}
+	}
+	if alreadyKilled do return
+
+	if len(execs) == 0 {
+		delete(execs)
+		protdomain_unregister(domain)
+		free(domain)
+		return
+	}
+
+	for exec in execs {
+		if interrupt_release_execution(exec) {
+			execution_release(exec)
+		}
+	}
+	delete(execs)
+
+	for cpu in cpus {
+		send_ipi(cpu.apicId, VECTOR_APIC_IPI)
+	}
+
+	for intrinsics.atomic_load(&domain.executionCount) > 0 {
+		ah.cpu_pause()
+	}
+
+	{
+		spinlock.rw_write_lock(&domain.lock)
+		defer spinlock.rw_write_unlock(&domain.lock)
+		print.kassert(domain.pml4 == 0, "domain_destroy: reclaim not done by last release")
 	}
 
 	protdomain_unregister(domain)

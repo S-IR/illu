@@ -51,7 +51,7 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: 
 		err, handle := syscall_prot_domain_create(a1, a2)
 		return u64(err), handle
 	case .ProtDomainEdit:
-		return u64(syscall_prot_domain_edit(a1, a2, a3)), 0
+		return u64(syscall_prot_domain_edit(a1, a2, a3, a4)), 0
 	case .ProtDomainDestroy:
 		return u64(syscall_prot_domain_destroy(a1)), 0
 	case .ExecutionStart:
@@ -459,7 +459,6 @@ syscall_prot_domain_create :: proc "contextless" (
 		spinlock.rw_read_lock(&callerDomain.lock)
 		defer spinlock.rw_read_unlock(&callerDomain.lock)
 		for r in regions {
-			if r.op != .Add do return .InvalidRegion, 0
 			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !found do return .NotOwned, 0
 			if r.phys + r.size > owner.region.phys + owner.region.size do return .NotOwned, 0
@@ -498,7 +497,7 @@ syscall_prot_domain_create :: proc "contextless" (
 }
 
 syscall_prot_domain_edit :: proc "contextless" (
-	handle, regionsPtr, count: u64,
+	handle, regionsPtr, count, opRaw: u64,
 ) -> (
 	err: syscalls.ProtDomainEditError,
 ) {
@@ -509,9 +508,14 @@ syscall_prot_domain_edit :: proc "contextless" (
 		return .NoPermission
 	}
 
+	if opRaw != u64(syscalls.MemRegionOp.Add) && opRaw != u64(syscalls.MemRegionOp.Delete) {
+		return .InvalidOp
+	}
+	op := syscalls.MemRegionOp(opRaw)
+
 	callerDomain := cpu.rrCurrent.domain
 
-	target := protdomain_handle_resolve(handle)
+	target := protdomain_resolve_target(handle, callerDomain)
 	if target == nil do return .InvalidHandle
 
 	if count == 0 do return .InvalidRegionCount
@@ -536,14 +540,12 @@ syscall_prot_domain_edit :: proc "contextless" (
 		for j in i + 1 ..< len(regions) {
 			other := regions[j]
 			if r.phys == other.phys do return .InvalidRegion
-			if r.op == .Add &&
-			   other.op == .Add &&
-			   resource_ranges_overlap(r.phys, r.size, other.phys, other.size) {
+			if op == .Add && resource_ranges_overlap(r.phys, r.size, other.phys, other.size) {
 				return .InvalidRegion
 			}
 		}
 
-		switch r.op {
+		switch op {
 		case .Add:
 			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !found do return .NotOwned
@@ -555,7 +557,7 @@ syscall_prot_domain_edit :: proc "contextless" (
 		}
 	}
 	for r in regions {
-		switch r.op {
+		switch op {
 		case .Add:
 			pmm.map_page(target.pml4, r.phys, r.logical, r.pageSize, r.flags)
 			resource: MemoryResource
@@ -579,8 +581,15 @@ syscall_prot_domain_destroy :: proc "contextless" (
 	err: syscalls.ProtDomainDestroyError,
 ) {
 	context = gKernelCtx
-	pd := protdomain_handle_resolve(handle)
+
+	cpu := gs_read_cpustate()
+	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+		return .InvalidHandle
+	}
+
+	pd := protdomain_resolve_target(handle, cpu.rrCurrent.domain)
 	if pd == nil do return .InvalidHandle
+	if pd == cpu.rrCurrent.domain do return .InvalidHandle
 	domain_destroy(pd)
 	return .None
 }

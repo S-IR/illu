@@ -1,27 +1,28 @@
 package pe
-
+import "../lmem"
+import "../syscalls"
 // This package currently parses PE32+ images for x86-64.  It does not load
 // bytes into memory, apply relocations, or resolve imports.
 
-IMAGE_DOS_SIGNATURE              :: u16(0x5A4D) // MZ
-IMAGE_NT_SIGNATURE               :: u32(0x00004550) // PE\0\0
-IMAGE_FILE_MACHINE_AMD64         :: u16(0x8664)
-IMAGE_NT_OPTIONAL_HDR64_MAGIC    :: u16(0x20B)
+IMAGE_DOS_SIGNATURE :: u16(0x5A4D) // MZ
+IMAGE_NT_SIGNATURE :: u32(0x00004550) // PE\0\0
+IMAGE_FILE_MACHINE_AMD64 :: u16(0x8664)
+IMAGE_NT_OPTIONAL_HDR64_MAGIC :: u16(0x20B)
 
-DOS_HEADER_SIZE      :: 64
-DOS_PE_OFFSET        :: u64(0x3C)
-COFF_HEADER_SIZE     :: u64(20)
-SECTION_HEADER_SIZE  :: u64(40)
-MAX_SECTIONS         :: 96
-PAGE_SIZE            :: u64(0x1000)
+DOS_HEADER_SIZE :: 64
+DOS_PE_OFFSET :: u64(0x3C)
+COFF_HEADER_SIZE :: u64(20)
+SECTION_HEADER_SIZE :: u64(40)
+MAX_SECTIONS :: 96
+PAGE_SIZE :: u64(0x1000)
 
 SectionCharacteristic :: enum u32 {
-	Code             = 0x00000020,
-	InitializedData  = 0x00000040,
+	Code              = 0x00000020,
+	InitializedData   = 0x00000040,
 	UninitializedData = 0x00000080,
-	MemoryExecute    = 0x20000000,
-	MemoryRead       = 0x40000000,
-	MemoryWrite      = 0x80000000,
+	MemoryExecute     = 0x20000000,
+	MemoryRead        = 0x40000000,
+	MemoryWrite       = 0x80000000,
 }
 
 Section :: struct {
@@ -32,12 +33,9 @@ Section :: struct {
 	rawOffset:       u32,
 	characteristics: u32,
 }
-
-Page :: struct {
-	base:             u64,
-	end:              u64,
-	sectionIndex:     int,
-	characteristics:  u32,
+Region :: struct {
+	regionData:   syscalls.MemRegion,
+	sectionIndex: int,
 }
 
 Error :: enum {
@@ -64,7 +62,7 @@ Image :: struct {
 	sizeOfImage:      u32,
 	sizeOfHeaders:    u32,
 	sections:         [dynamic]Section,
-	pages:            [dynamic]Page,
+	regions:          [dynamic]Region,
 }
 
 has_range :: proc "contextless" (data: []u8, offset, size: u64) -> bool {
@@ -79,10 +77,7 @@ read_u16 :: proc "contextless" (data: []u8, offset: u64) -> u16 {
 
 read_u32 :: proc "contextless" (data: []u8, offset: u64) -> u32 {
 	i := int(offset)
-	return u32(data[i]) |
-		u32(data[i + 1]) << 8 |
-		u32(data[i + 2]) << 16 |
-		u32(data[i + 3]) << 24
+	return u32(data[i]) | u32(data[i + 1]) << 8 | u32(data[i + 2]) << 16 | u32(data[i + 3]) << 24
 }
 
 read_u64 :: proc "contextless" (data: []u8, offset: u64) -> u64 {
@@ -98,9 +93,9 @@ align_up :: proc "contextless" (value, alignment: u64) -> (u64, bool) {
 	return (value + alignment - 1) &~ (alignment - 1), true
 }
 
-parse :: proc (data: []u8) -> (image: Image, err: Error) {
+parse :: proc(data: []u8) -> (image: Image, err: Error) {
 	image.sections = make([dynamic]Section)
-	image.pages = make([dynamic]Page)
+	image.regions = make([dynamic]Region)
 
 	if !has_range(data, 0, DOS_HEADER_SIZE) do return image, .TooSmall
 	if read_u16(data, 0) != IMAGE_DOS_SIGNATURE do return image, .InvalidDosSignature
@@ -161,17 +156,26 @@ parse :: proc (data: []u8) -> (image: Image, err: Error) {
 		if sectionEnd < u64(section.virtualAddress) do return image, .InvalidHeader
 		pageEnd, ok := align_up(sectionEnd, PAGE_SIZE)
 		if !ok do return image, .InvalidHeader
-		page := Page {
-			base = align_down(u64(section.virtualAddress), PAGE_SIZE),
-			end = pageEnd,
-			sectionIndex = i,
-			characteristics = section.characteristics,
-		}
-		append(&image.pages, page)
 
+		base := align_down(u64(section.virtualAddress), PAGE_SIZE)
+		size := pageEnd - base
+
+		append(
+			&image.regions,
+			Region {
+				regionData = {
+					phys = 0,
+					logical = image.imageBase + base,
+					size = size,
+					pageSize = ._4KB,
+					flags = region_flags_for(section.characteristics),
+				},
+				sectionIndex = i,
+			},
+		)
 		if u64(image.entryRva) >= u64(section.virtualAddress) &&
-			u64(image.entryRva) < sectionEnd &&
-			(section.characteristics & u32(SectionCharacteristic.MemoryExecute)) != 0 {
+		   u64(image.entryRva) < sectionEnd &&
+		   (section.characteristics & u32(SectionCharacteristic.MemoryExecute)) != 0 {
 			entryFound = true
 		}
 	}
@@ -180,6 +184,13 @@ parse :: proc (data: []u8) -> (image: Image, err: Error) {
 	return image, .None
 }
 
-page_is_executable :: proc "contextless" (page: Page) -> bool {
-	return page.characteristics & u32(SectionCharacteristic.MemoryExecute) != 0
+image_destroy :: proc(image: ^Image) {
+	delete(image.sections)
+	delete(image.regions)
+}
+region_flags_for :: proc(characteristics: u32) -> (flags: lmem.PageFlags) {
+	flags += {.Present}
+	if characteristics & u32(SectionCharacteristic.MemoryWrite) != 0 do flags += {.Write}
+	if characteristics & u32(SectionCharacteristic.MemoryExecute) == 0 do flags += {.NX}
+	return flags
 }
