@@ -24,9 +24,9 @@ MemoryResourceFlag :: enum {
 MemoryResourceFlags :: bit_set[MemoryResourceFlag;u64]
 
 MemoryResource :: struct {
-	region: syscalls.MemRegion,
-	flags:  MemoryResourceFlags,
-	memory: MemoryHandle,
+	overlay:      syscalls.MemRegion,
+	overlayFlags: MemoryResourceFlags,
+	underlay:     ^MemoryUnderlay,
 }
 
 resource_init :: proc(
@@ -37,15 +37,15 @@ resource_init :: proc(
 	backend: MemorySlotBackend,
 ) -> MemoryResource {
 	return MemoryResource {
-		region = {
+		overlay = {
 			phys = phys,
 			logical = phys,
 			size = size,
 			pageSize = pageSize,
 			flags = pageFlags,
 		},
-		flags = flags,
-		memory = memory_slot_create(phys, size, backend),
+		overlayFlags = flags,
+		underlay = memory_underlay_create(phys, size, backend),
 	}
 }
 

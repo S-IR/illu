@@ -2,6 +2,7 @@ package print
 
 import ah "../../asm_helpers"
 import "../../lib/spinlock"
+import "base:runtime"
 import "core:fmt"
 
 when !ODIN_TEST {
@@ -66,11 +67,26 @@ when !ODIN_TEST {
 	}
 
 } else {
-	serial_write :: proc(s: string) {fmt.print(s)}
-	serial_write_hex :: proc(v: u64) {fmt.printf("0x%016x", v)}
-	serial_write_u64 :: proc(v: u64) {fmt.print(v)}
-	serial_writeln :: proc(s: string) {fmt.println(s)}
-	serial_init_asm :: proc() {}
-	serial_write_byte_asm :: proc(c: u8) {}
-	serial_write_bytes :: proc(ptr: [^]u8, len: u64) {fmt.print(string(ptr[:len]))}
+	serial_write :: proc "contextless" (s: string) {
+		context = runtime.default_context()
+		fmt.print(s)
+	}
+	serial_write_hex :: proc "contextless" (v: u64) {
+		context = runtime.default_context()
+		fmt.printf("0x%016x", v)
+	}
+	serial_write_u64 :: proc "contextless" (v: u64) {
+		context = runtime.default_context()
+		fmt.print(v)
+	}
+	serial_writeln :: proc "contextless" (s: string) {
+		context = runtime.default_context()
+		fmt.println(s)
+	}
+	serial_init_asm :: proc "contextless" () {}
+	serial_write_byte_asm :: proc "contextless" (c: u8) {}
+	serial_write_bytes :: proc "contextless" (ptr: [^]u8, len: u64) {
+		context = runtime.default_context()
+		fmt.print(string(ptr[:len]))
+	}
 }

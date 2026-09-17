@@ -19,9 +19,10 @@ ProtectionDomain :: struct {
 // domain nils its slot and pushes the index onto freeSlots instead of
 // shifting the array, so a domain's slotIdx stays valid for its lifetime.
 currentProtDomains := struct {
-	lock:      spinlock.Spinlock,
-	prots:     [dynamic]^ProtectionDomain,
-	freeSlots: [dynamic]int,
+	lock:        spinlock.Spinlock,
+	prots:       [dynamic]^ProtectionDomain,
+	generations: [dynamic]u32,
+	freeSlots:   [dynamic]int,
 }{}
 
 PROT_DOMAIN_ARRAY_START_CAP :: 8
@@ -35,17 +36,21 @@ protdomain_register :: proc(pd: ^ProtectionDomain) {
 
 	if currentProtDomains.prots == nil {
 		currentProtDomains.prots = make([dynamic]^ProtectionDomain, 0, PROT_DOMAIN_ARRAY_START_CAP)
+		currentProtDomains.generations = make([dynamic]u32, 0, PROT_DOMAIN_ARRAY_START_CAP)
 	}
 
 	if len(currentProtDomains.freeSlots) > 0 {
 		idx := pop(&currentProtDomains.freeSlots)
 		currentProtDomains.prots[idx] = pd
+		currentProtDomains.generations[idx] += 1
 		pd.slotIdx = idx
+		pd.generation = currentProtDomains.generations[idx]
 	} else {
 		append(&currentProtDomains.prots, pd)
+		append(&currentProtDomains.generations, u32(1))
 		pd.slotIdx = len(currentProtDomains.prots) - 1
+		pd.generation = 1
 	}
-	pd.generation += 1
 }
 
 protdomain_handle_encode :: proc "contextless" (pd: ^ProtectionDomain) -> u64 {
@@ -101,7 +106,7 @@ resource_upper_bound :: proc "contextless" (resources: []MemoryResource, phys: u
 	low, high := 0, len(resources)
 	for low < high {
 		mid := (low + high) / 2
-		if resources[mid].region.phys <= phys {
+		if resources[mid].overlay.phys <= phys {
 			low = mid + 1
 		} else {
 			high = mid
@@ -121,7 +126,7 @@ resource_find_exact :: proc "contextless" (
 	if insertIdx == 0 do return nil, false
 
 	candidate := &resources[insertIdx - 1]
-	if candidate.region.phys != phys do return nil, false
+	if candidate.overlay.phys != phys do return nil, false
 	return candidate, true
 }
 
@@ -136,7 +141,7 @@ resource_find_containing :: proc "contextless" (
 	if insertIdx == 0 do return nil, false
 
 	candidate := &resources[insertIdx - 1]
-	if phys < candidate.region.phys || phys >= candidate.region.phys + candidate.region.size do return nil, false
+	if phys < candidate.overlay.phys || phys >= candidate.overlay.phys + candidate.overlay.size do return nil, false
 	return candidate, true
 }
 
@@ -151,11 +156,11 @@ resource_overlaps :: proc "contextless" (resources: []MemoryResource, phys, size
 	insertIdx := resource_upper_bound(resources, phys)
 	if insertIdx > 0 {
 		prev := resources[insertIdx - 1]
-		if resource_ranges_overlap(phys, size, prev.region.phys, prev.region.size) do return true
+		if resource_ranges_overlap(phys, size, prev.overlay.phys, prev.overlay.size) do return true
 	}
 	if insertIdx < len(resources) {
 		next := resources[insertIdx]
-		if resource_ranges_overlap(phys, size, next.region.phys, next.region.size) do return true
+		if resource_ranges_overlap(phys, size, next.overlay.phys, next.overlay.size) do return true
 	}
 	return false
 }
@@ -167,11 +172,11 @@ resource_insert :: proc(
 	ptr: ^MemoryResource,
 	inserted: bool,
 ) {
-	if resource.region.size == 0 do return nil, false
-	if resource.region.phys + resource.region.size < resource.region.phys do return nil, false
-	if resource_overlaps(resources[:], resource.region.phys, resource.region.size) do return nil, false
+	if resource.overlay.size == 0 do return nil, false
+	if resource.overlay.phys + resource.overlay.size < resource.overlay.phys do return nil, false
+	if resource_overlaps(resources[:], resource.overlay.phys, resource.overlay.size) do return nil, false
 
-	insertIdx := resource_upper_bound(resources[:], resource.region.phys)
+	insertIdx := resource_upper_bound(resources[:], resource.overlay.phys)
 	_, aErr := inject_at(resources, insertIdx, resource)
 	if aErr != nil do return nil, false
 	return &resources[insertIdx], true
@@ -188,7 +193,7 @@ resource_remove :: proc(
 	if insertIdx == 0 do return {}, false
 
 	candidate := &resources[insertIdx - 1]
-	if candidate.region.phys != phys do return {}, false
+	if candidate.overlay.phys != phys do return {}, false
 
 	removed = candidate^
 	ordered_remove(resources, insertIdx - 1)

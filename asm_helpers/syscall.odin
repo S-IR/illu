@@ -9,4 +9,7 @@ when !ODIN_TEST {
 
 	}
 
+} else {
+	gs_write_base :: proc "contextless" (base: u64) {}
+	syscall_entry :: proc "contextless" () {}
 }

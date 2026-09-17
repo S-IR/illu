@@ -29,6 +29,15 @@ when !ODIN_TEST {
 		cpu_idle_loop :: proc() -> ! ---
 		fxsave_asm :: proc(area: ^[512]u8) ---
 	}
+} else {
+	@(thread_local)
+	testCpu: ^CpuState
+
+	gs_read_cpustate :: proc "contextless" () -> ^CpuState {return testCpu}
+	run_domain :: proc "contextless" (state: ^SavedState) {}
+	run_abort :: proc "contextless" (resumeRsp: u64) {}
+	cpu_idle_loop :: proc "contextless" () -> ! {for {}}
+	fxsave_asm :: proc "contextless" (area: ^[512]u8) {}
 }
 
 execution_run :: proc "contextless" (domain: ^ProtectionDomain, state: ^SavedState) {

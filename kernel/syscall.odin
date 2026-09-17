@@ -90,18 +90,18 @@ syscall_multiplexed_memory_create :: proc "contextless" (
 	defer spinlock.rw_write_unlock(&domain.lock)
 
 	resource, found := resource_find_exact(domain.resources[:], phys)
-	if !found || resource.region.size != size {
+	if !found || resource.overlay.size != size {
 		return .InvalidRange, 0
 	}
 
-	if .Volatile in resource.flags {
+	if .Volatile in resource.overlayFlags {
 		kernelMMIOFlags := lmem.PageFlags{.Present, .Write, .PWT, .PCD, .NX}
 		for page := phys; page < phys + size; page += shared.PAGE_SIZE {
 			pmm.map_page(pmm.kernelPML4, page, page, ._4KB, kernelMMIOFlags)
 		}
 	}
 
-	resource.flags += {.Multiplexed}
+	resource.overlayFlags += {.Multiplexed}
 	for page := phys; page < phys + size; page += shared.PAGE_SIZE {
 		pmm.unmap_page(domain.pml4, page)
 	}
@@ -139,32 +139,25 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 	// resource is a pointer into domain.resources -- only safe to read while
 	// domain.lock is held. Copy out everything needed below, then release.
 	resourceFlags: MemoryResourceFlags
-	resourceMemory: MemoryHandle
+	resourceMemory: ^MemoryUnderlay
 	resourceRegionPhys, resourceRegionSize: u64
 	{
 		spinlock.rw_read_lock(&domain.lock)
 		defer spinlock.rw_read_unlock(&domain.lock)
 		resource, found := resource_find_exact(domain.resources[:], handle)
-		if !found || .Multiplexed not_in resource.flags do return .InvalidHandle
-		resourceFlags = resource.flags
-		resourceMemory = resource.memory
-		resourceRegionPhys = resource.region.phys
-		resourceRegionSize = resource.region.size
+		if !found || .Multiplexed not_in resource.overlayFlags do return .InvalidHandle
+		resourceFlags = resource.overlayFlags
+		resourceMemory = resource.underlay
+		resourceRegionPhys = resource.overlay.phys
+		resourceRegionSize = resource.overlay.size
 	}
 
-	// memory_slot_get returns a pointer into the growable slot array. Keep it
-	// only while the manager lock is held; copy the fields needed below.
 	memoryPhys, memorySize: u64
 	{
-		spinlock.lock(&memoryManager.lock)
-		defer spinlock.unlock(&memoryManager.lock)
-		slot := memory_slot_get(resourceMemory)
-		assert(slot != nil)
-		if slot == nil {
-			return .InvalidHandle
-		}
-		memoryPhys = slot.phys
-		memorySize = slot.size
+		spinlock.lock(&memoryUnderlaysLock)
+		defer spinlock.unlock(&memoryUnderlaysLock)
+		memoryPhys = resourceMemory.phys
+		memorySize = resourceMemory.size
 	}
 
 	assert(memoryPhys == resourceRegionPhys)
@@ -336,7 +329,7 @@ syscall_mfree :: proc "contextless" (
 	// Pass 2: nothing above can fail, so this can't fail partway through.
 	for a in addrs {
 		removed, _ := resource_remove(&domain.resources, a)
-		memory_object_release(removed.memory)
+		memory_underlay_release(removed.underlay)
 	}
 
 	return .None
@@ -363,7 +356,7 @@ syscall_interrupt_vector_get :: proc "contextless" (
 		spinlock.rw_read_lock(&domain.lock)
 		defer spinlock.rw_read_unlock(&domain.lock)
 		resource, found := resource_find_exact(domain.resources[:], resourcePhys)
-		isInterruptSource = found && .InterruptSource in resource.flags
+		isInterruptSource = found && .InterruptSource in resource.overlayFlags
 	}
 	if !isInterruptSource {
 		return .NoPermission, 0, 0
@@ -457,8 +450,8 @@ syscall_prot_domain_create :: proc "contextless" (
 		for r in regions {
 			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !found do return .NotOwned, 0
-			if r.phys + r.size > owner.region.phys + owner.region.size do return .NotOwned, 0
-			if r.flags - owner.region.flags != {} do return .NotOwned, 0
+			if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned, 0
+			if r.flags - owner.overlay.flags != {} do return .NotOwned, 0
 		}
 	}
 
@@ -485,15 +478,15 @@ syscall_prot_domain_create :: proc "contextless" (
 		for r in regions {
 			// Re-fetch the owner instead of trusting the earlier validation
 			// pass: that pass ran under a since-released lock, so the
-			// resource could have been mfree'd by now. Sharing owner.memory
+			// resource could have been mfree'd by now. Sharing owner.underlay
 			// (rather than minting a fresh handle, like resource_init would)
 			// ties this range's lifetime to the original allocation instead
 			// of creating a second, independent owner of the same physical
 			// pages -- see prot_domain_edit's .Add case, which does the same.
 			spinlock.rw_read_lock(&callerDomain.lock)
 			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
-			ownerMemory: MemoryHandle
-			if found do ownerMemory = owner.memory
+			ownerMemory: ^MemoryUnderlay
+			if found do ownerMemory = owner.underlay
 			spinlock.rw_read_unlock(&callerDomain.lock)
 			if !found do return .NotOwned, 0
 
@@ -509,17 +502,17 @@ syscall_prot_domain_create :: proc "contextless" (
 				)
 			}
 			resource := MemoryResource {
-				region = {
+				overlay = {
 					phys = r.phys,
 					logical = r.logical,
 					size = r.size,
 					pageSize = r.pageSize,
 					flags = r.flags,
 				},
-				memory = ownerMemory,
+				underlay = ownerMemory,
 			}
-			memory_slot_increment(ownerMemory)
-			defer if err != .None do memory_object_release(ownerMemory)
+			memory_underlay_increment(ownerMemory)
+			defer if err != .None do memory_underlay_release(ownerMemory)
 
 			if _, ok := resource_insert(&pd.resources, resource); !ok do return .TrackingFailed, 0
 		}
@@ -580,8 +573,8 @@ syscall_prot_domain_edit :: proc "contextless" (
 		case .Add:
 			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !found do return .NotOwned
-			if r.phys + r.size > owner.region.phys + owner.region.size do return .NotOwned
-			if r.flags - owner.region.flags != {} do return .NotOwned
+			if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned
+			if r.flags - owner.overlay.flags != {} do return .NotOwned
 			if resource_overlaps(target.resources[:], r.phys, r.size) do return .InvalidRegion
 		case .Delete:
 			if _, found := resource_find_exact(target.resources[:], r.phys); !found do return .NotFound
@@ -611,29 +604,29 @@ syscall_prot_domain_edit :: proc "contextless" (
 			}
 
 			resource := MemoryResource {
-				region = {
+				overlay = {
 					phys = r.phys,
 					logical = r.logical,
 					size = r.size,
 					pageSize = r.pageSize,
 					flags = r.flags,
 				},
-				memory = owner.memory,
+				underlay = owner.underlay,
 			}
-			memory_slot_increment(owner.memory)
-			defer if err != .None do memory_object_release(owner.memory)
+			memory_underlay_increment(owner.underlay)
+			defer if err != .None do memory_underlay_release(owner.underlay)
 
 			if _, ok := resource_insert(&target.resources, resource); !ok do return .TrackingFailed
 
 		case .Delete:
 			removed, found := resource_remove(&target.resources, r.phys)
 			if !found do return .NotFound
-			pageBytes := syscalls.mmap_page_size_bytes(removed.region.pageSize)
-			pageCount := removed.region.size / pageBytes
+			pageBytes := syscalls.mmap_page_size_bytes(removed.overlay.pageSize)
+			pageCount := removed.overlay.size / pageBytes
 			for i in u64(0) ..< pageCount {
-				pmm.unmap_page(target.pml4, removed.region.logical + i * pageBytes)
+				pmm.unmap_page(target.pml4, removed.overlay.logical + i * pageBytes)
 			}
-			memory_object_release(removed.memory)
+			memory_underlay_release(removed.underlay)
 
 		}
 	}
