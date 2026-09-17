@@ -29,18 +29,14 @@ MemoryResource :: struct {
 	memory: MemoryHandle,
 }
 
-memory_resource_init :: proc(
-	resource: ^MemoryResource,
+resource_init :: proc(
 	phys, size: u64,
 	pageSize: lmem.PageSize,
 	pageFlags: lmem.PageFlags,
 	flags: MemoryResourceFlags,
 	backend: MemorySlotBackend,
-) {
-	assert(resource != nil)
-	if resource == nil do return
-
-	resource^ = MemoryResource {
+) -> MemoryResource {
+	return MemoryResource {
 		region = {
 			phys = phys,
 			logical = phys,

@@ -2,14 +2,24 @@ package adam
 import "../lib/alloc"
 import "../lib/lmem"
 import "../lib/pci"
+import "../lib/pe"
 import "../lib/syscalls"
 import "base:runtime"
 import "core:mem"
+
+FIRSTPE_BYTES := #load("../firstpe/firstpe.exe", []u8)
+
 @(export)
 _start :: proc "c" (pciesPtr: ^pci.Device, pciesLen: u64) -> ! {
 	context = runtime.default_context()
 	context.allocator = alloc.heap_allocator()
+	context.temp_allocator = alloc.heap_allocator()
 	context.assertion_failure_proc = adam_assertion_failure_handler
+
+	image, parseErr := pe.parse(FIRSTPE_BYTES)
+	if parseErr != .None do syscalls.syscall_exit(u64(900) + u64(parseErr))
+	loadErr := pe.run(&image, FIRSTPE_BYTES, 0, 0)
+	if loadErr != .None do syscalls.syscall_exit(u64(800) + u64(loadErr))
 	// txErr, tx := syscalls.syscall_mmap_userspace(2, lmem.PageSize._4KB, {.Present, .Write})
 	// if txErr != .None || tx == nil do syscalls.syscall_exit(130)
 	// rxErr, rx := syscalls.syscall_mmap_userspace(7, lmem.PageSize._4KB, {.Present, .Write})

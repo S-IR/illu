@@ -1,10 +1,15 @@
 package syscalls
 import "../lmem"
-
+import "core:mem"
 MemRegion :: struct #packed {
 	phys, logical, size: u64,
 	pageSize:            lmem.PageSize,
 	flags:               lmem.PageFlags,
+}
+MMapRegion :: struct #packed {
+	pageSize: lmem.PageSize,
+	count:    u64,
+	flags:    lmem.PageFlags,
 }
 Syscall :: enum {
 	Exit,
@@ -109,8 +114,8 @@ when !ODIN_TEST {
 		@(default_calling_convention = "sysv")
 		foreign _ {
 			syscall_exit :: proc(code: u64) -> ! ---
-			syscall_mmap :: proc(count: u64, size: u64, flagsPtr: u64) -> (err: u64, addr: u64) ---
-			syscall_mfree :: proc(addr: u64) -> (err: u64) ---
+			syscall_mmap :: proc(regionsPtr: u64, regionCount: u64) -> (err: u64, addr: u64) ---
+			syscall_mfree :: proc(addrsPtr: u64, count: u64) -> (err: u64) ---
 			syscall_interrupt_vector_get :: proc(resource_phys: u64) -> (err: u64, vector: u64) ---
 			syscall_interrupt_wait :: proc(vector: u64) -> (err: u64) ---
 			syscall_multiplexed_memory_create :: proc(phys, size: u64) -> (err: u64, handle: u64) ---
@@ -141,19 +146,20 @@ when !ODIN_TEST {
 		}
 
 		syscall_mmap_userspace :: proc "contextless" (
-			count: u64,
-			size: lmem.PageSize,
-			flags: lmem.PageFlags,
+			regions: []MMapRegion,
 		) -> (
 			err: MMapError,
 			addr: rawptr,
 		) {
-			rawErr, rawAddr := syscall_mmap(count, u64(size), transmute(u64)flags)
+			if regions == nil || len(regions) == 0 do return .InvalidSize, nil
+
+			rawErr, rawAddr := syscall_mmap(u64(uintptr(raw_data(regions))), u64(len(regions)))
 			return MMapError(rawErr), rawptr(uintptr(rawAddr))
 		}
 
-		syscall_mfree_userspace :: proc "contextless" (addr: u64) -> (err: MFreeError) {
-			return MFreeError(syscall_mfree(addr))
+		syscall_mfree_userspace :: proc "contextless" (addrs: []u64) -> (err: MFreeError) {
+			if len(addrs) == 0 do return .InvalidAddress
+			return MFreeError(syscall_mfree(u64(uintptr(raw_data(addrs))), u64(len(addrs))))
 		}
 
 		syscall_interrupt_vector_get_userspace :: proc "contextless" (
@@ -259,4 +265,23 @@ when !ODIN_TEST {
 			)
 		}
 	}
+}
+
+descriptor_offset :: proc(regions: []MMapRegion, index: int) -> u64 {
+	offset: u64 = 0
+	for i in 0 ..< index {
+		offset += regions[i].count * mmap_page_size_bytes(regions[i].pageSize)
+	}
+	return offset
+}
+mmap_page_size_bytes :: proc "contextless" (size: lmem.PageSize) -> u64 {
+	switch size {
+	case ._4KB:
+		return 4 * mem.Kilobyte
+	case ._2MB:
+		return 2 * mem.Megabyte
+	case ._1GB:
+		return mem.Gigabyte
+	}
+	return 0
 }

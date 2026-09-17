@@ -1,5 +1,6 @@
 package pe
 import "../lmem"
+import "../shared"
 import "../syscalls"
 // This package currently parses PE32+ images for x86-64.  It does not load
 // bytes into memory, apply relocations, or resolve imports.
@@ -14,7 +15,6 @@ DOS_PE_OFFSET :: u64(0x3C)
 COFF_HEADER_SIZE :: u64(20)
 SECTION_HEADER_SIZE :: u64(40)
 MAX_SECTIONS :: 96
-PAGE_SIZE :: u64(0x1000)
 
 SectionCharacteristic :: enum u32 {
 	Code              = 0x00000020,
@@ -49,7 +49,9 @@ Error :: enum {
 	InvalidSectionTable,
 	InvalidSectionData,
 	InvalidEntryPoint,
+	InvalidRelocationTable,
 }
+
 
 Image :: struct {
 	machine:          u16,
@@ -63,7 +65,15 @@ Image :: struct {
 	sizeOfHeaders:    u32,
 	sections:         [dynamic]Section,
 	regions:          [dynamic]Region,
+	relocations:      [dynamic]u64,
 }
+
+DATA_DIRECTORY_OFFSET :: u64(112)
+DATA_DIRECTORY_ENTRY_SIZE :: u64(8)
+IMAGE_DIRECTORY_ENTRY_BASERELOC :: u64(5)
+IMAGE_REL_BASED_ABSOLUTE :: u16(0)
+IMAGE_REL_BASED_DIR64 :: u16(10)
+
 
 has_range :: proc "contextless" (data: []u8, offset, size: u64) -> bool {
 	length := u64(len(data))
@@ -92,10 +102,17 @@ align_up :: proc "contextless" (value, alignment: u64) -> (u64, bool) {
 	if value > max(u64) - (alignment - 1) do return 0, false
 	return (value + alignment - 1) &~ (alignment - 1), true
 }
-
+//x64 ONLY
 parse :: proc(data: []u8) -> (image: Image, err: Error) {
 	image.sections = make([dynamic]Section)
+	defer if err != .None do delete(image.sections)
+
+	image.relocations = make([dynamic]u64)
+	defer if err != .None do delete(image.relocations)
+
 	image.regions = make([dynamic]Region)
+	defer if err != .None do delete(image.regions)
+
 
 	if !has_range(data, 0, DOS_HEADER_SIZE) do return image, .TooSmall
 	if read_u16(data, 0) != IMAGE_DOS_SIGNATURE do return image, .InvalidDosSignature
@@ -123,12 +140,35 @@ parse :: proc(data: []u8) -> (image: Image, err: Error) {
 	image.fileAlignment = read_u32(data, optionalOffset + 36)
 	image.sizeOfImage = read_u32(data, optionalOffset + 56)
 	image.sizeOfHeaders = read_u32(data, optionalOffset + 60)
-	if image.sectionAlignment == 0 || u64(image.sectionAlignment) % PAGE_SIZE != 0 do return image, .InvalidHeader
+	if image.sectionAlignment == 0 || u64(image.sectionAlignment) % shared.PAGE_SIZE != 0 do return image, .InvalidHeader
 	if image.fileAlignment == 0 do return image, .InvalidHeader
 	if image.entryRva == 0 do return image, .InvalidEntryPoint
 	if image.imageBase > max(u64) - u64(image.entryRva) do return image, .InvalidEntryPoint
 	image.entry = image.imageBase + u64(image.entryRva)
 
+	baseRelocRva: u32
+	baseRelocSize: u32
+
+	findBaseReloc: {
+		if sizeOfOptionalHeader < DATA_DIRECTORY_OFFSET do break findBaseReloc
+
+		RVA_RELOC_OFFSET :: 108
+		numberOfRvaAndSizesOffset := optionalOffset + RVA_RELOC_OFFSET
+		if !has_range(data, numberOfRvaAndSizesOffset, 4) do return image, .TooSmall
+		numberOfRvasAndSizes := u64(read_u32(data, numberOfRvaAndSizesOffset))
+		if numberOfRvasAndSizes <= IMAGE_DIRECTORY_ENTRY_BASERELOC do break findBaseReloc
+
+		dirOffset :=
+			optionalOffset +
+			DATA_DIRECTORY_OFFSET +
+			IMAGE_DIRECTORY_ENTRY_BASERELOC * DATA_DIRECTORY_ENTRY_SIZE
+		if dirOffset + DATA_DIRECTORY_ENTRY_SIZE > optionalOffset + sizeOfOptionalHeader do return image, .InvalidHeader
+		if !has_range(data, dirOffset, DATA_DIRECTORY_ENTRY_SIZE) do return image, .TooSmall
+
+		baseRelocRva = read_u32(data, dirOffset)
+		baseRelocSize = read_u32(data, dirOffset + 4)
+
+	}
 	sectionTableOffset := optionalOffset + sizeOfOptionalHeader
 	sectionTableSize := u64(image.sectionCount) * SECTION_HEADER_SIZE
 	if !has_range(data, sectionTableOffset, sectionTableSize) do return image, .InvalidSectionTable
@@ -154,10 +194,11 @@ parse :: proc(data: []u8) -> (image: Image, err: Error) {
 		if mappedSize == 0 do continue
 		sectionEnd := u64(section.virtualAddress) + mappedSize
 		if sectionEnd < u64(section.virtualAddress) do return image, .InvalidHeader
-		pageEnd, ok := align_up(sectionEnd, PAGE_SIZE)
+		pageEnd, ok := align_up(sectionEnd, shared.PAGE_SIZE)
 		if !ok do return image, .InvalidHeader
+		if pageEnd > u64(image.sizeOfImage) do return image, .InvalidHeader
 
-		base := align_down(u64(section.virtualAddress), PAGE_SIZE)
+		base := align_down(u64(section.virtualAddress), shared.PAGE_SIZE)
 		size := pageEnd - base
 
 		append(
@@ -180,6 +221,36 @@ parse :: proc(data: []u8) -> (image: Image, err: Error) {
 		}
 	}
 
+	if baseRelocSize > 0 {
+		relocFileOffset, relocOk := rva_to_file_offset(&image, baseRelocRva)
+		if !relocOk || !has_range(data, relocFileOffset, u64(baseRelocSize)) do return image, .InvalidRelocationTable
+		blockOffset := relocFileOffset
+		relocEnd := relocFileOffset + u64(baseRelocSize)
+
+		for blockOffset + 8 <= relocEnd {
+			pageRva := read_u32(data, blockOffset)
+			blockSize := u64(read_u32(data, blockOffset + 4))
+
+			if blockSize < 8 || blockOffset + blockSize > relocEnd do return image, .InvalidRelocationTable
+
+			entryCount := (blockSize - 8) / 2
+
+			for i in u64(0) ..< entryCount {
+				entry := read_u16(data, blockOffset + 8 + i * 2)
+				relocType := entry >> 12
+				relocOffsetInPage := u64(entry & 0x0FFF)
+				if relocType == IMAGE_REL_BASED_DIR64 {
+					append(&image.relocations, u64(pageRva) + relocOffsetInPage)
+					// IMAGE_REL_BASED_ABSOLUTE (0, padding) and any other type
+					// (e.g. HIGHLOW, x86-only) are silently skipped -- this
+					// loader targets x64 only.
+				}
+
+			}
+			blockOffset += blockSize
+
+		}
+	}
 	if !entryFound do return image, .InvalidEntryPoint
 	return image, .None
 }
@@ -187,10 +258,24 @@ parse :: proc(data: []u8) -> (image: Image, err: Error) {
 image_destroy :: proc(image: ^Image) {
 	delete(image.sections)
 	delete(image.regions)
+	delete(image.relocations)
+
 }
 region_flags_for :: proc(characteristics: u32) -> (flags: lmem.PageFlags) {
-	flags += {.Present}
+	flags += {.User}
 	if characteristics & u32(SectionCharacteristic.MemoryWrite) != 0 do flags += {.Write}
 	if characteristics & u32(SectionCharacteristic.MemoryExecute) == 0 do flags += {.NX}
 	return flags
+}
+
+rva_to_file_offset :: proc "contextless" (image: ^Image, rva: u32) -> (offset: u64, ok: bool) {
+	for section in image.sections {
+		start := section.virtualAddress
+		size := section.virtualSize
+		if size == 0 do size = section.rawSize
+		if rva >= start && u64(rva) < u64(start) + u64(size) {
+			return u64(section.rawOffset) + u64(rva - start), true
+		}
+	}
+	return 0, false
 }

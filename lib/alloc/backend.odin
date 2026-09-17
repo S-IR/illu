@@ -17,11 +17,10 @@ backend_alloc_pages :: proc(count: u64) -> u64 {
 	when KERNEL_BUILD {
 		return pmm.alloc_pages(count * u64(shared.PAGE_SIZE))
 	} else {
-		err, addr := syscalls.syscall_mmap_userspace(
-			count,
-			lmem.PageSize._4KB,
-			{.Present, .Write},
-		)
+		regions := [1]syscalls.MMapRegion {
+			{pageSize = lmem.PageSize._4KB, count = count, flags = {.Present, .Write}},
+		}
+		err, addr := syscalls.syscall_mmap_userspace(regions[:])
 		if err != .None || addr == nil {
 			return max(u64)
 		}
@@ -37,6 +36,6 @@ backend_free_pages :: proc(addr, count: u64) {
 	when KERNEL_BUILD {
 		pmm.free_pages(addr, count * u64(shared.PAGE_SIZE))
 	} else {
-		_ = syscalls.syscall_mfree_userspace(addr)
+		_ = syscalls.syscall_mfree_userspace([]u64{addr})
 	}
 }

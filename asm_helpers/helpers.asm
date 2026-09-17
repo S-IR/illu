@@ -595,6 +595,11 @@ sti_asm:
     sti
     ret
 
+.global cpu_pause
+cpu_pause:
+    pause
+    ret
+
 
 
 .global read_rsp
@@ -694,18 +699,24 @@ syscall_entry:
 .global cpu_idle_loop
 cpu_idle_loop:
     sti
+    sub $8, %rsp
     call run_next_execution
+    add $8, %rsp
     cli
     test %al, %al
-    jnz cpu_idle_loop           
-    call cpu_prepare_sleep      
+    jnz cpu_idle_loop
+    sub $8, %rsp
+    call cpu_prepare_sleep
+    add $8, %rsp
     test %al, %al
-    jz cpu_idle_loop             
+    jz cpu_idle_loop
     sti
     mov kernel_mwait_hint(%rip), %eax
     xor %ecx, %ecx
     mwait
+    sub $8, %rsp
     call cpu_clear_sleeping
+    add $8, %rsp
     jmp cpu_idle_loop
 
 
