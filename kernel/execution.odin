@@ -311,9 +311,12 @@ domain_reclaim_locked :: proc(domain: ^ProtectionDomain) {
 
 	ah.write_cr3(pmm.kernelPML4)
 
-	for resource in domain.resources {
-		memory_object_release(resource.memory)
-	}
+	// Deliberately does not release domain.resources' memory handles here.
+	// Freeing is a userland-driven action (mfree / prot_domain_edit .Delete)
+	// on whichever domain still holds a reference -- the kernel never
+	// unilaterally frees a resource just because the domain that happened to
+	// die was one of its holders. If nothing else explicitly frees it, it
+	// leaks, by design, for now.
 	delete(domain.resources)
 	pmm.pml4_destroy(domain.pml4)
 	domain.pml4 = 0

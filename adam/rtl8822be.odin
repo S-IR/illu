@@ -265,13 +265,12 @@ rtl8822be_init :: proc(device: ^pci.Device) -> (DriverResult, u64) {
 		}
 
 		pages := (u64(len(RTL8822B_FIRMWARE)) + 0xFFF) / 0x1000
-		mmapErr, dma := syscalls.syscall_mmap_userspace(
-			pages + 2,
-			lmem.PageSize._4KB,
-			{.Present, .Write},
-		)
+		regions := [1]syscalls.MMapRegion {
+			{pageSize = lmem.PageSize._4KB, count = pages + 2, flags = {.Present, .Write}},
+		}
+		mmapErr, dma := syscalls.syscall_mmap_userspace(regions[:])
 		if mmapErr != .None || dma == nil || u64(uintptr(dma)) > u64(max(u32)) do return .Failed, 8
-		defer syscalls.syscall_mfree_userspace(u64(uintptr(dma)))
+		defer syscalls.syscall_mfree_userspace([]u64{u64(uintptr(dma))})
 		mem.copy(dma, rawptr(&RTL8822B_FIRMWARE[0]), len(RTL8822B_FIRMWARE))
 		uploadDesc := rawptr(uintptr(dma) + uintptr(pages * 0x1000))
 		mem.zero(uploadDesc, 0x1000)

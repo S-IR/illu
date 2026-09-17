@@ -36,8 +36,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 		end := pmm.addr_round_up_to_page(seg.end)
 		for phys < end {
 			pmm.map_page(newPML4, phys, phys, ._4KB, flags)
-			resource: MemoryResource
-			memory_resource_init(&resource, phys, shared.PAGE_SIZE, ._4KB, flags, {}, .AllocatedRAM)
+			resource := resource_init(phys, shared.PAGE_SIZE, ._4KB, flags, {}, .AllocatedRAM)
 			_, inserted := resource_insert(&pd.resources, resource)
 			print.kensure(inserted, "adam_init: failed to track ELF page")
 			phys += shared.PAGE_SIZE
@@ -47,9 +46,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 	for device in pcies {
 		configPage := pmm.addr_round_down_to_page(device.configBase)
 		pmm.map_page(newPML4, configPage, configPage, ._4KB, CONFIG_FLAGS)
-		resource: MemoryResource
-		memory_resource_init(
-			&resource,
+		resource := resource_init(
 			configPage,
 			shared.PAGE_SIZE,
 			._4KB,
@@ -71,9 +68,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 
 	for addr := start; addr < end; addr += shared.PAGE_SIZE {
 		pmm.map_page(newPML4, addr, addr, ._4KB, {.Present, .User, .Write, .NX})
-		resource: MemoryResource
-		memory_resource_init(
-			&resource,
+		resource := resource_init(
 			addr,
 			shared.PAGE_SIZE,
 			._4KB,
@@ -92,8 +87,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 
 	pmm.map_page(newPML4, stackPhys, stackPhys, ._4KB, {})
 	{
-		resource: MemoryResource
-		memory_resource_init(&resource, stackPhys, shared.PAGE_SIZE, ._4KB, {}, {}, .AllocatedRAM)
+		resource := resource_init(stackPhys, shared.PAGE_SIZE, ._4KB, {}, {}, .AllocatedRAM)
 		_, inserted := resource_insert(&pd.resources, resource)
 		print.kensure(inserted, "adam_init: failed to track stack guard page")
 	}
@@ -103,9 +97,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 	assert(stackTop % 16 == 8)
 	for p := usableStart; p < stackTop; p += shared.PAGE_SIZE {
 		pmm.map_page(newPML4, p, p, ._4KB, {.Present, .User, .Write, .NX})
-		resource: MemoryResource
-		memory_resource_init(
-			&resource,
+		resource := resource_init(
 			p,
 			shared.PAGE_SIZE,
 			._4KB,
@@ -126,9 +118,7 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 			for page := barStart; page < barEnd; page += shared.PAGE_SIZE {
 				pmm.map_page(newPML4, page, page, ._4KB, barFlags)
 			}
-			resource: MemoryResource
-			memory_resource_init(
-				&resource,
+			resource := resource_init(
 				barStart,
 				barEnd - barStart,
 				._4KB,

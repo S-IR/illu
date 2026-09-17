@@ -20,19 +20,10 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: 
 		print.serial_writeln("")
 		exec_exit_current()
 	case .MMap:
-		count := a1
-		if count == 0 do return u64(syscalls.MMapError.InvalidSize), 0
-
-		if a2 >= len(lmem.PageSize) do return u64(syscalls.MMapError.InvalidPageSize), 0
-		pageSize := transmute(lmem.PageSize)a2
-
-		pageFlags := transmute(lmem.PageFlags)a3
-		pageFlags += {.User}
-
-		mmapErr, addr := syscall_mmap(count, pageSize, pageFlags)
+		mmapErr, addr := syscall_mmap(a1, a2)
 		return u64(mmapErr), addr
 	case .MFree:
-		return u64(syscall_mfree(a1)), 0
+		return u64(syscall_mfree(a1, a2)), 0
 	case .InterruptVectorGet:
 		interruptErr, vector, lapicID := syscall_interrupt_vector_get(a1)
 		// Preserve the two-register syscall ABI. RDX contains the vector
@@ -222,127 +213,132 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 	return .None
 }
 syscall_mmap :: proc "contextless" (
-	count: u64,
-	size: lmem.PageSize,
-	flags: lmem.PageFlags,
+	regionsPtr: u64,
+	regionsCount: u64,
 ) -> (
 	err: syscalls.MMapError,
 	phys: u64,
 ) {
 	context = gKernelCtx
-	if count == 0 do return .InvalidSize, 0
-
-	pageBytes: u64
-	switch size {
-	case ._4KB:
-		pageBytes = 4 * mem.Kilobyte
-	case ._2MB:
-		pageBytes = 2 * mem.Megabyte
-	case ._1GB:
-		pageBytes = mem.Gigabyte
-	}
-	if pageBytes == 0 do return .InvalidPageSize, 0
-	if count > max(u64) / pageBytes do return .InvalidSize, 0
-	totalBytes := count * pageBytes
+	if regionsCount == 0 do return .InvalidSize, 0
 
 	cpu := gs_read_cpustate()
-
-	print.kassert(cpu != nil)
-	print.kassert(cpu.rrCurrent != nil)
-	print.kassert(cpu.rrCurrent.domain != nil)
-	assert(cpu != nil)
-	assert(cpu.rrCurrent != nil)
-	assert(cpu.rrCurrent.domain != nil)
-
 	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
 		return .InvalidSize, 0
 	}
 	domain := cpu.rrCurrent.domain
-	assert(domain.resources != nil)
 
-	// Present and PS are controlled by map_page. User is mandatory for this
-	// syscall; the remaining flags are supplied by the caller.
-	mapFlags := flags
-	mapFlags -= {.Present, .PS}
-	mapFlags += {.User}
+	regionsBytes, overflow := intrinsics.overflow_mul(regionsCount, size_of(syscalls.MMapRegion))
+	if overflow do return .InvalidSize, 0
+
+	if !pmm.user_range_accessible(domain.pml4, regionsPtr, regionsBytes, write = false) {
+		return .InvalidSize, 0
+	}
+	regions := mem.slice_ptr(
+		(^syscalls.MMapRegion)(rawptr(uintptr(regionsPtr))),
+		int(regionsCount),
+	)
+	totalBytes: u64
+
+	for r in regions {
+		if r.count == 0 do return .InvalidSize, 0
+		pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+		if pageBytes == 0 do return .InvalidPageSize, 0
+		rBytes, ov1 := intrinsics.overflow_mul(r.count, pageBytes)
+		if ov1 do return .InvalidPageSize, 0
+		newTotal, ov2 := intrinsics.overflow_add(totalBytes, rBytes)
+		if ov2 do return .InvalidPageSize, 0
+		totalBytes = newTotal
+	}
+	if totalBytes == 0 do return .InvalidSize, 0
 
 	allocatedPhys := uintptr(pmm.alloc_zeroed(totalBytes))
 	if allocatedPhys == 0 || allocatedPhys == max(uintptr) do return .OutOfMemory, 0
 
-	for i in u64(0) ..< count {
-		pmm.map_page(
-			domain.pml4,
-			u64(allocatedPhys) + i * pageBytes,
-			u64(allocatedPhys) + i * pageBytes,
-			size,
-			mapFlags,
-		)
-	}
-	if .Write in flags {
-		pml4 := ([^]u64)(uintptr(domain.pml4))
-		pml4e := pml4[(allocatedPhys >> 39) & 0x1FF]
-		pdpt := ([^]u64)(uintptr(pml4e & 0x000F_FFFF_FFFF_F000))
-		pdpte := pdpt[(allocatedPhys >> 30) & 0x1FF]
-		pd := ([^]u64)(uintptr(pdpte & 0x000F_FFFF_FFFF_F000))
-		pde := pd[(allocatedPhys >> 21) & 0x1FF]
-		pt := ([^]u64)(uintptr(pde & 0x000F_FFFF_FFFF_F000))
-		pte := pt[(allocatedPhys >> 12) & 0x1FF]
-		print.serial_write("mmap ptes ")
-		print.serial_write_hex(pml4e)
-		print.serial_write(" ")
-		print.serial_write_hex(pdpte)
-		print.serial_write(" ")
-		print.serial_write_hex(pde)
-		print.serial_write(" ")
-		print.serial_write_hex(pte)
-		print.serial_writeln("")
+	defer if err != .None do pmm.free_pages(u64(allocatedPhys), totalBytes)
+
+	spinlock.rw_write_lock(&domain.lock)
+	defer spinlock.rw_write_unlock(&domain.lock)
+
+	when ODIN_DEBUG {
+		assert(!resource_overlaps(domain.resources[:], u64(allocatedPhys), totalBytes))
 	}
 
-	resource: MemoryResource
-	memory_resource_init(
-		&resource,
-		u64(allocatedPhys),
-		totalBytes,
-		size,
-		mapFlags,
-		{},
-		.AllocatedRAM,
-	)
-	spinlock.rw_write_lock(&domain.lock)
-	_, inserted := resource_insert(&domain.resources, resource)
-	spinlock.rw_write_unlock(&domain.lock)
-	if !inserted {
-		for i in u64(0) ..< count {
-			pmm.unmap_page(domain.pml4, u64(allocatedPhys) + i * pageBytes)
+
+	if reserve(&domain.resources, len(domain.resources) + len(regions)) != nil do return .OutOfMemory, 0
+
+	// Everything above is validated: range is free, capacity is reserved.
+	// Nothing below can fail.
+	offset: u64 = 0
+	for r in regions {
+		pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+		rBytes := r.count * pageBytes
+		regionPhys := u64(allocatedPhys) + offset
+
+		mapFlags := r.flags
+		mapFlags -= {.Present, .PS}
+		mapFlags += {.User}
+
+		for i in u64(0) ..< r.count {
+			pmm.map_page(
+				domain.pml4,
+				regionPhys + i * pageBytes,
+				regionPhys + i * pageBytes,
+				r.pageSize,
+				mapFlags,
+			)
 		}
-		pmm.free_pages(u64(allocatedPhys), totalBytes)
-		return .TrackingFailed, 0
+
+		resource := resource_init(regionPhys, rBytes, r.pageSize, mapFlags, {}, .AllocatedRAM)
+		_, inserted := resource_insert(&domain.resources, resource)
+		assert(inserted, "previous code should have ensured that insert goes on guaranteed")
+
+		offset += rBytes
 	}
 
 	return .None, u64(allocatedPhys)
 
+
 }
 
-syscall_mfree :: proc "contextless" (addr: u64) -> (err: syscalls.MFreeError) {
+syscall_mfree :: proc "contextless" (
+	addrsPtr, count: u64,
+) -> (
+	err: syscalls.MFreeError,
+) {
 	context = gKernelCtx
+	if count == 0 do return .InvalidAddress
 
 	cpu := gs_read_cpustate()
-	assert(cpu != nil)
-	assert(cpu.rrCurrent != nil)
-	assert(cpu.rrCurrent.domain != nil)
 	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
 		return .InvalidAddress
 	}
 	domain := cpu.rrCurrent.domain
 
-	spinlock.rw_write_lock(&domain.lock)
-	allocation, found := resource_remove(&domain.resources, addr)
-	spinlock.rw_write_unlock(&domain.lock)
-	if !found {
+	addrsBytes, overflowed := intrinsics.overflow_mul(count, size_of(u64))
+	if overflowed do return .InvalidAddress
+	if !pmm.user_range_accessible(domain.pml4, addrsPtr, addrsBytes, write = false) {
 		return .InvalidAddress
 	}
+	addrs := mem.slice_ptr((^u64)(rawptr(uintptr(addrsPtr))), int(count))
 
-	memory_object_release(allocation.memory)
+	spinlock.rw_write_lock(&domain.lock)
+	defer spinlock.rw_write_unlock(&domain.lock)
+
+	// Pass 1: validate everything, mutate nothing.
+	for a, i in addrs {
+		for j in i + 1 ..< len(addrs) {
+			if addrs[j] == a do return .InvalidAddress // duplicate -- second free would spuriously "not found"
+		}
+		if _, found := resource_find_exact(domain.resources[:], a); !found do return .InvalidAddress
+	}
+
+	// Pass 2: nothing above can fail, so this can't fail partway through.
+	for a in addrs {
+		removed, _ := resource_remove(&domain.resources, a)
+		memory_object_release(removed.memory)
+	}
+
 	return .None
 }
 
@@ -487,9 +483,44 @@ syscall_prot_domain_create :: proc "contextless" (
 		spinlock.rw_write_lock(&pd.lock)
 		defer spinlock.rw_write_unlock(&pd.lock)
 		for r in regions {
-			pmm.map_page(pd.pml4, r.phys, r.logical, r.pageSize, r.flags)
-			resource: MemoryResource
-			memory_resource_init(&resource, r.phys, r.size, r.pageSize, r.flags, {}, .AllocatedRAM)
+			// Re-fetch the owner instead of trusting the earlier validation
+			// pass: that pass ran under a since-released lock, so the
+			// resource could have been mfree'd by now. Sharing owner.memory
+			// (rather than minting a fresh handle, like resource_init would)
+			// ties this range's lifetime to the original allocation instead
+			// of creating a second, independent owner of the same physical
+			// pages -- see prot_domain_edit's .Add case, which does the same.
+			spinlock.rw_read_lock(&callerDomain.lock)
+			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
+			ownerMemory: MemoryHandle
+			if found do ownerMemory = owner.memory
+			spinlock.rw_read_unlock(&callerDomain.lock)
+			if !found do return .NotOwned, 0
+
+			pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+			pageCount := r.size / pageBytes
+			for i in u64(0) ..< pageCount {
+				pmm.map_page(
+					pd.pml4,
+					r.phys + i * pageBytes,
+					r.logical + i * pageBytes,
+					r.pageSize,
+					r.flags,
+				)
+			}
+			resource := MemoryResource {
+				region = {
+					phys = r.phys,
+					logical = r.logical,
+					size = r.size,
+					pageSize = r.pageSize,
+					flags = r.flags,
+				},
+				memory = ownerMemory,
+			}
+			memory_slot_increment(ownerMemory)
+			defer if err != .None do memory_object_release(ownerMemory)
+
 			if _, ok := resource_insert(&pd.resources, resource); !ok do return .TrackingFailed, 0
 		}
 	}
@@ -551,7 +582,7 @@ syscall_prot_domain_edit :: proc "contextless" (
 			if !found do return .NotOwned
 			if r.phys + r.size > owner.region.phys + owner.region.size do return .NotOwned
 			if r.flags - owner.region.flags != {} do return .NotOwned
-			if resource_overlap_existing(target.resources[:], r.phys, r.size) do return .InvalidRegion
+			if resource_overlaps(target.resources[:], r.phys, r.size) do return .InvalidRegion
 		case .Delete:
 			if _, found := resource_find_exact(target.resources[:], r.phys); !found do return .NotFound
 		}
@@ -559,16 +590,51 @@ syscall_prot_domain_edit :: proc "contextless" (
 	for r in regions {
 		switch op {
 		case .Add:
-			pmm.map_page(target.pml4, r.phys, r.logical, r.pageSize, r.flags)
-			resource: MemoryResource
-			memory_resource_init(&resource, r.phys, r.size, r.pageSize, r.flags, {}, .AllocatedRAM)
-			_, ok := resource_insert(&target.resources, resource)
-			assert(ok)
+			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
+			if !found do return .NotOwned
+
+			pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+			pageCount := r.size / pageBytes
+			for i in u64(0) ..< pageCount {
+				pmm.map_page(
+					target.pml4,
+					r.phys + i * pageBytes,
+					r.logical + i * pageBytes,
+					r.pageSize,
+					r.flags,
+				)
+			}
+			defer if err != .None {
+				for i in u64(0) ..< pageCount {
+					pmm.unmap_page(target.pml4, r.logical + i * pageBytes)
+				}
+			}
+
+			resource := MemoryResource {
+				region = {
+					phys = r.phys,
+					logical = r.logical,
+					size = r.size,
+					pageSize = r.pageSize,
+					flags = r.flags,
+				},
+				memory = owner.memory,
+			}
+			memory_slot_increment(owner.memory)
+			defer if err != .None do memory_object_release(owner.memory)
+
+			if _, ok := resource_insert(&target.resources, resource); !ok do return .TrackingFailed
+
 		case .Delete:
 			removed, found := resource_remove(&target.resources, r.phys)
-			assert(found)
-			pmm.unmap_page(target.pml4, removed.region.logical)
+			if !found do return .NotFound
+			pageBytes := syscalls.mmap_page_size_bytes(removed.region.pageSize)
+			pageCount := removed.region.size / pageBytes
+			for i in u64(0) ..< pageCount {
+				pmm.unmap_page(target.pml4, removed.region.logical + i * pageBytes)
+			}
 			memory_object_release(removed.memory)
+
 		}
 	}
 

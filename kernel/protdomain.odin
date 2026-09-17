@@ -144,6 +144,22 @@ resource_ranges_overlap :: proc "contextless" (aPhys, aSize, bPhys, bSize: u64) 
 	return aPhys < bPhys + bSize && bPhys < aPhys + aSize
 }
 
+// Whether [phys, phys+size) would collide with anything already tracked.
+// Shared by resource_insert and by callers that need to check without
+// mutating anything.
+resource_overlaps :: proc "contextless" (resources: []MemoryResource, phys, size: u64) -> bool {
+	insertIdx := resource_upper_bound(resources, phys)
+	if insertIdx > 0 {
+		prev := resources[insertIdx - 1]
+		if resource_ranges_overlap(phys, size, prev.region.phys, prev.region.size) do return true
+	}
+	if insertIdx < len(resources) {
+		next := resources[insertIdx]
+		if resource_ranges_overlap(phys, size, next.region.phys, next.region.size) do return true
+	}
+	return false
+}
+
 resource_insert :: proc(
 	resources: ^[dynamic]MemoryResource,
 	resource: MemoryResource,
@@ -153,18 +169,11 @@ resource_insert :: proc(
 ) {
 	if resource.region.size == 0 do return nil, false
 	if resource.region.phys + resource.region.size < resource.region.phys do return nil, false
+	if resource_overlaps(resources[:], resource.region.phys, resource.region.size) do return nil, false
 
 	insertIdx := resource_upper_bound(resources[:], resource.region.phys)
-	if insertIdx > 0 {
-		prev := resources[insertIdx - 1]
-		if resource_ranges_overlap(resource.region.phys, resource.region.size, prev.region.phys, prev.region.size) do return nil, false
-	}
-	if insertIdx < len(resources) {
-		next := resources[insertIdx]
-		if resource_ranges_overlap(resource.region.phys, resource.region.size, next.region.phys, next.region.size) do return nil, false
-	}
-
-	inject_at(resources, insertIdx, resource)
+	_, aErr := inject_at(resources, insertIdx, resource)
+	if aErr != nil do return nil, false
 	return &resources[insertIdx], true
 }
 
@@ -186,13 +195,7 @@ resource_remove :: proc(
 	return removed, true
 }
 
-// Every syscall that reads or mutates a ProtectionDomain's `resources` array
-// must hold `lock` (not just take a pointer and hope) -- see the write-up
-// where this was added. domains_write_lock/unlock take one or two domains'
-// locks together, collapsing to a single lock when the caller is editing its
-// own domain (target == callerDomain) so that case can't deadlock on itself,
-// and otherwise locking in address order so two threads editing the same
-// pair of domains in opposite order can't deadlock on each other.
+
 domains_write_lock :: proc "contextless" (a, b: ^ProtectionDomain) {
 	if a == b {
 		spinlock.rw_write_lock(&a.lock)
@@ -213,20 +216,4 @@ domains_write_unlock :: proc "contextless" (a, b: ^ProtectionDomain) {
 	if uintptr(a) > uintptr(b) do first, second = b, a
 	spinlock.rw_write_unlock(&second.lock)
 	spinlock.rw_write_unlock(&first.lock)
-}
-
-resource_overlap_existing :: proc "contextless" (
-	resources: []MemoryResource,
-	phys, size: u64,
-) -> bool {
-	insertedIdx := resource_upper_bound(resources, phys)
-	if insertedIdx > 0 {
-		prev := resources[insertedIdx - 1]
-		if resource_ranges_overlap(phys, size, prev.region.phys, prev.region.size) do return true
-	}
-	if insertedIdx < len(resources) {
-		next := resources[insertedIdx]
-		if resource_ranges_overlap(phys, size, next.region.phys, next.region.size) do return true
-	}
-	return false
 }
