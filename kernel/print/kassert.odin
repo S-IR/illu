@@ -76,6 +76,16 @@ when !ODIN_TEST {
 		serial_writeln(loc.procedure)
 		ah.halt()
 	}
+} else {
+	kassert_failure_handler :: proc(
+		prefix, message: string,
+		loc: runtime.Source_Code_Location,
+	) -> ! {
+		serial_write(prefix)
+		serial_write(": ")
+		serial_writeln(message)
+		runtime.trap()
+	}
 }
 
 kensure :: proc(
