@@ -20,11 +20,14 @@ ExecutionState :: enum {
 	WaitingOnInterrupt,
 }
 
+TRAMPOLINE_STACK_SIZE :: 256
+trampolineStacksBase: u64
+
 when !ODIN_TEST {
 	@(default_calling_convention = "c")
 	foreign _ {
 		gs_read_cpustate :: proc() -> ^CpuState ---
-		run_domain :: proc(state: ^SavedState) ---
+		run_domain :: proc(state: ^SavedState, targetPml4: u64, trampolineTop: u64) ---
 		run_abort :: proc(resumeRsp: u64) ---
 		cpu_idle_loop :: proc() -> ! ---
 		fxsave_asm :: proc(area: ^[512]u8) ---
@@ -34,7 +37,7 @@ when !ODIN_TEST {
 	testCpu: ^CpuState
 
 	gs_read_cpustate :: proc "contextless" () -> ^CpuState {return testCpu}
-	run_domain :: proc "contextless" (state: ^SavedState) {}
+	run_domain :: proc "contextless" (state: ^SavedState, targetPml4: u64, trampolineTop: u64) {}
 	run_abort :: proc "contextless" (resumeRsp: u64) {}
 	cpu_idle_loop :: proc "contextless" () -> ! {for {}}
 	fxsave_asm :: proc "contextless" (area: ^[512]u8) {}
@@ -46,9 +49,11 @@ execution_run :: proc "contextless" (domain: ^ProtectionDomain, state: ^SavedSta
 		intrinsics.atomic_load(&domain.executionCount) > 0,
 		"execution_run: domain has no executions",
 	)
-	ah.write_cr3(domain.pml4)
 	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
-	run_domain(state)
+	cpu := gs_read_cpustate()
+	print.kassert(cpu != nil, "execution_run: no current cpu")
+	top := trampolineStacksBase + u64(cpu.index + 1) * TRAMPOLINE_STACK_SIZE
+	run_domain(state, domain.pml4, top)
 }
 
 execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execution {

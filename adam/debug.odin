@@ -15,8 +15,7 @@ adam_assertion_failure_handler :: proc(
 	loc: runtime.Source_Code_Location,
 ) -> ! {
 	when ODIN_DEBUG {
-		syscalls.syscall_debug_print_userspace("ASSERT FAILED (line)", u64(loc.line))
-		syscalls.syscall_debug_print_userspace(message, 0)
+		syscalls.syscall_debug_print_userspace(loc.file_path, u64(loc.line))
 	}
 	syscalls.syscall_exit(255)
 }

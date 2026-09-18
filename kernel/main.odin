@@ -27,6 +27,10 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	print.serial_init_asm()
 	print.serial_writeln("illu kernel alive!")
 	cpuid_init_mwait()
+	cpuid_init_meltdown_check()
+	print.serial_write("meltdown vulnerable: ")
+	print.serial_writeln(cpuMeltdownVulnerable ? "true" : "false")
+	cpuid_init_speculation_mitigations()
 
 
 	gdt_tss_fill(&gdtBeforeSched)

@@ -33,6 +33,8 @@ when !ODIN_TEST {
 		read_cr2 :: proc() -> u64 ---
 		read_cr3 :: proc() -> u64 ---
 		write_cr3 :: proc(addr: u64) ---
+		invlpg_asm :: proc(addr: u64) ---
+		verw_mitigate_asm :: proc() ---
 
 		wrmsr_asm :: proc(msr: u32, value: u64) ---
 		rdmsr_asm :: proc(msr: u32) -> u64 ---
@@ -88,6 +90,8 @@ when !ODIN_TEST {
 	read_cr2 :: proc "contextless" () -> u64 {return 0}
 	read_cr3 :: proc "contextless" () -> u64 {return 0}
 	write_cr3 :: proc "contextless" (addr: u64) {}
+	invlpg_asm :: proc "contextless" (addr: u64) {}
+	verw_mitigate_asm :: proc "contextless" () {}
 
 	wrmsr_asm :: proc "contextless" (msr: u32, value: u64) {}
 	rdmsr_asm :: proc "contextless" (msr: u32) -> u64 {return 0}

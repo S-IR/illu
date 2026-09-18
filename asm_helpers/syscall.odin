@@ -6,10 +6,12 @@ when !ODIN_TEST {
 	foreign _ {
 		gs_write_base :: proc(base: u64) ---
 		syscall_entry :: proc() ---
+		syscall_entry_meltdown_safe :: proc() ---
 
 	}
 
 } else {
 	gs_write_base :: proc "contextless" (base: u64) {}
 	syscall_entry :: proc "contextless" () {}
+	syscall_entry_meltdown_safe :: proc "contextless" () {}
 }

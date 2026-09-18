@@ -15,9 +15,11 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: 
 
 	switch syscalls.Syscall(nr) {
 	case .Exit:
+		spinlock.lock(&serialPrintLock)
 		print.serial_write("exit code: ")
 		print.serial_write_u64(a1)
 		print.serial_writeln("")
+		spinlock.unlock(&serialPrintLock)
 		exec_exit_current()
 	case .MMap:
 		mmapErr, addr := syscall_mmap(a1, a2)
@@ -70,6 +72,7 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: 
 }
 
 multiplexedMemoryLock: spinlock.Spinlock
+serialPrintLock: spinlock.Spinlock
 
 syscall_multiplexed_memory_create :: proc "contextless" (
 	phys, size: u64,
@@ -85,6 +88,10 @@ syscall_multiplexed_memory_create :: proc "contextless" (
 	if size == 0 || phys + size < phys do return .InvalidRange, 0
 
 	domain := cpu.rrCurrent.domain
+
+	callerCR3 := ah.read_cr3()
+	ah.write_cr3(pmm.kernelPML4)
+	defer ah.write_cr3(callerCR3)
 
 	spinlock.rw_write_lock(&domain.lock)
 	defer spinlock.rw_write_unlock(&domain.lock)
@@ -169,39 +176,60 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 	userBufferOK := pmm.user_range_accessible(domain.pml4, userPtr, size, write = !writeTarget)
 	if !userBufferOK do return .InvalidBuffer
 
+	// Copy the whole user buffer into a kernel-owned bounce buffer right after
+	// validation, and never touch userPtr again below. Otherwise the loop
+	// below would keep re-dereferencing userPtr while doing (potentially
+	// slow) device I/O, giving another execution a wide window to unmap or
+	// free that memory out from under it.
+	buf, allocErr := make([]u8, int(size))
+	if allocErr != nil do return .OutOfMemory
+	defer delete(buf)
+
+	callerCR3 := ah.read_cr3()
+	ah.write_cr3(pmm.kernelPML4)
+	defer ah.write_cr3(callerCR3)
+
+	if writeTarget {
+		mem.copy(raw_data(buf), rawptr(uintptr(userPtr)), int(size))
+	}
+
 	spinlock.lock(&multiplexedMemoryLock)
 	defer spinlock.unlock(&multiplexedMemoryLock)
 
 	for pos in u64(0) ..< size {
 		if pos % width != 0 do continue
 		target := rawptr(uintptr(memoryPhys + offset + pos))
-		user := rawptr(uintptr(userPtr + pos))
+		bufPos := rawptr(uintptr(uintptr(raw_data(buf)) + uintptr(pos)))
 		if .Volatile in resourceFlags {
 			switch width {
 			case 1:
 				if writeTarget {
-					ah.mmio_write_u8(target, (^u8)(user)^)
+					ah.mmio_write_u8(target, (^u8)(bufPos)^)
 				} else {
-					(^u8)(user)^ = ah.mmio_read_u8(target)
+					(^u8)(bufPos)^ = ah.mmio_read_u8(target)
 				}
 			case 2:
 				if writeTarget {
-					ah.mmio_write_u16(target, (^u16)(user)^)
+					ah.mmio_write_u16(target, (^u16)(bufPos)^)
 				} else {
-					(^u16)(user)^ = ah.mmio_read_u16(target)
+					(^u16)(bufPos)^ = ah.mmio_read_u16(target)
 				}
 			case 4:
 				if writeTarget {
-					ah.mmio_write_u32(target, (^u32)(user)^)
+					ah.mmio_write_u32(target, (^u32)(bufPos)^)
 				} else {
-					(^u32)(user)^ = ah.mmio_read_u32(target)
+					(^u32)(bufPos)^ = ah.mmio_read_u32(target)
 				}
 			}
 		} else if writeTarget {
-			mem.copy(target, user, int(width))
+			mem.copy(target, bufPos, int(width))
 		} else {
-			mem.copy(user, target, int(width))
+			mem.copy(bufPos, target, int(width))
 		}
+	}
+
+	if !writeTarget {
+		mem.copy(rawptr(uintptr(userPtr)), raw_data(buf), int(size))
 	}
 	return .None
 }
@@ -227,10 +255,10 @@ syscall_mmap :: proc "contextless" (
 	if !pmm.user_range_accessible(domain.pml4, regionsPtr, regionsBytes, write = false) {
 		return .InvalidSize, 0
 	}
-	regions := mem.slice_ptr(
-		(^syscalls.MMapRegion)(rawptr(uintptr(regionsPtr))),
-		int(regionsCount),
-	)
+	regions, allocErr := make([]syscalls.MMapRegion, int(regionsCount))
+	if allocErr != nil do return .OutOfMemory, 0
+	defer delete(regions)
+	mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionsBytes))
 	totalBytes: u64
 
 	for r in regions {
@@ -313,7 +341,10 @@ syscall_mfree :: proc "contextless" (
 	if !pmm.user_range_accessible(domain.pml4, addrsPtr, addrsBytes, write = false) {
 		return .InvalidAddress
 	}
-	addrs := mem.slice_ptr((^u64)(rawptr(uintptr(addrsPtr))), int(count))
+	addrs, allocErr := make([]u64, int(count))
+	if allocErr != nil do return .OutOfMemory
+	defer delete(addrs)
+	mem.copy(raw_data(addrs), rawptr(uintptr(addrsPtr)), int(addrsBytes))
 
 	spinlock.rw_write_lock(&domain.lock)
 	defer spinlock.rw_write_unlock(&domain.lock)
@@ -439,10 +470,10 @@ syscall_prot_domain_create :: proc "contextless" (
 		return .InvalidRegionCount, 0
 	}
 
-	regions: []syscalls.MemRegion = mem.slice_ptr(
-		(^syscalls.MemRegion)(rawptr(uintptr(regionsPtr))),
-		int(count),
-	)
+	regions, regionsAllocErr := make([]syscalls.MemRegion, int(count))
+	if regionsAllocErr != nil do return .OutOfMemory, 0
+	defer delete(regions)
+	mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
 
 	{
 		spinlock.rw_read_lock(&callerDomain.lock)
@@ -457,7 +488,11 @@ syscall_prot_domain_create :: proc "contextless" (
 
 	newPml4 := pmm.alloc_zeroed(shared.PAGE_SIZE)
 	if newPml4 == 0 do return .OutOfMemory, 0
-	pmm.pml4_deep_copy(newPml4, pmm.kernelPML4, true)
+	if cpuMeltdownVulnerable {
+		pmm.pml4_map_kernel_image(newPml4)
+	} else {
+		pmm.pml4_deep_copy(newPml4, pmm.kernelPML4, true)
+	}
 
 	pd, allocErr := new(ProtectionDomain)
 	if allocErr != nil {
@@ -548,7 +583,10 @@ syscall_prot_domain_edit :: proc "contextless" (
 	if !pmm.user_range_accessible(callerDomain.pml4, regionsPtr, regionBytes, write = false) {
 		return .InvalidRegionCount
 	}
-	regions := mem.slice_ptr((^syscalls.MemRegion)(rawptr(uintptr(regionsPtr))), int(count))
+	regions, allocErr := make([]syscalls.MemRegion, int(count))
+	if allocErr != nil do return .OutOfMemory
+	defer delete(regions)
+	mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
 
 	// Held across both passes below: pass 1's guarantees about target's (and,
 	// for Add, callerDomain's) resources must still hold when pass 2 applies

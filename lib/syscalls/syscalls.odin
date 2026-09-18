@@ -42,6 +42,7 @@ MFreeError :: enum u64 {
 	None,
 	InvalidAddress,
 	InvalidSize,
+	OutOfMemory,
 }
 
 InterruptVectorGetError :: enum u64 {
@@ -64,6 +65,7 @@ MultiplexedMemoryError :: enum u64 {
 	InvalidRange,
 	InvalidBuffer,
 	InvalidWidth,
+	OutOfMemory,
 }
 
 ProtDomainCreateError :: enum u64 {
@@ -91,6 +93,7 @@ ProtDomainEditError :: enum u64 {
 	NotFound,
 	InvalidOp,
 	TrackingFailed,
+	OutOfMemory,
 }
 
 ProtDomainDestroyError :: enum u64 {

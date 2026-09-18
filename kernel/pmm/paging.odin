@@ -16,12 +16,23 @@ PAGE_MMIO :: lmem.PageFlags{.Present, .Write, .PWT, .PCD}
 @(export, link_name = "kernelPML4")
 kernelPML4: u64
 
+kernelImgGlobal: elf.Image
+trampolineRegionBase: u64
+trampolineRegionSize: u64
+kernelStacksRegionBase: u64
+kernelStacksRegionStride: u64
+kernelStacksRegionCount: u64
+gdtRegionBase: u64
+gdtRegionSize: u64
+
 paging_init :: proc(
 	kernelImg: elf.Image,
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize: u64,
 	memoryMapDescSize: u64,
 ) {
+	kernelImgGlobal = kernelImg
+
 	enable_nxe()
 	kernelPML4 = pmm_alloc_zeroed_page_below(u64(4) * u64(mem.Gigabyte))
 	print.kensure(kernelPML4 != 0, "paging_init: no page below 4 GiB for kernel PML4")
@@ -32,19 +43,52 @@ paging_init :: proc(
 		map_page(kernelPML4, phys, phys, ._4KB, PAGE_RW, true)
 	}
 
-	for seg in kernelImg.segments {
+	pml4_map_kernel_image(kernelPML4, bootstrap = true)
+
+	map_page(kernelPML4, trampolinePhys, trampolinePhys, ._4KB, {.Present, .Write}, true)
+	ah.write_cr3(kernelPML4)
+}
+
+pml4_map_kernel_image :: proc(dstPML4Phys: u64, bootstrap := false) {
+	for seg in kernelImgGlobal.segments {
 		flags := lmem.PageFlags{.Present, .NX}
 		if .W in seg.perms do flags += {.Write}
 		if .X in seg.perms do flags -= {.NX}
 		phys := addr_round_down_to_page(seg.base)
 		end := addr_round_up_to_page(seg.end)
 		for phys < end {
-			map_page(kernelPML4, phys, phys, ._4KB, flags, true); phys += shared.PAGE_SIZE
+			map_page(dstPML4Phys, phys, phys, ._4KB, flags, bootstrap)
+			phys += shared.PAGE_SIZE
 		}
 	}
 
-	map_page(kernelPML4, trampolinePhys, trampolinePhys, ._4KB, {.Present, .Write}, true)
-	ah.write_cr3(kernelPML4)
+	if trampolineRegionSize > 0 {
+		phys := addr_round_down_to_page(trampolineRegionBase)
+		end := addr_round_up_to_page(trampolineRegionBase + trampolineRegionSize)
+		for phys < end {
+			map_page(dstPML4Phys, phys, phys, ._4KB, {.Present, .Write, .NX}, bootstrap)
+			phys += shared.PAGE_SIZE
+		}
+	}
+
+	for c in u64(0) ..< kernelStacksRegionCount {
+		stackBase := kernelStacksRegionBase + c * kernelStacksRegionStride
+		phys := stackBase + shared.PAGE_SIZE
+		end := stackBase + kernelStacksRegionStride
+		for phys < end {
+			map_page(dstPML4Phys, phys, phys, ._4KB, {.Present, .Write, .NX}, bootstrap)
+			phys += shared.PAGE_SIZE
+		}
+	}
+
+	if gdtRegionSize > 0 {
+		phys := addr_round_down_to_page(gdtRegionBase)
+		end := addr_round_up_to_page(gdtRegionBase + gdtRegionSize)
+		for phys < end {
+			map_page(dstPML4Phys, phys, phys, ._4KB, {.Present, .Write, .NX}, bootstrap)
+			phys += shared.PAGE_SIZE
+		}
+	}
 }
 
 PT_SHIFT_PML4 :: u64(39)
@@ -104,6 +148,7 @@ map_page :: proc "contextless" (
 	pd := ensure_table(pdpt, pdpteIdx, user, .Write in flags, bootstrap)
 	pt := ensure_table(pd, pdeIdx, user, .Write in flags, bootstrap)
 	pt[pteIdx] = phys | transmute(u64)(flags + {.Present})
+	ah.invlpg_asm(logical)
 }
 
 
