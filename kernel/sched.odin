@@ -76,6 +76,7 @@ CpuState :: struct #align (16) {
 #assert(offset_of(CpuState, runState) == 24)
 #assert(offset_of(CpuState, schedulerResumeRsp) == 32)
 #assert(offset_of(CpuState, syscallFrame) == 40)
+#assert(offset_of(CpuState, rrCurrent) == 56)
 
 SavedState :: struct #align (16) {
 	rax, rbx, rcx, rdx:       u64,
@@ -156,7 +157,13 @@ smp_start :: proc(rsdp: ^acpi.Rsdp, apCount: int) {
 
 		gdt_tss_fill(&gdts[cpuIndex])
 		stride := u64(KERNEL_STACK_PER_CPU_SIZE + shared.PAGE_SIZE)
-		cpu_init(cpus, cpuIndex, apId, &gdts[cpuIndex].tss.rsp[0], kernelStacksBase + u64(cpuIndex) * stride)
+		cpu_init(
+			cpus,
+			cpuIndex,
+			apId,
+			&gdts[cpuIndex].tss.rsp[0],
+			kernelStacksBase + u64(cpuIndex) * stride,
+		)
 		install_trampoline(
 			rawptr(uintptr(pmm.trampolinePhys)),
 			cr3,
@@ -179,6 +186,8 @@ ap_init :: proc "c" (cpu: ^CpuState) {
 	ah.reload_segments_asm()
 	TSS_SEL :: u16(GDTEntryNames.Tss1) << 3
 	ah.load_tss_asm(TSS_SEL)
+
+	cpuid_enable_pcid()
 
 	ah.gs_write_base(u64(uintptr(cpu)))
 	intrinsics.atomic_store(&apReady, 1)

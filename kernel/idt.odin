@@ -1,6 +1,7 @@
 package kernel
 import ah "../asm_helpers"
 import "../lib/spinlock"
+import "base:intrinsics"
 import "base:runtime"
 import "pmm"
 import "print"
@@ -126,7 +127,7 @@ interrupt_frame_from_user :: #force_inline proc "contextless" (frame: ^Interrupt
 exception_handler :: proc "c" (frame: ^InterruptFrame) {
 	userMode := interrupt_frame_from_user(frame)
 	if userMode {
-		ah.write_cr3(pmm.kernelPML4)
+		kernel_switch_cr3()
 	}
 
 	context = gKernelCtx
@@ -145,7 +146,8 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		print.serial_write_hex(ah.read_cr2())
 		print.serial_write(" err=")
 		print.serial_write_hex(frame.error_code)
-		if cpu := gs_read_cpustate(); cpu != nil && cpu.rrCurrent != nil && cpu.rrCurrent.domain != nil {
+		if cpu := gs_read_cpustate();
+		   cpu != nil && cpu.rrCurrent != nil && cpu.rrCurrent.domain != nil {
 			print.serial_write(" domain.pml4=")
 			print.serial_write_hex(cpu.rrCurrent.domain.pml4)
 		}
@@ -240,6 +242,11 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 	case VECTOR_APIC_LINT1:
 		print.serial_writeln("lapic: lint1 fired")
 	case VECTOR_APIC_IPI:
+		if pending := intrinsics.atomic_load(&tlbShootdown.pcid); pending != 0 {
+			ah.invpcid_asm(1, u64(pending))
+			intrinsics.atomic_add(&tlbShootdown.acked, 1)
+		}
+
 		if ipiCpu := gs_read_cpustate(); ipiCpu != nil {
 			cur := ipiCpu.rrCurrent
 			if cur != nil && cur.domain.killed && interrupt_frame_from_user(frame) {

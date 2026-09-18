@@ -13,6 +13,7 @@ import "print"
 @(export)
 syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: u64) {
 
+
 	switch syscalls.Syscall(nr) {
 	case .Exit:
 		spinlock.lock(&serialPrintLock)
@@ -49,6 +50,10 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: 
 		return u64(syscall_prot_domain_destroy(a1)), 0
 	case .ExecutionStart:
 		return u64(syscall_execution_start(a1, a2, a3, a4, a5)), 0
+	case .AttachmentSet:
+		return u64(syscall_attachment_set(a1, a2)), 0
+	case .AttachmentRemove:
+		return u64(syscall_attachment_remove(a1)), 0
 	case .DebugPrint:
 		// Debug-only: prints "dbg: <label>: <value> (0x<value>)" to the
 		// serial log. a1/a2 are a (ptr, len) string read straight out of
@@ -68,7 +73,7 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: 
 			print.serial_writeln(")")
 		}
 	}
-	return 0, 0
+	return max(u64), max(u64)
 }
 
 multiplexedMemoryLock: spinlock.Spinlock
@@ -89,9 +94,8 @@ syscall_multiplexed_memory_create :: proc "contextless" (
 
 	domain := cpu.rrCurrent.domain
 
-	callerCR3 := ah.read_cr3()
-	ah.write_cr3(pmm.kernelPML4)
-	defer ah.write_cr3(callerCR3)
+	kernel_switch_cr3()
+	defer domain_switch_cr3(domain)
 
 	spinlock.rw_write_lock(&domain.lock)
 	defer spinlock.rw_write_unlock(&domain.lock)
@@ -185,9 +189,8 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 	if allocErr != nil do return .OutOfMemory
 	defer delete(buf)
 
-	callerCR3 := ah.read_cr3()
-	ah.write_cr3(pmm.kernelPML4)
-	defer ah.write_cr3(callerCR3)
+	kernel_switch_cr3()
+	defer domain_switch_cr3(domain)
 
 	if writeTarget {
 		mem.copy(raw_data(buf), rawptr(uintptr(userPtr)), int(size))
@@ -322,11 +325,7 @@ syscall_mmap :: proc "contextless" (
 
 }
 
-syscall_mfree :: proc "contextless" (
-	addrsPtr, count: u64,
-) -> (
-	err: syscalls.MFreeError,
-) {
+syscall_mfree :: proc "contextless" (addrsPtr, count: u64) -> (err: syscalls.MFreeError) {
 	context = gKernelCtx
 	if count == 0 do return .InvalidAddress
 
@@ -358,11 +357,25 @@ syscall_mfree :: proc "contextless" (
 	}
 
 	// Pass 2: nothing above can fail, so this can't fail partway through.
-	for a in addrs {
-		removed, _ := resource_remove(&domain.resources, a)
-		memory_underlay_release(removed.underlay)
+
+	removed := make([]MemoryResource, len(addrs))
+	defer delete(removed)
+
+	for a, i in addrs {
+		r, _ := resource_remove(&domain.resources, a)
+		removed[i] = r
+		pageBytes := syscalls.mmap_page_size_bytes(r.overlay.pageSize)
+		pageCount := r.overlay.size / pageBytes
+		for j in u64(0) ..< pageCount {
+			pmm.unmap_page(domain.pml4, r.overlay.logical + j * pageBytes)
+		}
 	}
 
+	if domain.pcid != 0 do tlb_shootdown(domain.pcid)
+
+	for r in removed {
+		memory_underlay_release(r.underlay)
+	}
 	return .None
 }
 
@@ -500,6 +513,7 @@ syscall_prot_domain_create :: proc "contextless" (
 		return .OutOfMemory, 0
 	}
 
+	pd.pcid = cpuHasPCID ? pcid_alloc() : 0
 	pd.pml4 = newPml4
 	protdomain_register(pd)
 	defer if err != .None do domain_destroy(pd)
@@ -664,6 +678,7 @@ syscall_prot_domain_edit :: proc "contextless" (
 			for i in u64(0) ..< pageCount {
 				pmm.unmap_page(target.pml4, removed.overlay.logical + i * pageBytes)
 			}
+			if target.pcid != 0 do tlb_shootdown(target.pcid)
 			memory_underlay_release(removed.underlay)
 
 		}

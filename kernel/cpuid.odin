@@ -2,7 +2,6 @@ package kernel
 import ah "../asm_helpers"
 import "print"
 
-
 CPUIDECX1Flag :: enum u32 {
 	SSE3         = 0,
 	X2APIC       = 21,
@@ -98,8 +97,10 @@ mwaitHint: u32
 cpuid_init_mwait :: proc() {
 	maxLeaf: ah.CPUIDResult
 	ah.cpuid_asm(.VENDOR_STRING, 0, &maxLeaf)
-	print.kensure(maxLeaf.eax >= u32(ah.CPUIDLeaf.MONITOR_MWAIT),
-		"CPU does not expose MONITOR/MWAIT")
+	print.kensure(
+		maxLeaf.eax >= u32(ah.CPUIDLeaf.MONITOR_MWAIT),
+		"CPU does not expose MONITOR/MWAIT",
+	)
 	if maxLeaf.eax < u32(ah.CPUIDLeaf.MONITOR_MWAIT) do return
 
 	r: ah.CPUIDResult
@@ -117,4 +118,32 @@ cpuid_init_mwait :: proc() {
 		deepest = 1
 	}
 	mwaitHint = deepest << 4
+}
+
+INVPCID_CPUID_BIT :: u32(10)
+cpuHasPCID: bool
+cpuHasInvpcid: bool
+
+cpuid_init_pcid :: proc() {
+	r: ah.CPUIDResult
+	ah.cpuid_asm(.FEATURE_INFO, 0, &r)
+	cpuHasPCID = (r.ecx >> 17) & 1 == 1
+	if !cpuHasPCID do return
+
+	vendor: ah.CPUIDResult
+	ah.cpuid_asm(.VENDOR_STRING, 0, &vendor)
+	if vendor.eax < u32(ah.CPUIDLeaf.STRUCTURED_EXTENDED_FEATURES) do return
+
+	extFeatures: ah.CPUIDResult
+	ah.cpuid_asm(.STRUCTURED_EXTENDED_FEATURES, 0, &extFeatures)
+	cpuHasInvpcid = (extFeatures.ebx >> INVPCID_CPUID_BIT) & 1 == 1
+}
+
+
+CR4_PCIDE_BIT :: u64(1) << 17
+
+cpuid_enable_pcid :: proc "contextless" () {
+	if !cpuHasPCID do return
+	print.kassert(ah.read_cr3() & 0xFFF == 0, "cpuid_enable_pcid: CR3 already has a PCID tag")
+	ah.write_cr4(ah.read_cr4() | CR4_PCIDE_BIT)
 }
