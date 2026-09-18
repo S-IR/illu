@@ -297,6 +297,10 @@ interrupt_dispatch:
 
     testb $3, 144(%rsp)
     jz 2f
+    testb $1, kernel_cpu_has_md_clear(%rip)
+    jz 4f
+    call verw_mitigate_asm
+4:
     swapgs
 2:
     pop %rax
@@ -346,6 +350,19 @@ read_cr3:
 .global write_cr3
 write_cr3:
     mov %rdi, %cr3
+    ret
+
+.global invlpg_asm
+invlpg_asm:
+    invlpg (%rdi)
+    ret
+
+.global verw_mitigate_asm
+verw_mitigate_asm:
+    sub $8, %rsp
+    movw $0x10, (%rsp)
+    verw (%rsp)
+    add $8, %rsp
     ret
 
 .global wrmsr_asm
@@ -635,17 +652,13 @@ syscall_entry:
     mov %gs:8, %rsp
 
     push %rax
-    mov %cr3, %rax
     push %rax
-    mov kernelPML4(%rip), %rax
-    mov %rax, %cr3
-
     push %rcx
     push %r11
     sub $688, %rsp
     mov %rsp, %gs:40
 
-    mov 712(%rsp), %rax
+    mov 704(%rsp), %rax
     mov %rax, SS_RAX(%rsp)
     mov %rbx, SS_RBX(%rsp)
     mov 696(%rsp), %rax
@@ -681,17 +694,97 @@ syscall_entry:
     mov %rdx, %rcx
     mov %rsi, %rdx
     mov %rdi, %rsi
-    mov 712(%rsp), %rdi
+    mov 704(%rsp), %rdi
     call syscall_dispatch
 
+    testb $1, kernel_cpu_has_md_clear(%rip)
+    jz 1f
+    call verw_mitigate_asm
+1:
     movq $0, %gs:40
     add $688, %rsp
     pop %r11
     pop %rcx
+    add $16, %rsp
+    mov %gs:16, %rsp
+    swapgs
+    sysretq
+
+.global syscall_entry_meltdown_safe
+syscall_entry_meltdown_safe:
+    swapgs
+    push %rbx
+    mov %cr3, %rbx
+    push %rbx
+    mov kernelPML4(%rip), %rbx
+    mov %rbx, %cr3
+
+    mov %rsp, %rbx
+    add $16, %rsp
+
+    mov %rsp, %gs:16
+    mov %gs:8, %rsp
+
+    push %rax
+    push %rcx
+    push %r11
+    mov 0(%rbx), %rcx
+    push %rcx
+    mov 8(%rbx), %rcx
+    sub $688, %rsp
+    mov %rsp, %gs:40
+
+    mov %rax, SS_RAX(%rsp)
+    mov %rcx, SS_RBX(%rsp)
+    mov 704(%rsp), %rcx
+    mov %rcx, SS_RCX(%rsp)
+    mov %rdx, SS_RDX(%rsp)
+    mov %rsi, SS_RSI(%rsp)
+    mov %rdi, SS_RDI(%rsp)
+    mov %rbp, SS_RBP(%rsp)
+    mov %r8, SS_R8(%rsp)
+    mov %r9, SS_R9(%rsp)
+    mov %r10, SS_R10(%rsp)
+    mov 696(%rsp), %rcx
+    mov %rcx, SS_R11(%rsp)
+    mov %r12, SS_R12(%rsp)
+    mov %r13, SS_R13(%rsp)
+    mov %r14, SS_R14(%rsp)
+    mov %r15, SS_R15(%rsp)
+    mov 704(%rsp), %rcx
+    mov %rcx, SS_RIP(%rsp)
+    mov $0x2B, %rcx
+    mov %rcx, SS_CS(%rsp)
+    mov 696(%rsp), %rcx
+    mov %rcx, SS_RFLAGS(%rsp)
+    mov %gs:16, %rcx
+    mov %rcx, SS_RSP(%rsp)
+    mov $0x23, %rcx
+    mov %rcx, SS_SS(%rsp)
+    mov $1, %rcx
+    mov %rcx, 672(%rsp)
+
+    mov %r8,  %r9
+    mov %r10, %r8
+    mov %rdx, %rcx
+    mov %rsi, %rdx
+    mov %rdi, %rsi
+    mov %rax, %rdi
+    call syscall_dispatch
+
+    mov SS_RBX(%rsp), %rbx
+    testb $1, kernel_cpu_has_md_clear(%rip)
+    jz 1f
+    call verw_mitigate_asm
+1:
+    movq $0, %gs:40
+    add $688, %rsp
     pop %r10
-    mov %r10, %cr3
+    pop %r11
+    pop %rcx
     add $8, %rsp
     mov %gs:16, %rsp
+    mov %r10, %cr3
     swapgs
     sysretq
 
@@ -808,10 +901,14 @@ unlock_asm:
 
 .global run_domain
 run_domain:
+    cli
     mov %rsp, %gs:CPU_SCHEDRESUME
     swapgs
 
     mov %rdi, %rbx
+    mov %rdx, %rsp
+    mov %rsi, %r10
+
     lea SS_FXSAVE(%rbx), %rax
     fxrstor (%rax)
 
@@ -820,6 +917,7 @@ run_domain:
     push SS_RFLAGS(%rbx)
     push SS_CS(%rbx)
     push SS_RIP(%rbx)
+    push SS_R10(%rbx)
 
     mov SS_RAX(%rbx), %rax
     mov SS_RCX(%rbx), %rcx
@@ -829,13 +927,19 @@ run_domain:
     mov SS_RBP(%rbx), %rbp
     mov SS_R8(%rbx),  %r8
     mov SS_R9(%rbx),  %r9
-    mov SS_R10(%rbx), %r10
     mov SS_R11(%rbx), %r11
     mov SS_R12(%rbx), %r12
     mov SS_R13(%rbx), %r13
     mov SS_R14(%rbx), %r14
     mov SS_R15(%rbx), %r15
     mov SS_RBX(%rbx), %rbx
+
+    mov %r10, %cr3
+    pop %r10
+    testb $1, kernel_cpu_has_md_clear(%rip)
+    jz 1f
+    call verw_mitigate_asm
+1:
     iretq
 
 .global run_abort

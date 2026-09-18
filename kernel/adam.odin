@@ -20,7 +20,11 @@ adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
 
 	newPML4 := pmm.alloc_zeroed(shared.PAGE_SIZE)
 	print.kensure(newPML4 != 0, "adam_init: pml4 alloc failed")
-	pmm.pml4_deep_copy(newPML4, pmm.kernelPML4, true)
+	if cpuMeltdownVulnerable {
+		pmm.pml4_map_kernel_image(newPML4)
+	} else {
+		pmm.pml4_deep_copy(newPML4, pmm.kernelPML4, true)
+	}
 
 	pd, dErr := new(ProtectionDomain)
 	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")

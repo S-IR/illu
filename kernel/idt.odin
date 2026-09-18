@@ -145,6 +145,10 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		print.serial_write_hex(ah.read_cr2())
 		print.serial_write(" err=")
 		print.serial_write_hex(frame.error_code)
+		if cpu := gs_read_cpustate(); cpu != nil && cpu.rrCurrent != nil && cpu.rrCurrent.domain != nil {
+			print.serial_write(" domain.pml4=")
+			print.serial_write_hex(cpu.rrCurrent.domain.pml4)
+		}
 		print.serial_writeln("")
 		exec_kill_current()
 	}

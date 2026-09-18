@@ -99,6 +99,7 @@ gdts: []GDT
 cpus: []CpuState
 nextCPUSlot: u32 = 0
 apReady: u32
+kernelStacksBase: u64
 sched_init :: proc(rsdp: ^acpi.Rsdp) {
 	bspId := u32(ah.rdmsr_asm(0x802))
 	apCount := acpi.collect_ap_ids(rsdp, bspId, nil)
@@ -107,6 +108,9 @@ sched_init :: proc(rsdp: ^acpi.Rsdp) {
 	aErr: runtime.Allocator_Error
 	gdts, aErr = make([]GDT, totalCores)
 	print.kensure(aErr == nil, "OOM sched_init: gdts")
+
+	pmm.gdtRegionBase = u64(uintptr(raw_data(gdts)))
+	pmm.gdtRegionSize = u64(len(gdts)) * size_of(GDT)
 
 	gdts[0] = gdtBeforeSched
 	gdt_tss_fill(&gdts[0])
@@ -118,7 +122,20 @@ sched_init :: proc(rsdp: ^acpi.Rsdp) {
 
 	cpus, aErr = make([]CpuState, totalCores)
 	print.kensure(aErr == nil, "OOM sched_init: cpus")
-	cpu_init(cpus, 0, bspId, &gdts[0].tss.rsp[0])
+
+	trampolineStacksBase = pmm.alloc_zeroed(u64(totalCores) * TRAMPOLINE_STACK_SIZE)
+	print.kensure(trampolineStacksBase != 0, "sched_init: trampoline stack allocation failed")
+	pmm.trampolineRegionBase = trampolineStacksBase
+	pmm.trampolineRegionSize = u64(totalCores) * TRAMPOLINE_STACK_SIZE
+
+	kernelStacksStride := u64(KERNEL_STACK_PER_CPU_SIZE + shared.PAGE_SIZE)
+	kernelStacksBase = pmm.alloc_zeroed(u64(totalCores) * kernelStacksStride)
+	print.kensure(kernelStacksBase != 0, "sched_init: kernel stack allocation failed")
+	pmm.kernelStacksRegionBase = kernelStacksBase
+	pmm.kernelStacksRegionStride = kernelStacksStride
+	pmm.kernelStacksRegionCount = u64(totalCores)
+
+	cpu_init(cpus, 0, bspId, &gdts[0].tss.rsp[0], kernelStacksBase)
 
 	ah.gs_write_base(u64(uintptr(&cpus[0]))) // AFTER alloc
 	cpu_syscall_init() // AFTER alloc
@@ -138,7 +155,8 @@ smp_start :: proc(rsdp: ^acpi.Rsdp, apCount: int) {
 		cpuIndex := intrinsics.atomic_add(&nextCPUSlot, 1)
 
 		gdt_tss_fill(&gdts[cpuIndex])
-		cpu_init(cpus, cpuIndex, apId, &gdts[cpuIndex].tss.rsp[0])
+		stride := u64(KERNEL_STACK_PER_CPU_SIZE + shared.PAGE_SIZE)
+		cpu_init(cpus, cpuIndex, apId, &gdts[cpuIndex].tss.rsp[0], kernelStacksBase + u64(cpuIndex) * stride)
 		install_trampoline(
 			rawptr(uintptr(pmm.trampolinePhys)),
 			cr3,
@@ -169,17 +187,14 @@ ap_init :: proc "c" (cpu: ^CpuState) {
 	cpu_idle_loop()
 }
 
-cpu_init :: proc(cpus: []CpuState, idx: u32, apicId: u32, tssRSP0: ^u64) {
+cpu_init :: proc(cpus: []CpuState, idx: u32, apicId: u32, tssRSP0: ^u64, stackBase: u64) {
 	cpu := &cpus[idx]
 	cpu.self = cpu
 	cpu.apicId = apicId
 	cpu.index = idx
 
-	kernelStack, aErr := make([]u8, KERNEL_STACK_PER_CPU_SIZE + shared.PAGE_SIZE)
-	print.kensure(aErr == nil, "cpu_init: allocation failure for kernel stack")
-
-	paddedStart := u64(uintptr(raw_data(kernelStack)))
-	end := paddedStart + u64(len(kernelStack))
+	paddedStart := stackBase
+	end := paddedStart + KERNEL_STACK_PER_CPU_SIZE + shared.PAGE_SIZE
 
 	pmm.map_page(pmm.kernelPML4, paddedStart, paddedStart, ._4KB, {})
 	for p := paddedStart + shared.PAGE_SIZE; p < end; p += shared.PAGE_SIZE {
@@ -198,7 +213,8 @@ cpu_syscall_init :: proc() {
 	EFER_SCE :: u64(1 << 0)
 	ah.wrmsr_asm(IA32_EFER, ah.rdmsr_asm(IA32_EFER) | EFER_SCE)
 	ah.wrmsr_asm(IA32_STAR, (u64(ah.USER_CS32) << 48) | (u64(ah.KERNEL_CS) << 32))
-	ah.wrmsr_asm(IA32_LSTAR, u64(uintptr(rawptr(ah.syscall_entry))))
+	entry := cpuMeltdownVulnerable ? ah.syscall_entry_meltdown_safe : ah.syscall_entry
+	ah.wrmsr_asm(IA32_LSTAR, u64(uintptr(rawptr(entry))))
 	ah.wrmsr_asm(IA32_FMASK, u64(0x200))
 	ah.wrmsr_asm(KERNELGSBASE, ah.rdmsr_asm(IA32_GS_BASE))
 }
