@@ -11,8 +11,10 @@ MMapRegion :: struct #packed {
 	count:    u64,
 	flags:    lmem.PageFlags,
 }
-Syscall :: enum {
-	Exit,
+ILLU_SYSCALL_BIT :: u64(1) << 63
+
+Syscall :: enum u64 {
+	Exit = ILLU_SYSCALL_BIT,
 	MMap,
 	MFree,
 	InterruptVectorGet,
@@ -27,7 +29,9 @@ Syscall :: enum {
 	// Parked at a high, isolated number (debug-build only, see ODIN_DEBUG
 	// below) so it never collides with a real syscall number as the table
 	// above grows.
-	DebugPrint = 1000,
+	AttachmentSet,
+	AttachmentRemove,
+	DebugPrint = ILLU_SYSCALL_BIT + 1000,
 }
 
 MMapError :: enum u64 {
@@ -111,6 +115,19 @@ ExecutionStartError :: enum u64 {
 
 KERNEL_BUILD :: #config(KERNEL_BUILD, false)
 
+AttachmentSetError :: enum u64 {
+	None,
+	NoPermission,
+	InvalidHandle,
+	InvalidEntry,
+}
+
+AttachmentRemoveError :: enum u64 {
+	None,
+	NoPermission,
+	InvalidHandle,
+}
+
 
 when !ODIN_TEST {
 	when !KERNEL_BUILD {
@@ -128,6 +145,9 @@ when !ODIN_TEST {
 			syscall_prot_domain_edit :: proc(handle, regionsPtr, count, op: u64) -> (err: u64) ---
 			syscall_prot_domain_destroy :: proc(handle: u64) -> (err: u64) ---
 			syscall_execution_start :: proc(handle, entryRip, entryRsp, arg0, arg1: u64) -> (err: u64) ---
+			syscall_attachment_set :: proc(handle, entryRip: u64) -> (err: u64) ---
+			syscall_attachment_remove :: proc(handle: u64) -> (err: u64) ---
+
 		}
 
 		// Debug-only: writes `label: value (0xvalue)` to the kernel serial
@@ -146,6 +166,18 @@ when !ODIN_TEST {
 			syscall_debug_print_userspace :: proc "contextless" (label: string, value: u64) {
 				syscall_debug_print(raw_data(label), u64(len(label)), value)
 			}
+		}
+
+		syscall_attachment_set_userspace :: proc "contextless" (
+			handle, entryRip: u64,
+		) -> AttachmentSetError {
+			return AttachmentSetError(syscall_attachment_set(handle, entryRip))
+		}
+
+		syscall_attachment_remove_userspace :: proc "contextless" (
+			handle: u64,
+		) -> AttachmentRemoveError {
+			return AttachmentRemoveError(syscall_attachment_remove(handle))
 		}
 
 		syscall_mmap_userspace :: proc "contextless" (

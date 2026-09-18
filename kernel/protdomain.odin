@@ -11,13 +11,12 @@ ProtectionDomain :: struct {
 	slotIdx:        int,
 	generation:     u32,
 	executions:     [dynamic]^Execution,
+	pcid:           u32,
 	killed:         bool,
+	attachmentEntry: u64,
 }
+#assert(offset_of(ProtectionDomain, attachmentEntry) == 128)
 
-// Registry of all live protection domains, so they can be enumerated later
-// (e.g. for accounting or debugging). Slots are reused in place: removing a
-// domain nils its slot and pushes the index onto freeSlots instead of
-// shifting the array, so a domain's slotIdx stays valid for its lifetime.
 currentProtDomains := struct {
 	lock:        spinlock.Spinlock,
 	prots:       [dynamic]^ProtectionDomain,
@@ -26,6 +25,7 @@ currentProtDomains := struct {
 }{}
 
 PROT_DOMAIN_ARRAY_START_CAP :: 8
+
 
 protdomain_register :: proc(pd: ^ProtectionDomain) {
 	print.kassert(pd != nil, "protdomain_register: nil domain")

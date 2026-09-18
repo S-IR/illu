@@ -33,6 +33,9 @@ when !ODIN_TEST {
 		read_cr2 :: proc() -> u64 ---
 		read_cr3 :: proc() -> u64 ---
 		write_cr3 :: proc(addr: u64) ---
+		read_cr4 :: proc() -> u64 ---
+		write_cr4 :: proc(val: u64) ---
+
 		invlpg_asm :: proc(addr: u64) ---
 		verw_mitigate_asm :: proc() ---
 
@@ -57,7 +60,7 @@ when !ODIN_TEST {
 		read_rsp :: proc() -> u64 ---
 		read_rbp :: proc() -> u64 ---
 
-
+		invpcid_asm :: proc(type: u64, pcid: u64) ---
 	}
 
 	pit_delay_us :: proc(us: u32) {
@@ -90,6 +93,10 @@ when !ODIN_TEST {
 	read_cr2 :: proc "contextless" () -> u64 {return 0}
 	read_cr3 :: proc "contextless" () -> u64 {return 0}
 	write_cr3 :: proc "contextless" (addr: u64) {}
+
+	read_cr4 :: proc "contextless" () -> u64 {return 0}
+	write_cr4 :: proc "contextless" (val: u64) {}
+
 	invlpg_asm :: proc "contextless" (addr: u64) {}
 	verw_mitigate_asm :: proc "contextless" () {}
 
@@ -111,6 +118,8 @@ when !ODIN_TEST {
 
 	sti_asm :: proc "contextless" () {}
 	monitor_asm :: proc "contextless" (addr: rawptr) {}
+
+	invpcid_asm :: proc "contextless" (type: u64, pcid: u64) {}
 
 	pit_delay_us :: proc "contextless" (us: u32) {}
 	read_rsp :: proc "contextless" () -> u64 {return 0}

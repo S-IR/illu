@@ -352,6 +352,17 @@ write_cr3:
     mov %rdi, %cr3
     ret
 
+.global read_cr4
+read_cr4:
+    mov %cr4, %rax
+    ret
+
+.global write_cr4
+write_cr4:
+    mov %rdi, %cr4
+    ret
+
+
 .global invlpg_asm
 invlpg_asm:
     invlpg (%rdi)
@@ -380,6 +391,15 @@ rdmsr_asm:
     rdmsr
     shlq   $32, %rdx
     orq    %rdx, %rax
+    ret
+
+.global invpcid_asm
+invpcid_asm:
+    # rdi = type, rsi = pcid
+    push $0
+    push %rsi
+    invpcid (%rsp), %rdi
+    add $16, %rsp
     ret
 
 .global cpuid_asm
@@ -648,6 +668,27 @@ syscall_entry:
     # Kernel syscall ABI on entry:
     # rax = number, rdi/rsi/rdx/r10/r8/r9 = arguments 1..6.
     swapgs
+    bt $63, %rax
+    jnc guest_syscall_fast
+    jmp slow_entry
+
+guest_syscall_fast:
+    mov %gs:56, %rbx        # rbx = current Execution*
+    test %rbx, %rbx
+    jz slow_entry            # no execution -> can't check, bail to slow path
+
+    mov 704(%rbx), %rbp     # rbp = its ProtectionDomain*
+    mov 128(%rbp), %r12     # r12 = domain.attachmentEntry
+    test %r12, %r12
+    jz slow_entry            # ptr not set -> bail to slow path
+
+    mov %rcx, %r9            # hand the attachment the original return address --
+                              # he jumps back to it himself, no kernel call needed
+    mov %r12, %rcx           # redirect target for sysret
+    swapgs
+    sysretq
+
+slow_entry:
     mov %rsp, %gs:16
     mov %gs:8, %rsp
 

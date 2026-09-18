@@ -1,8 +1,10 @@
+.equ ILLU_SYSCALL_BIT, 0x8000000000000000
+
 .macro SYSCALL_STUB name, nr
 .global \name
 \name:
     # System V callers enter here; the CPU syscall ABI is rax,rdi,rsi,rdx,r10,r8,r9.
-    mov $\nr, %eax
+    movabs $(ILLU_SYSCALL_BIT + \nr), %rax
     syscall
     ret
 .endm
@@ -10,7 +12,7 @@
 .macro SYSCALL_NORET name, nr
 .global \name
 \name:
-    mov $\nr, %eax
+    movabs $(ILLU_SYSCALL_BIT + \nr), %rax
     syscall
 1:  hlt
     jmp 1b
@@ -27,7 +29,7 @@ SYSCALL_STUB  syscall_multiplexed_memory_create, 5
 syscall_multiplexed_memory_read:
     # System V arg4 is rcx; syscall arg4 is r10.
     mov %rcx, %r10
-    mov $6, %eax
+    movabs $(ILLU_SYSCALL_BIT + 6), %rax
     syscall
     ret
 
@@ -35,7 +37,7 @@ syscall_multiplexed_memory_read:
 syscall_multiplexed_memory_write:
     # System V arg4 is rcx; syscall arg4 is r10.
     mov %rcx, %r10
-    mov $7, %eax
+    movabs $(ILLU_SYSCALL_BIT + 7), %rax
     syscall
     ret
 
@@ -45,7 +47,7 @@ SYSCALL_STUB  syscall_prot_domain_create, 8
 syscall_prot_domain_edit:
     # System V arg4 is rcx; syscall arg4 is r10.
     mov %rcx, %r10
-    mov $9, %eax
+    movabs $(ILLU_SYSCALL_BIT + 9), %rax
     syscall
     ret
 
@@ -55,8 +57,11 @@ SYSCALL_STUB  syscall_prot_domain_destroy, 10
 syscall_execution_start:
     # System V arg4 is rcx; syscall arg4 is r10.
     mov %rcx, %r10
-    mov $11, %eax
+    movabs $(ILLU_SYSCALL_BIT + 11), %rax
     syscall
     ret
+
+SYSCALL_STUB  syscall_attachment_set, 12
+SYSCALL_STUB  syscall_attachment_remove, 13
 
 SYSCALL_STUB  syscall_debug_print, 1000

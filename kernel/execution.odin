@@ -14,6 +14,7 @@ Execution :: struct {
 	domain:         ^ProtectionDomain,
 	next:           ^Execution,
 }
+#assert(offset_of(Execution, domain) == 704)
 
 ExecutionState :: enum {
 	Runnable,
@@ -127,7 +128,7 @@ restore_current_domain_cr3 :: proc "contextless" () {
 	cpu := gs_read_cpustate()
 	if cpu == nil || cpu.rrCurrent == nil do return
 	if cpu.rrCurrent.domain == nil do return
-	ah.write_cr3(cpu.rrCurrent.domain.pml4)
+	domain_switch_cr3(cpu.rrCurrent.domain)
 }
 
 execution_enqueue :: proc "contextless" (e: ^Execution, cpu: ^CpuState) {
@@ -323,14 +324,10 @@ domain_reclaim_locked :: proc(domain: ^ProtectionDomain) {
 	print.kassert(domain.pml4 != 0, "domain_destroy: paging already destroyed")
 	print.kassert(domain.pml4 != pmm.kernelPML4, "domain_destroy: kernel PML4 passed")
 
-	ah.write_cr3(pmm.kernelPML4)
+	kernel_switch_cr3()
 
-	// Deliberately does not release domain.resources' memory handles here.
-	// Freeing is a userland-driven action (mfree / prot_domain_edit .Delete)
-	// on whichever domain still holds a reference -- the kernel never
-	// unilaterally frees a resource just because the domain that happened to
-	// die was one of its holders. If nothing else explicitly frees it, it
-	// leaks, by design, for now.
+	pcid_free(domain.pcid)
+
 	delete(domain.resources)
 	pmm.pml4_destroy(domain.pml4)
 	domain.pml4 = 0
