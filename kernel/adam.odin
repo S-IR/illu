@@ -13,7 +13,7 @@ import "print"
 ADAM_STACK_SIZE :: 16 * mem.Kilobyte
 CONFIG_FLAGS :: lmem.PageFlags{.Present, .User, .Write, .PWT, .PCD, .NX}
 
-adam_init :: proc(adamImg: elf.Image, pcies: [dynamic]pci.Device) {
+adam_init :: proc(adamImg: elf.ElfImage, pcies: [dynamic]pci.Device) {
 	assert((adamImg.end - adamImg.base) > 0)
 
 	print.serial_write("adam: startineg init \n")

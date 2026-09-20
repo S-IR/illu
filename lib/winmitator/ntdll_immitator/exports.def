@@ -1,0 +1,6 @@
+LIBRARY ntdll_immitator
+EXPORTS
+    ExitProcess
+    GetStdHandle
+    WriteFile
+    unimplemented_stub

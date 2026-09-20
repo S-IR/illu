@@ -29,7 +29,7 @@ when !ODIN_TEST {
 	foreign _ {
 		gs_read_cpustate :: proc() -> ^CpuState ---
 		run_domain :: proc(state: ^SavedState, targetPml4: u64, trampolineTop: u64) ---
-		run_abort :: proc(resumeRsp: u64) ---
+		run_abort :: proc() -> ! ---
 		cpu_idle_loop :: proc() -> ! ---
 		fxsave_asm :: proc(area: ^[512]u8) ---
 	}
@@ -39,7 +39,7 @@ when !ODIN_TEST {
 
 	gs_read_cpustate :: proc "contextless" () -> ^CpuState {return testCpu}
 	run_domain :: proc "contextless" (state: ^SavedState, targetPml4: u64, trampolineTop: u64) {}
-	run_abort :: proc "contextless" (resumeRsp: u64) {}
+	run_abort :: proc "contextless" () -> ! {for {}}
 	cpu_idle_loop :: proc "contextless" () -> ! {for {}}
 	fxsave_asm :: proc "contextless" (area: ^[512]u8) {}
 }
@@ -342,5 +342,5 @@ exec_exit_current :: proc "c" () {
 
 	cpu.rrCurrent = nil
 	execution_release(exec)
-	run_abort(cpu.schedulerResumeRsp)
+	run_abort()
 }

@@ -11,6 +11,8 @@ BUILD_BOOTLOADER :: #config(BUILD_BOOTLOADER, true)
 BUILD_KERNEL :: #config(BUILD_KERNEL, true)
 BUILD_ADAM :: #config(BUILD_ADAM, true)
 
+BUILD_NTDLL_IMMITATOR :: #config(BUILD_NTDLL_IMMITATOR, true)
+BUILD_FIRSTPE :: #config(BUILD_FIRSTPE, ODIN_DEBUG)
 main :: proc() {
 	os.remove_all(BUILD_DIR)
 	os.make_directory_all(BUILD_DIR)
@@ -19,6 +21,8 @@ main :: proc() {
 
 	when BUILD_BOOTLOADER do build_bootloader()
 	when BUILD_KERNEL do build_kernel()
+	when BUILD_NTDLL_IMMITATOR do build_ntdll_immitator()
+	when BUILD_FIRSTPE do build_firstpe()
 	when BUILD_ADAM do build_adam()
 
 }
@@ -210,4 +214,114 @@ exec :: proc(command: []string) {
 		panic(fmt.tprintf("command failed %v: %s", command, msg))
 	}
 	fmt.print(msg)
+}
+
+
+build_ntdll_immitator :: proc() {
+	os.make_directory_all("diskimg")
+
+	dir, _ := filepath.join({BUILD_DIR, "ntdll_immitator"})
+	os.make_directory_all(dir)
+
+	syscallObjOut, _ := filepath.join({dir, "syscalls.obj"})
+	exec(
+		[]string {
+			"clang",
+			"-target",
+			"x86_64-pc-windows-gnu",
+			"-c",
+			"lib/syscalls/syscalls.asm",
+			"-o",
+			syscallObjOut,
+		},
+	)
+
+	objOut, _ := filepath.join({dir, "ntdll_immitator.o"})
+	odin_build(
+		"lib/winmitator/ntdll_immitator",
+		objOut,
+		{
+			"-vet-shadowing",
+			"-target:freestanding_amd64_win64",
+			"-build-mode:obj",
+			"-no-entry-point",
+			"-disable-red-zone",
+		},
+	)
+
+	objs := collect_objs(dir)
+	out :: "diskimg" + filepath.SEPARATOR_STRING + "ntdll_immitator.dll"
+
+	linkCmd := make([dynamic]string, context.temp_allocator)
+	append(
+		&linkCmd,
+		"lld-link",
+		"-dll",
+		"-noentry",
+		"-def:lib/winmitator/ntdll_immitator/exports.def",
+		"-out:" + out,
+	)
+	for o in objs do append(&linkCmd, o)
+	exec(linkCmd[:])
+
+	aliasThrowaway, _ := filepath.join({dir, "ntdll_alias_throwaway.dll"})
+	aliasLib :: "diskimg" + filepath.SEPARATOR_STRING + "ntdll.lib"
+	exec(
+		[]string {
+			"lld-link",
+			"-dll",
+			"-noentry",
+			"-def:lib/winmitator/ntdll_immitator/ntdll_alias.def",
+			fmt.tprintf("-out:%s", aliasThrowaway),
+			"-implib:" + aliasLib,
+		},
+	)
+}
+
+build_firstpe :: proc() {
+	dir, _ := filepath.join({BUILD_DIR, "firstpe"})
+	os.make_directory_all(dir)
+
+	syscallObjOut, _ := filepath.join({dir, "syscalls.obj"})
+	exec(
+		[]string {
+			"clang",
+			"-target",
+			"x86_64-pc-windows-gnu",
+			"-c",
+			"lib/syscalls/syscalls.asm",
+			"-o",
+			syscallObjOut,
+		},
+	)
+
+	objOut, _ := filepath.join({dir, "firstpe.o"})
+	odin_build(
+		"firstpe",
+		objOut,
+		{
+			"-vet-shadowing",
+			"-target:freestanding_amd64_win64",
+			"-build-mode:obj",
+			"-no-entry-point",
+			"-disable-red-zone",
+		},
+	)
+
+	objs := collect_objs(dir)
+	out :: "firstpe" + filepath.SEPARATOR_STRING + "firstpe.exe"
+	ntdllLib :: "diskimg" + filepath.SEPARATOR_STRING + "ntdll.lib"
+
+	linkCmd := make([dynamic]string, context.temp_allocator)
+	append(
+		&linkCmd,
+		"lld-link",
+		"-subsystem:console",
+		"-entry:_start",
+		"-libpath:diskimg",
+		ntdllLib,
+		"-out:" + out,
+	)
+	for o in objs do append(&linkCmd, o)
+	exec(linkCmd[:])
 }

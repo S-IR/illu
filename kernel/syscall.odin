@@ -456,8 +456,7 @@ syscall_interrupt_wait :: proc "contextless" (
 	}
 
 	lapic_disable_deadline()
-	run_abort(cpu.schedulerResumeRsp)
-	return .None
+	run_abort()
 }
 
 syscall_prot_domain_create :: proc "contextless" (
