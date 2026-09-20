@@ -1,7 +1,11 @@
 package firstpe
-import "../lib/syscalls"
+
+foreign import ntdll "ntdll.lib"
+foreign ntdll {
+	ExitProcess :: proc "c" (exitCode: u32) ---
+}
 
 @(export)
 _start :: proc "c" () {
-	syscalls.syscall_exit(420123)
+	ExitProcess(1337)
 }

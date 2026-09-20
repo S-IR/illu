@@ -58,25 +58,23 @@ PCIAddress :: bit_field u64 {
 	function: u8  | 8,
 }
 CpuState :: struct #align (16) {
-	self:               ^CpuState,
-	kernelStackTop:     u64,
-	userSyscallRsp:     u64,
-	runState:           ^SavedState,
-	schedulerResumeRsp: u64, // 32 -- saved mid-call %rsp inside domain_pick_and_enter; where run_abort jumps back to
-	syscallFrame:       ^SavedState,
-	apicId:             u32,
-	index:              u32,
-	rrCurrent:          ^Execution,
-	rrHead, rrTail:     ^Execution,
-	rrLock:             spinlock.Spinlock,
-	sleeping:           bool,
+	self:           ^CpuState,
+	kernelStackTop: u64,
+	userSyscallRsp: u64,
+	runState:       ^SavedState,
+	syscallFrame:   ^SavedState,
+	apicId:         u32,
+	index:          u32,
+	rrCurrent:      ^Execution,
+	rrHead, rrTail: ^Execution,
+	rrLock:         spinlock.Spinlock,
+	sleeping:       bool,
 }
 #assert(offset_of(CpuState, kernelStackTop) == 8)
 #assert(offset_of(CpuState, userSyscallRsp) == 16)
 #assert(offset_of(CpuState, runState) == 24)
-#assert(offset_of(CpuState, schedulerResumeRsp) == 32)
-#assert(offset_of(CpuState, syscallFrame) == 40)
-#assert(offset_of(CpuState, rrCurrent) == 56)
+#assert(offset_of(CpuState, syscallFrame) == 32)
+#assert(offset_of(CpuState, rrCurrent) == 48)
 
 SavedState :: struct #align (16) {
 	rax, rbx, rcx, rdx:       u64,
@@ -136,7 +134,7 @@ sched_init :: proc(rsdp: ^acpi.Rsdp) {
 	pmm.kernelStacksRegionStride = kernelStacksStride
 	pmm.kernelStacksRegionCount = u64(totalCores)
 
-	cpu_init(cpus, 0, bspId, &gdts[0].tss.rsp[0], kernelStacksBase)
+	cpu_init(cpus, 0, bspId, &gdts[0].tss.rsp[0], kernelStacksBase, &gdts[0].tss.ist[0])
 
 	ah.gs_write_base(u64(uintptr(&cpus[0]))) // AFTER alloc
 	cpu_syscall_init() // AFTER alloc
@@ -163,6 +161,7 @@ smp_start :: proc(rsdp: ^acpi.Rsdp, apCount: int) {
 			apId,
 			&gdts[cpuIndex].tss.rsp[0],
 			kernelStacksBase + u64(cpuIndex) * stride,
+			&gdts[cpuIndex].tss.ist[0],
 		)
 		install_trampoline(
 			rawptr(uintptr(pmm.trampolinePhys)),
@@ -196,23 +195,28 @@ ap_init :: proc "c" (cpu: ^CpuState) {
 	cpu_idle_loop()
 }
 
-cpu_init :: proc(cpus: []CpuState, idx: u32, apicId: u32, tssRSP0: ^u64, stackBase: u64) {
+map_cpu_stack :: proc(base: u64) -> u64 {
+	end := base + KERNEL_STACK_PER_CPU_SIZE + shared.PAGE_SIZE
+
+	pmm.map_page(pmm.kernelPML4, base, base, ._4KB, {})
+	for p := base + shared.PAGE_SIZE; p < end; p += shared.PAGE_SIZE {
+		pmm.map_page(pmm.kernelPML4, p, p, ._4KB, {.NX, .Present, .Write})
+	}
+
+	assert((end & 0xF) == 0)
+	return end
+}
+
+cpu_init :: proc(cpus: []CpuState, idx: u32, apicId: u32, tssRSP0: ^u64, stackBase: u64, tssIST0: ^u64) {
 	cpu := &cpus[idx]
 	cpu.self = cpu
 	cpu.apicId = apicId
 	cpu.index = idx
 
-	paddedStart := stackBase
-	end := paddedStart + KERNEL_STACK_PER_CPU_SIZE + shared.PAGE_SIZE
-
-	pmm.map_page(pmm.kernelPML4, paddedStart, paddedStart, ._4KB, {})
-	for p := paddedStart + shared.PAGE_SIZE; p < end; p += shared.PAGE_SIZE {
-		pmm.map_page(pmm.kernelPML4, p, p, ._4KB, {.NX, .Present, .Write})
-	}
-
-	cpu.kernelStackTop = end
-	assert((cpu.kernelStackTop & 0xF) == 0)
-	tssRSP0^ = cpu.kernelStackTop
+	top := map_cpu_stack(stackBase)
+	cpu.kernelStackTop = top
+	tssRSP0^ = top
+	tssIST0^ = top
 }
 
 cpu_syscall_init :: proc() {

@@ -25,10 +25,10 @@ interruptExecutions: [256]^Execution
 
 idt_init :: proc() {
 	for isrTable, i in ah.isr_table {
-		idt_set_entry(i, u64(isrTable))
+		idt_set_entry(i, u64(isrTable), ist = 1)
 	}
 	for irqTable, i in ah.irq_stub_table {
-		idt_set_entry(32 + i, u64(irqTable))
+		idt_set_entry(32 + i, u64(irqTable), ist = 1)
 	}
 
 	GIDTDescriptor.base = u64(uintptr(&idt))
@@ -266,12 +266,7 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 	}
 
 	lapic_send_eoi()
-	if reschedule {
-		cpu := gs_read_cpustate()
-		if cpu != nil && cpu.schedulerResumeRsp != 0 {
-			run_abort(cpu.schedulerResumeRsp)
-		}
-	}
+	if reschedule do run_abort()
 }
 
 save_execution_from_interrupt :: proc(execution: ^Execution, frame: ^InterruptFrame) {
@@ -368,6 +363,6 @@ exec_kill_current :: proc() {
 
 	cpu.rrCurrent = nil
 	execution_release(exec)
-	run_abort(cpu.schedulerResumeRsp)
+	run_abort()
 
 }

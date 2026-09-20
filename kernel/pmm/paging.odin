@@ -16,7 +16,7 @@ PAGE_MMIO :: lmem.PageFlags{.Present, .Write, .PWT, .PCD}
 @(export, link_name = "kernelPML4")
 kernelPML4: u64
 
-kernelImgGlobal: elf.Image
+kernelImgGlobal: elf.ElfImage
 trampolineRegionBase: u64
 trampolineRegionSize: u64
 kernelStacksRegionBase: u64
@@ -26,7 +26,7 @@ gdtRegionBase: u64
 gdtRegionSize: u64
 
 paging_init :: proc(
-	kernelImg: elf.Image,
+	kernelImg: elf.ElfImage,
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize: u64,
 	memoryMapDescSize: u64,

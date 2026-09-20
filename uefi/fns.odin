@@ -9,15 +9,15 @@ load_elf :: proc "contextless" (
 	//-1 means pie
 	desiredPhysicalAddr: int = -1,
 ) -> (
-	image: elf.Image,
+	image: elf.ElfImage,
 	ok: bool,
 ) {
 	f: ^EFI_FILE_PROTOCOL
 	if root.Open(root, &f, name, EFI_FILE_MODE_READ, 0) != .SUCCESS do return {}, false
 	defer f.Close(f)
 
-	header: elf.Hdr
-	headerSize: u64 = size_of(elf.Hdr)
+	header: elf.ElfHdr
+	headerSize: u64 = size_of(elf.ElfHdr)
 	if f.SetPosition(f, 0) != .SUCCESS do return {}, false
 	if f.Read(f, &headerSize, rawptr(&header)) != .SUCCESS do return {}, false
 	magic :=
@@ -31,10 +31,10 @@ load_elf :: proc "contextless" (
 	if header.machine != .X86_64 do return {}, false
 	if header.phnum == 0 || header.phnum > elf.MAX_SEGMENTS do return {}, false
 
-	phdrs: [elf.MAX_SEGMENTS]elf.Phdr
+	phdrs: [elf.MAX_SEGMENTS]elf.ElfPhdr
 
 	if f.SetPosition(f, header.phoff) != .SUCCESS do return {}, false
-	want := u64(header.phnum) * u64(size_of(elf.Phdr))
+	want := u64(header.phnum) * u64(size_of(elf.ElfPhdr))
 
 	actualSize := want
 	if f.Read(f, &actualSize, raw_data(phdrs[:])) != .SUCCESS do return {}, false
@@ -84,7 +84,7 @@ load_elf :: proc "contextless" (
 		if f.SetPosition(f, ph.offset) != .SUCCESS do return {}, false
 		read: u64 = ph.filesz
 		if f.Read(f, &read, rawptr(uintptr(dest))) != .SUCCESS || read != ph.filesz do return {}, false
-		segment: elf.Segment = {
+		segment: elf.ElfSegment = {
 			perms = ph.flags,
 			base  = dest,
 			end   = dest + ph.memsz,
@@ -181,6 +181,14 @@ print_hex_line :: proc "contextless" (st: ^EFI_SYSTEM_TABLE, val: u64) {
 	newline := [?]u16{'\r', '\n', 0}
 	st.ConOut.OutputString(st.ConOut, &newline[0])
 }
+
+// Symbols the Odin runtime and lld-link expect to exist under
+// -target:freestanding_amd64_win64, normally supplied by a real Windows CRT.
+// Only compiled in for the bootloader's own build (UEFI_BUILD=true) -- when
+// this package is pulled in by kernel (freestanding_amd64_sysv), core:runtime
+// already provides these, and Odin has no way to conditionally `import`
+// lib/win64rt's copy per-target, so they're duplicated here. See
+// lib/win64rt/win64rt.odin for the twin copy used by win64-only packages.
 when #config(UEFI_BUILD, false) {
 	@(export, link_name = "_fltused")
 	_fltused: i32 = 1

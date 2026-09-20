@@ -673,7 +673,7 @@ syscall_entry:
     jmp slow_entry
 
 guest_syscall_fast:
-    mov %gs:56, %rbx        # rbx = current Execution*
+    mov %gs:48, %rbx        # rbx = current Execution*
     test %rbx, %rbx
     jz slow_entry            # no execution -> can't check, bail to slow path
 
@@ -697,7 +697,7 @@ slow_entry:
     push %rcx
     push %r11
     sub $688, %rsp
-    mov %rsp, %gs:40
+    mov %rsp, %gs:32
 
     mov 704(%rsp), %rax
     mov %rax, SS_RAX(%rsp)
@@ -742,7 +742,7 @@ slow_entry:
     jz 1f
     call verw_mitigate_asm
 1:
-    movq $0, %gs:40
+    movq $0, %gs:32
     add $688, %rsp
     pop %r11
     pop %rcx
@@ -773,7 +773,7 @@ syscall_entry_meltdown_safe:
     push %rcx
     mov 8(%rbx), %rcx
     sub $688, %rsp
-    mov %rsp, %gs:40
+    mov %rsp, %gs:32
 
     mov %rax, SS_RAX(%rsp)
     mov %rcx, SS_RBX(%rsp)
@@ -818,7 +818,7 @@ syscall_entry_meltdown_safe:
     jz 1f
     call verw_mitigate_asm
 1:
-    movq $0, %gs:40
+    movq $0, %gs:32
     add $688, %rsp
     pop %r10
     pop %r11
@@ -876,7 +876,7 @@ cpu_idle_loop:
 .equ SS_SS,152
 .equ SS_FXSAVE,160
 
-.equ CPU_SCHEDRESUME,32
+.equ CPU_KERNELSTACKTOP,8
 
 .global fxsave_asm
 fxsave_asm:
@@ -943,7 +943,6 @@ unlock_asm:
 .global run_domain
 run_domain:
     cli
-    mov %rsp, %gs:CPU_SCHEDRESUME
     swapgs
 
     mov %rdi, %rbx
@@ -985,5 +984,7 @@ run_domain:
 
 .global run_abort
 run_abort:
-    mov %rdi, %rsp
-    ret
+    cli
+    mov %gs:CPU_KERNELSTACKTOP, %rsp
+    sub $8, %rsp
+    jmp cpu_idle_loop

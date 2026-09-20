@@ -1,6 +1,5 @@
 package elf
 
-import "core:hash/xxhash"
 Addr :: u64
 Off :: u64
 Half :: u16
@@ -36,7 +35,7 @@ ElfMachine :: enum u16 {
 	X86_64 = 62,
 }
 
-Hdr :: struct #packed {
+ElfHdr :: struct #packed {
 	eIdent:    [16]u8,
 	type:      ElfType,
 	machine:   ElfMachine,
@@ -52,15 +51,15 @@ Hdr :: struct #packed {
 	shnum:     u16,
 	shstrndx:  u16,
 }
-#assert(offset_of(Hdr, entry) == 24)
-#assert(size_of(Hdr{}.machine) == size_of(u16))
-#assert(size_of(Hdr) == 64)
+#assert(offset_of(ElfHdr, entry) == 24)
+#assert(size_of(ElfHdr{}.machine) == size_of(u16))
+#assert(size_of(ElfHdr) == 64)
 PhdrFlag :: enum Word {
 	X,
 	W,
 	R,
 }
-Phdr :: struct #packed {
+ElfPhdr :: struct #packed {
 	type:   enum Word {
 		Null    = 0,
 		Load    = 1,
@@ -80,17 +79,17 @@ Phdr :: struct #packed {
 }
 
 
-Segment :: struct #packed {
+ElfSegment :: struct #packed {
 	base:  u64,
 	end:   u64,
 	perms: bit_set[PhdrFlag;Word],
 }
 MAX_SEGMENTS :: 16
-Image :: struct {
+ElfImage :: struct {
 	entry:    u64,
 	base:     u64,
 	end:      u64,
-	segments: [dynamic; MAX_SEGMENTS]Segment,
+	segments: [dynamic; MAX_SEGMENTS]ElfSegment,
 }
 
 is_valid_elf :: proc "contextless" (ident: [EI_NIDENT]u8) -> bool {
@@ -104,8 +103,8 @@ is_valid_elf :: proc "contextless" (ident: [EI_NIDENT]u8) -> bool {
 is_64bit :: proc "contextless" (ident: [EI_NIDENT]u8) -> bool {
 	return ident[ElfIdentIndex.CLASS] == 2
 }
-#assert(size_of(Phdr) == 56)
-#assert(offset_of(Phdr, type) == 0)
+#assert(size_of(ElfPhdr) == 56)
+#assert(offset_of(ElfPhdr, type) == 0)
 
 
 DynamicTag :: enum i64 {
@@ -116,14 +115,13 @@ DynamicTag :: enum i64 {
 	HASH     = 4,
 	STRTAB   = 5,
 	SYMTAB   = 6,
-	RELA     = 7, // address of relocation table
-	RELASZ   = 8, // size of relocation table
-	RELAENT  = 9, // size of one relocation entry (must be 24)
-	// more
+	RELA     = 7,
+	RELASZ   = 8,
+	RELAENT  = 9,
 }
 DynamicEntry :: struct #packed {
 	dTag: DynamicTag,
-	dVal: u64, // also accessible as d_ptr when it's an address
+	dVal: u64,
 }
 RelaEntry :: struct #packed {
 	rOffset: Addr,
@@ -132,13 +130,27 @@ RelaEntry :: struct #packed {
 }
 RelaType :: enum u32 {
 	NONE            = 0,
-	DIRECT_64       = 1, // R_X86_64_64
-	PC_RELATIVE_32  = 2, // R_X86_64_PC32
-	GOT_PC_RELATIVE = 9, // R_X86_64_GOTPCREL
-	// … many more …
-	RELATIVE        = 8, // R_X86_64_RELATIVE
+	DIRECT_64       = 1,
+	PC_RELATIVE_32  = 2,
+	GOT_PC_RELATIVE = 9,
+	RELATIVE        = 8,
 }
 
 rela_type :: proc "contextless" (rInfo: Xword) -> RelaType {
 	return RelaType(u32(rInfo & 0xFFFF_FFFF))
+}
+
+parse_elf :: proc(data: []u8) -> (image: ElfImage, ok: bool) {
+	assert(false) // TODO: elf loading not implemented
+	return image, false
+}
+
+elf_load_into_memory :: proc(image: ^ElfImage, data: []u8) -> (actualBase: u64, ok: bool) {
+	assert(false) // TODO: elf loading not implemented
+	return 0, false
+}
+
+elf_run :: proc(image: ^ElfImage, base: u64, arg0, arg1: u64) -> bool {
+	assert(false) // TODO: elf loading not implemented
+	return false
 }

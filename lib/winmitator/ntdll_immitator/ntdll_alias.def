@@ -1,0 +1,8 @@
+LIBRARY ntdll
+EXPORTS
+    ExitProcess
+    GetStdHandle
+    WriteFile
+    memmove
+    memset
+    unimplemented_stub

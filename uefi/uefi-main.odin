@@ -57,7 +57,7 @@ KernelParams :: struct #all_or_none {
 	memoryMap:          [^]EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize:      u64,
 	memoryMapDescSize:  u64,
-	kernelImg, adamImg: elf.Image,
+	kernelImg, adamImg: elf.ElfImage,
 }
 
 

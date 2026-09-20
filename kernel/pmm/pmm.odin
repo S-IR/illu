@@ -24,8 +24,8 @@ men_init :: proc(
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize: u64,
 	memoryMapDescSize: u64,
-	kernelImg: elf.Image,
-	adamImg: ^elf.Image,
+	kernelImg: elf.ElfImage,
+	adamImg: ^elf.ElfImage,
 ) {
 
 	assert(memoryMapDescSize != 0, "mem_init: zero descriptor size")
