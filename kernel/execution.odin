@@ -13,6 +13,7 @@ Execution :: struct {
 	state:          SavedState,
 	domain:         ^ProtectionDomain,
 	next:           ^Execution,
+	tebBase:        u64,
 }
 #assert(offset_of(Execution, domain) == 704)
 
@@ -44,17 +45,19 @@ when !ODIN_TEST {
 	fxsave_asm :: proc "contextless" (area: ^[512]u8) {}
 }
 
-execution_run :: proc "contextless" (domain: ^ProtectionDomain, state: ^SavedState) {
-	print.kassert(domain != nil, "execution_run: nil domain")
-	print.kassert(
-		intrinsics.atomic_load(&domain.executionCount) > 0,
-		"execution_run: domain has no executions",
-	)
+execution_run :: proc "contextless" (exec: ^Execution) {
+
+	print.kassert(exec != nil)
+	print.kassert(intrinsics.atomic_load(&exec.domain.executionCount) > 0)
 	lapic_set_deadline(tscTicksPerMs * SLICE_MS)
 	cpu := gs_read_cpustate()
 	print.kassert(cpu != nil, "execution_run: no current cpu")
 	top := trampolineStacksBase + u64(cpu.index + 1) * TRAMPOLINE_STACK_SIZE
-	run_domain(state, domain.pml4, top)
+
+	ah.wrmsr_asm(KERNELGSBASE, exec.tebBase)
+	print.kassert(exec.domain != nil, "execution_run: nil domain")
+	run_domain(&exec.state, exec.domain.pml4, top)
+
 }
 
 execution_create :: proc(domain: ^ProtectionDomain, state: SavedState) -> ^Execution {
@@ -236,7 +239,7 @@ run_next_execution :: proc "c" () -> bool {
 	print.kassert(exec.state.cs == 0x2B, "rn: bad cs")
 	print.kassert(exec.state.ss == 0x23, "rn: bad ss")
 	print.kassert(exec.state.rsp % 16 == 8, "run_next_execution: rsp unaligned")
-	execution_run(exec.domain, &exec.state)
+	execution_run(exec)
 
 
 	return true
@@ -297,6 +300,7 @@ domain_destroy :: proc(domain: ^ProtectionDomain) {
 	delete(execs)
 
 	for cpu in cpus {
+		print.kassert(domain.killed, "domain_destroy: IPI sent before domain marked killed")
 		send_ipi(cpu.apicId, VECTOR_APIC_IPI)
 	}
 

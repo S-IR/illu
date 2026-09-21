@@ -144,7 +144,7 @@ when !ODIN_TEST {
 			syscall_prot_domain_create :: proc(regionsPtr, count: u64) -> (err: u64, handle: u64) ---
 			syscall_prot_domain_edit :: proc(handle, regionsPtr, count, op: u64) -> (err: u64) ---
 			syscall_prot_domain_destroy :: proc(handle: u64) -> (err: u64) ---
-			syscall_execution_start :: proc(handle, entryRip, entryRsp, arg0, arg1: u64) -> (err: u64) ---
+			syscall_execution_start :: proc(handle, entryRip, entryRsp, arg0, arg1, tebBase: u64) -> (err: u64) ---
 			syscall_attachment_set :: proc(handle, entryRip: u64) -> (err: u64) ---
 			syscall_attachment_remove :: proc(handle: u64) -> (err: u64) ---
 
@@ -292,11 +292,12 @@ when !ODIN_TEST {
 
 		syscall_execution_start_userspace :: proc "contextless" (
 			handle, entryRip, entryRsp, arg0, arg1: u64,
+			tebBase: u64,
 		) -> (
 			err: ExecutionStartError,
 		) {
 			return ExecutionStartError(
-				syscall_execution_start(handle, entryRip, entryRsp, arg0, arg1),
+				syscall_execution_start(handle, entryRip, entryRsp, arg0, arg1, tebBase),
 			)
 		}
 	}
@@ -320,4 +321,3 @@ mmap_page_size_bytes :: proc "contextless" (size: lmem.PageSize) -> u64 {
 	}
 	return 0
 }
-

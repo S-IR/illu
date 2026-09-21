@@ -11,7 +11,7 @@ import "print"
 
 
 @(export)
-syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: u64) {
+syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, r1: u64) {
 
 
 	switch syscalls.Syscall(nr) {
@@ -49,7 +49,7 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5: u64) -> (err: u64, r1: 
 	case .ProtDomainDestroy:
 		return u64(syscall_prot_domain_destroy(a1)), 0
 	case .ExecutionStart:
-		return u64(syscall_execution_start(a1, a2, a3, a4, a5)), 0
+		return u64(syscall_execution_start(a1, a2, a3, a4, a5, a6)), 0
 	case .AttachmentSet:
 		return u64(syscall_attachment_set(a1, a2)), 0
 	case .AttachmentRemove:
@@ -706,7 +706,7 @@ syscall_prot_domain_destroy :: proc "contextless" (
 }
 
 syscall_execution_start :: proc "contextless" (
-	handle, entryRip, entryRsp, arg0, arg1: u64,
+	handle, entryRip, entryRsp, arg0, arg1, tebBase: u64,
 ) -> (
 	err: syscalls.ExecutionStartError,
 ) {
@@ -723,6 +723,8 @@ syscall_execution_start :: proc "contextless" (
 
 	exec := execution_create(domain, savedState)
 	if exec == nil do return .OutOfMemory
+
+	exec.tebBase = tebBase
 
 	idx := u32(intrinsics.atomic_add(&rrCpuNext, 1)) % u32(len(cpus))
 	execution_enqueue(exec, &cpus[idx])

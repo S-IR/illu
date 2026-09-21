@@ -71,17 +71,26 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 	createErr, handle := syscalls.syscall_prot_domain_create_userspace(bc.image.regions[:])
 	if createErr != .None do return .DomainCreateFailed
 
+
 	stackPages := PE_STACK_SIZE / shared.PAGE_SIZE
-	stackMmap := [2]syscalls.MMapRegion {
+	mmapRegions := [3]syscalls.MMapRegion {
 		{pageSize = ._4KB, count = 1, flags = {}},
 		{pageSize = ._4KB, count = stackPages, flags = {.Write, .NX}},
+		{pageSize = ._4KB, count = 1, flags = {.Write, .NX}},
 	}
-	stackMmapErr, stackBase := syscalls.syscall_mmap_userspace(stackMmap[:])
-	if stackMmapErr != .None || stackBase == nil do return .StackAllocFailed
+	mmapErr, base := syscalls.syscall_mmap_userspace(mmapRegions[:])
+	if mmapErr != .None || base == nil do return .StackAllocFailed
 
-	guardAddr := u64(uintptr(stackBase))
-	stackAddr := guardAddr + shared.PAGE_SIZE
-	stackRegions := [2]syscalls.MemRegion {
+	guardAddr := u64(uintptr(base))
+	stackAddr := guardAddr + syscalls.descriptor_offset(mmapRegions[:], 1)
+	tebLogical := guardAddr + syscalls.descriptor_offset(mmapRegions[:], 2)
+	pebLogical := tebLogical + shared.PAGE_SIZE / 2
+
+	(^u64)(rawptr(uintptr(tebLogical + 0x30)))^ = tebLogical
+	(^u64)(rawptr(uintptr(tebLogical + 0x60)))^ = pebLogical
+	(^u64)(rawptr(uintptr(pebLogical + 0x10)))^ = bc.base
+
+	memRegions := [3]syscalls.MemRegion {
 		{
 			phys = guardAddr,
 			logical = guardAddr,
@@ -96,9 +105,16 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 			pageSize = ._4KB,
 			flags = {.User, .Write, .NX},
 		},
+		{
+			phys = tebLogical,
+			logical = tebLogical,
+			size = shared.PAGE_SIZE,
+			pageSize = ._4KB,
+			flags = {.User, .Write, .NX},
+		},
 	}
-	stackEditErr := syscalls.syscall_prot_domain_edit_userspace(handle, stackRegions[:], .Add)
-	if stackEditErr != .None do return .StackGrantFailed
+	editErr := syscalls.syscall_prot_domain_edit_userspace(handle, memRegions[:], .Add)
+	if editErr != .None do return .StackGrantFailed
 
 	for imp in bc.image.imports {
 		dep, found := get(imp.dll)
@@ -150,8 +166,8 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 				idx += 1
 			}
 		}
-		editErr := syscalls.syscall_prot_domain_edit_userspace(handle, grantRegions[:], .Add)
-		if editErr != .None do return .ImportGrantFailed
+		importEditErr := syscalls.syscall_prot_domain_edit_userspace(handle, grantRegions[:], .Add)
+		if importEditErr != .None do return .ImportGrantFailed
 
 
 		for entry in imp.entries {
@@ -164,7 +180,16 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 
 	stackTop := stackAddr + PE_STACK_SIZE - 8
 	entryAddr := bc.base + u64(entryRva)
-	execErr := syscalls.syscall_execution_start_userspace(handle, entryAddr, stackTop, arg0, arg1)
+
+
+	execErr := syscalls.syscall_execution_start_userspace(
+		handle,
+		entryAddr,
+		stackTop,
+		arg0,
+		arg1,
+		tebLogical,
+	)
 	if execErr != .None do return .ExecutionStartFailed
 	return .None
 }

@@ -730,13 +730,17 @@ slow_entry:
     mov $1, %rax
     mov %rax, 672(%rsp)
 
+    mov %r9, %rax
     mov %r8,  %r9
     mov %r10, %r8
     mov %rdx, %rcx
     mov %rsi, %rdx
     mov %rdi, %rsi
-    mov 704(%rsp), %rdi
+    sub $16, %rsp
+    mov %rax, (%rsp)
+    mov 720(%rsp), %rdi
     call syscall_dispatch
+    add $16, %rsp
 
     testb $1, kernel_cpu_has_md_clear(%rip)
     jz 1f
@@ -805,13 +809,17 @@ syscall_entry_meltdown_safe:
     mov $1, %rcx
     mov %rcx, 672(%rsp)
 
+    mov %r9, %rbp
     mov %r8,  %r9
     mov %r10, %r8
     mov %rdx, %rcx
     mov %rsi, %rdx
     mov %rdi, %rsi
     mov %rax, %rdi
+    sub $16, %rsp
+    mov %rbp, (%rsp)
     call syscall_dispatch
+    add $16, %rsp
 
     mov SS_RBX(%rsp), %rbx
     testb $1, kernel_cpu_has_md_clear(%rip)

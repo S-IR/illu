@@ -1,7 +1,10 @@
 LIBRARY ntdll
 EXPORTS
     ExitProcess
+    GetProcessHeap
     GetStdHandle
+    HeapAlloc
+    HeapFree
     WriteFile
     memmove
     memset

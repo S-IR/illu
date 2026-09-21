@@ -1,6 +1,9 @@
 LIBRARY ntdll_immitator
 EXPORTS
     ExitProcess
+    GetProcessHeap
     GetStdHandle
+    HeapAlloc
+    HeapFree
     WriteFile
     unimplemented_stub

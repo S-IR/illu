@@ -3,16 +3,44 @@ import ah "../asm_helpers"
 import "print"
 
 
+X2APIC_MSR_LVT_TIMER :: u32(0x832)
+X2APIC_MSR_LVT_THERMAL :: u32(0x833)
+X2APIC_MSR_LVT_LINT0 :: u32(0x835)
+X2APIC_MSR_LVT_LINT1 :: u32(0x836)
+X2APIC_MSR_LVT_ERROR :: u32(0x837)
+
 lapic_init :: proc() {
+	print.kensure(cpuid_has_x2apic(), "no x2apic available, required for the os")
+	print.kensure(cpuid_has_tsc_deadline(), "CPU does not support TSC-deadline mode")
+
+	idt_set_entry(VECTOR_APIC_TIMER, u64(ah.apic_stub_table[0]))
+	idt_set_entry(VECTOR_APIC_ERROR, u64(ah.apic_stub_table[1]))
+	idt_set_entry(VECTOR_APIC_THERMAL, u64(ah.apic_stub_table[2]))
+	idt_set_entry(VECTOR_APIC_LINT0, u64(ah.apic_stub_table[3]))
+	idt_set_entry(VECTOR_APIC_LINT1, u64(ah.apic_stub_table[4]))
+	idt_set_entry(VECTOR_APIC_IPI, u64(ah.apic_stub_table[5]))
+
+	// ─── TSC calibration using your existing pit_delay_us ───
+	calibrationMs := u64(10)
+	tscStart := ah.rdtsc_asm()
+	ah.pit_delay_us(u32(calibrationMs * 1000))
+	tscEnd := ah.rdtsc_asm()
+
+	print.kensure(tscEnd > tscStart, "TSC did not advance during PIT calibration")
+	tscTicksPerMs = (tscEnd - tscStart) / calibrationMs
+
+	lapic_enable_percpu()
+
+	print.serial_writeln("lapic: x2apic enabled, timer armed")
+}
+
+lapic_enable_percpu :: proc() {
 	MSR_IA32_APIC_BASE :: u32(0x1B)
 	MSR_APIC_BASE_MASK :: u64(0xFFFF_FFFF_F000)
-
-	print.kensure(cpuid_has_x2apic(), "no x2apic available, required for the os")
 
 	raw := ah.rdmsr_asm(MSR_IA32_APIC_BASE)
 	flags := transmute(ApicBaseFlags)raw
 	print.kensure(.EN in flags, "xapic not globally enabled, cannot upgrade to x2apic")
-	flags += {.EN, .EXTD}
 	ah.wrmsr_asm(MSR_IA32_APIC_BASE, (raw & MSR_APIC_BASE_MASK) | 0x800)
 	ah.wrmsr_asm(MSR_IA32_APIC_BASE, (raw & MSR_APIC_BASE_MASK) | 0xC00)
 	VECTOR_APIC_SPURIOUS :: 0xFF
@@ -23,53 +51,24 @@ lapic_init :: proc() {
 	}
 
 	X2APIC_MSR_SVR :: u32(0x80F)
-
-
 	ah.wrmsr_asm(X2APIC_MSR_SVR, u64(transmute(u32)svr))
 
 	X2APIC_MSR_TPR :: u32(0x808)
 	ah.wrmsr_asm(X2APIC_MSR_TPR, 0)
 
 	masked := transmute(u32)LvtRegister{mask = true}
-	X2APIC_MSR_LVT_TIMER :: u32(0x832)
-	X2APIC_MSR_LVT_THERMAL :: u32(0x833)
-	X2APIC_MSR_LVT_LINT0 :: u32(0x835)
-	X2APIC_MSR_LVT_LINT1 :: u32(0x836)
-	X2APIC_MSR_LVT_ERROR :: u32(0x837)
-
 	ah.wrmsr_asm(X2APIC_MSR_LVT_TIMER, u64(masked))
 	ah.wrmsr_asm(X2APIC_MSR_LVT_THERMAL, u64(masked))
 	ah.wrmsr_asm(X2APIC_MSR_LVT_LINT0, u64(masked))
 	ah.wrmsr_asm(X2APIC_MSR_LVT_LINT1, u64(masked))
 	ah.wrmsr_asm(X2APIC_MSR_LVT_ERROR, u64(masked))
 
-
-	idt_set_entry(VECTOR_APIC_TIMER, u64(ah.apic_stub_table[0]))
-	idt_set_entry(VECTOR_APIC_ERROR, u64(ah.apic_stub_table[1]))
-	idt_set_entry(VECTOR_APIC_THERMAL, u64(ah.apic_stub_table[2]))
-	idt_set_entry(VECTOR_APIC_LINT0, u64(ah.apic_stub_table[3]))
-	idt_set_entry(VECTOR_APIC_LINT1, u64(ah.apic_stub_table[4]))
-	idt_set_entry(VECTOR_APIC_IPI, u64(ah.apic_stub_table[5]))
-	// ─── TSC calibration using your existing pit_delay_us ───
-
-	calibrationMs := u64(10)
-	tscStart := ah.rdtsc_asm()
-	ah.pit_delay_us(u32(calibrationMs * 1000))
-	tscEnd := ah.rdtsc_asm()
-
-	print.kensure(tscEnd > tscStart, "TSC did not advance during PIT calibration")
-	tscTicksPerMs = (tscEnd - tscStart) / calibrationMs
-
-	print.kensure(cpuid_has_tsc_deadline(), "CPU does not support TSC-deadline mode")
 	lvt := LvtTimerRegister {
 		vector = u8(VECTOR_APIC_TIMER),
 		mask   = false,
 		mode   = .TscDeadline,
 	}
 	ah.wrmsr_asm(X2APIC_MSR_LVT_TIMER, u64(transmute(u32)lvt))
-
-
-	print.serial_writeln("lapic: x2apic enabled, timer armed")
 }
 
 VECTOR_APIC_TIMER :: 0xF0
