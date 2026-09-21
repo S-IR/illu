@@ -3,6 +3,7 @@ import ah "../asm_helpers"
 import "../lib/spinlock"
 import "base:intrinsics"
 import "pmm"
+import "print"
 tlbShootdown := struct {
 	lock:  spinlock.Spinlock,
 	pcid:  u32,
@@ -15,15 +16,17 @@ tlb_shootdown :: proc(pcid: u32) {
 	spinlock.lock(&tlbShootdown.lock)
 	defer spinlock.unlock(&tlbShootdown.lock)
 
+	intrinsics.atomic_store(&tlbShootdown.acked, 0)
+	intrinsics.atomic_store(&tlbShootdown.pcid, pcid)
+
 	self := gs_read_cpustate()
 	target := 0
 	for &cpu in cpus {
 		if self != nil && cpu.index == self.index do continue
 		target += 1
+		print.kassert(intrinsics.atomic_load(&tlbShootdown.pcid) != 0, "tlb_shootdown: IPI sent before shootdown state armed")
 		send_ipi(cpu.apicId, VECTOR_APIC_IPI)
 	}
-	intrinsics.atomic_store(&tlbShootdown.acked, 0)
-	intrinsics.atomic_store(&tlbShootdown.pcid, pcid)
 
 	ah.invpcid_asm(1, u64(pcid))
 

@@ -189,6 +189,8 @@ ap_init :: proc "c" (cpu: ^CpuState) {
 	cpuid_enable_pcid()
 
 	ah.gs_write_base(u64(uintptr(cpu)))
+	lapic_enable_percpu()
+	print.serial_writeln("lapic: x2apic enabled (ap)")
 	intrinsics.atomic_store(&apReady, 1)
 
 	cpu_syscall_init()
@@ -207,7 +209,14 @@ map_cpu_stack :: proc(base: u64) -> u64 {
 	return end
 }
 
-cpu_init :: proc(cpus: []CpuState, idx: u32, apicId: u32, tssRSP0: ^u64, stackBase: u64, tssIST0: ^u64) {
+cpu_init :: proc(
+	cpus: []CpuState,
+	idx: u32,
+	apicId: u32,
+	tssRSP0: ^u64,
+	stackBase: u64,
+	tssIST0: ^u64,
+) {
 	cpu := &cpus[idx]
 	cpu.self = cpu
 	cpu.apicId = apicId
@@ -219,10 +228,10 @@ cpu_init :: proc(cpus: []CpuState, idx: u32, apicId: u32, tssRSP0: ^u64, stackBa
 	tssIST0^ = top
 }
 
+KERNELGSBASE :: u32(0xC0000102); IA32_GS_BASE :: u32(0xC0000101)
 cpu_syscall_init :: proc() {
 	IA32_EFER :: u32(0xC0000080); IA32_STAR :: u32(0xC0000081)
 	IA32_LSTAR :: u32(0xC0000082); IA32_FMASK :: u32(0xC0000084)
-	KERNELGSBASE :: u32(0xC0000102); IA32_GS_BASE :: u32(0xC0000101)
 	EFER_SCE :: u64(1 << 0)
 	ah.wrmsr_asm(IA32_EFER, ah.rdmsr_asm(IA32_EFER) | EFER_SCE)
 	ah.wrmsr_asm(IA32_STAR, (u64(ah.USER_CS32) << 48) | (u64(ah.KERNEL_CS) << 32))
