@@ -5,7 +5,14 @@ import "core:mem"
 
 PE_STACK_SIZE :: u64(16 * mem.Kilobyte)
 
-pe_load_into_memory :: proc(image: ^PeImage, sections: []PeSection, data: []u8) -> (actualBase: u64, ok: bool) {
+pe_load_into_memory :: proc(
+	image: ^PeImage,
+	sections: []PeSection,
+	data: []u8,
+) -> (
+	actualBase: u64,
+	ok: bool,
+) {
 	imageBytes, alignOk := align_up(u64(image.sizeOfImage), shared.PAGE_SIZE)
 	if !alignOk do return 0, false
 	imagePages := imageBytes / shared.PAGE_SIZE
@@ -75,7 +82,13 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 	guardAddr := u64(uintptr(stackBase))
 	stackAddr := guardAddr + shared.PAGE_SIZE
 	stackRegions := [2]syscalls.MemRegion {
-		{phys = guardAddr, logical = guardAddr, size = shared.PAGE_SIZE, pageSize = ._4KB, flags = {}},
+		{
+			phys = guardAddr,
+			logical = guardAddr,
+			size = shared.PAGE_SIZE,
+			pageSize = ._4KB,
+			flags = {},
+		},
 		{
 			phys = stackAddr,
 			logical = stackAddr,
@@ -91,8 +104,55 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 		dep, found := get(imp.dll)
 		if !found do return .ImportNotFound
 
-		editErr := syscalls.syscall_prot_domain_edit_userspace(handle, dep.image.regions[:], .Add)
+
+		grantRegions := make(
+			[dynamic]syscalls.MemRegion,
+			0,
+			len(dep.image.regions),
+			context.temp_allocator,
+		)
+		privateRegions := make(
+			[dynamic]syscalls.MMapRegion,
+			0,
+			len(dep.image.regions),
+			context.temp_allocator,
+		)
+
+		for region in dep.image.regions {
+			if .Write not_in region.flags {
+				append(&grantRegions, region)
+				continue
+			}
+			append(
+				&privateRegions,
+				syscalls.MMapRegion {
+					pageSize = region.pageSize,
+					count = region.size / shared.PAGE_SIZE,
+					flags = region.flags,
+				},
+			)
+		}
+
+		if len(privateRegions) > 0 {
+			privErr, privBase := syscalls.syscall_mmap_userspace(privateRegions[:])
+			if privErr != .None || privBase == nil do return .ImportGrantFailed
+
+			idx := 0
+			for region in dep.image.regions {
+				if .Write not_in region.flags do continue
+				offset := syscalls.descriptor_offset(privateRegions[:], idx)
+				dst := rawptr(uintptr(privBase) + uintptr(offset))
+				mem.copy(dst, rawptr(uintptr(region.logical)), int(region.size))
+
+				grantRegion := region
+				grantRegion.phys = u64(uintptr(dst))
+				append(&grantRegions, grantRegion)
+				idx += 1
+			}
+		}
+		editErr := syscalls.syscall_prot_domain_edit_userspace(handle, grantRegions[:], .Add)
 		if editErr != .None do return .ImportGrantFailed
+
 
 		for entry in imp.entries {
 			rva, exportFound := dep.image.exports[entry.nameHash]
@@ -104,13 +164,7 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 
 	stackTop := stackAddr + PE_STACK_SIZE - 8
 	entryAddr := bc.base + u64(entryRva)
-	execErr := syscalls.syscall_execution_start_userspace(
-		handle,
-		entryAddr,
-		stackTop,
-		arg0,
-		arg1,
-	)
+	execErr := syscalls.syscall_execution_start_userspace(handle, entryAddr, stackTop, arg0, arg1)
 	if execErr != .None do return .ExecutionStartFailed
 	return .None
 }
