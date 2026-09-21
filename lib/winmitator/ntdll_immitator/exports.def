@@ -5,5 +5,14 @@ EXPORTS
     GetStdHandle
     HeapAlloc
     HeapFree
+    RtlAllocateHeap
+    RtlCopyMemory
+    RtlExitUserProcess
+    RtlFreeHeap
+    RtlMoveMemory
+    RtlZeroMemory
     WriteFile
+    strcmp
+    strcpy
+    strlen
     unimplemented_stub
