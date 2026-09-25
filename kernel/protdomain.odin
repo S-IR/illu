@@ -2,6 +2,7 @@ package kernel
 import "../lib/shared"
 import "../lib/spinlock"
 import "../lib/syscalls"
+import "../lib/userschedule"
 import "core:container/bit_array"
 import "core:mem"
 import "pmm"
@@ -52,7 +53,12 @@ protdomain_resolve_target_DOESNT_LOCK :: proc(
 	if target.authorityPtr == nil do return nil, .NoPermission
 	spinlock.rw_read_lock(&caller.lock)
 	defer spinlock.rw_read_unlock(&caller.lock)
-	if !user_range_accessible(caller, u64(uintptr(target.authorityPtr)), size_of(target.authorityPtr^), true) {
+	if !user_range_accessible(
+		caller,
+		u64(uintptr(target.authorityPtr)),
+		size_of(target.authorityPtr^),
+		true,
+	) {
 		return nil, .NoPermission
 	}
 
@@ -83,7 +89,7 @@ protdomain_new :: proc(
 	if newPD.pml4 == 0 do return nil, -1, .Out_Of_Memory
 	defer if err != {} do pmm.pml4_destroy(newPD.pml4)
 
-	newPD.weightFree = syscalls.SCHED_WEIGHT_TOTAL
+	newPD.weightFree = userschedule.SCHED_WEIGHT_TOTAL
 	if !bit_array.init(&newPD.grantCpus, len(cpus)) do return nil, -1, .Out_Of_Memory
 	defer if err != {} do bit_array.destroy(&newPD.grantCpus)
 
@@ -130,33 +136,46 @@ protdomain_new :: proc(
 	return pd, idx, {}
 }
 
-protdomain_destroy :: proc(idx: int) -> (err: mem.Allocator_Error) {
+protdomain_destroy :: proc(idx: int, caller: ^ProtectionDomain) -> ProtDomainTargetError {
 	pd: ^ProtectionDomain
 	{
 		spinlock.rw_write_lock(&protDomainPool.rwLock)
 		defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
-
-		if protDomainPool.prots == nil do return
-		if idx < 0 || idx >= len(protDomainPool.prots) do return
-
-		pd = protDomainPool.prots[idx]
-		assert(pd != nil)
-		if pd == nil do return
-		assert(pd.pml4 != 0)
-		assert(pd.resources != nil)
-		assert(pd.authorityPtr != nil)
-
-		append(&protDomainPool.freeSlots, idx) or_return
-		protDomainPool.prots[idx] = nil
+		pd = protdomain_resolve_target_DOESNT_LOCK(idx, caller) or_return
+		if pd == caller do return .NoPermission
+		protdomain_unlink_DOESNT_LOCK(idx)
 	}
+	protdomain_free(pd)
+	return .None
+}
 
+protdomain_discard :: proc(idx: int, pd: ^ProtectionDomain) {
+	{
+		spinlock.rw_write_lock(&protDomainPool.rwLock)
+		defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
+		if protDomainPool.prots[idx] != pd do return
+		protdomain_unlink_DOESNT_LOCK(idx)
+	}
+	protdomain_free(pd)
+}
+
+protdomain_unlink_DOESNT_LOCK :: proc(idx: int) {
+	assert(idx >= 0 && idx < len(protDomainPool.prots))
+	assert(protDomainPool.prots[idx] != nil)
+	protDomainPool.prots[idx] = nil
+	if _, appendErr := append(&protDomainPool.freeSlots, idx); appendErr != nil do return
+}
+
+protdomain_free :: proc(pd: ^ProtectionDomain) {
+	assert(pd != nil)
+	assert(pd.pml4 != 0)
 	grant_kill_all(pd)
 	pmm.pml4_destroy(pd.pml4)
 	if pd.pcid != 0 do pcid_free(pd.pcid)
+	for resource in pd.resources do memory_underlay_release(resource.underlay)
 	delete(pd.resources)
 	bit_array.destroy(&pd.grantCpus)
 	free(pd)
-	return
 }
 
 domains_write_lock :: proc "contextless" (a, b: ^ProtectionDomain) {

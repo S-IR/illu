@@ -54,7 +54,6 @@ when !ODIN_TEST {
 
 		read_rbp :: proc() -> u64 ---
 
-		invpcid_asm :: proc(type: u64, pcid: u64) ---
 	}
 
 	pit_delay_us :: proc(us: u32) {
@@ -110,7 +109,6 @@ when !ODIN_TEST {
 	cpu_pause :: proc "contextless" () {}
 
 
-	invpcid_asm :: proc "contextless" (type: u64, pcid: u64) {}
 
 	pit_delay_us :: proc "contextless" (us: u32) {}
 	read_rbp :: proc "contextless" () -> u64 {return 0}

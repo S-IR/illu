@@ -1,8 +1,8 @@
 package kernel
 import "../lib/spinlock"
 import "../lib/syscalls"
+import "../lib/userschedule"
 import "base:intrinsics"
-
 syscall_grant_spawn :: proc "contextless" (
 	handle: int,
 	cpuIdx, saveAreaPtr, weight: u64,
@@ -14,7 +14,12 @@ syscall_grant_spawn :: proc "contextless" (
 	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
 
 	target, targetCpu := grant_syscall_target_DOESNT_LOCK(handle, cpuIdx) or_return
-	return grant_spawn(target, targetCpu, (^syscalls.UserSaveArea)(uintptr(saveAreaPtr)), weight)
+	return grant_spawn(
+		target,
+		targetCpu,
+		(^userschedule.UserSaveArea)(uintptr(saveAreaPtr)),
+		weight,
+	)
 }
 
 syscall_grant_edit :: proc "contextless" (

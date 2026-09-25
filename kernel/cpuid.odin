@@ -91,23 +91,12 @@ cpuid_init_speculation_mitigations :: proc() {
 	}
 }
 
-INVPCID_CPUID_BIT :: u32(10)
 cpuHasPCID: bool
-cpuHasInvpcid: bool
 
 cpuid_init_pcid :: proc() {
 	r: ah.CPUIDResult
 	ah.cpuid_asm(.FEATURE_INFO, 0, &r)
 	cpuHasPCID = (r.ecx >> 17) & 1 == 1
-	if !cpuHasPCID do return
-
-	vendor: ah.CPUIDResult
-	ah.cpuid_asm(.VENDOR_STRING, 0, &vendor)
-	if vendor.eax < u32(ah.CPUIDLeaf.STRUCTURED_EXTENDED_FEATURES) do return
-
-	extFeatures: ah.CPUIDResult
-	ah.cpuid_asm(.STRUCTURED_EXTENDED_FEATURES, 0, &extFeatures)
-	cpuHasInvpcid = (extFeatures.ebx >> INVPCID_CPUID_BIT) & 1 == 1
 }
 
 

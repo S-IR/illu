@@ -7,9 +7,9 @@ import "base:runtime"
 
 @(export)
 ExitProcess :: proc "c" (exitCode: u32) {
+	syscalls.syscall_debug_print_userspace("ExitProcess", u64(exitCode))
 	syscalls.grant_exit()
 }
-
 
 @(export)
 GetStdHandle :: proc "c" (stdHandle: i32) -> rawptr {
@@ -24,9 +24,7 @@ WriteFile :: proc "c" (
 	bytesWritten: ^u32,
 	overlapped: rawptr,
 ) -> i32 {
-	when ODIN_DEBUG {
-		syscalls.syscall_debug_print_userspace("WriteFile", u64(uintptr(buffer)))
-	}
+	syscalls.syscall_debug_print_userspace("WriteFile", u64(uintptr(buffer)))
 	if bytesWritten != nil do bytesWritten^ = bytesToWrite
 	return 1 // TRUE
 }

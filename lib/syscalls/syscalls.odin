@@ -1,5 +1,6 @@
 package syscalls
 import "../lmem"
+import "../userschedule"
 import "base:intrinsics"
 import "core:mem"
 MemRegion :: struct #packed {
@@ -18,31 +19,6 @@ SchedulerEnterReason :: enum u64 {
 	Fault,
 }
 
-UserSaveArea :: struct #align (64) {
-	fx:                                   [512]u8,
-	rax, rbx, rcx, rdx, rsi, rdi, rbp:    u64,
-	r8, r9, r10, r11, r12, r13, r14, r15: u64,
-	rip, rsp, rflags:                     u64,
-}
-#assert(offset_of(UserSaveArea, fx) == 0)
-#assert(offset_of(UserSaveArea, rax) == 512)
-#assert(offset_of(UserSaveArea, rbx) == 520)
-#assert(offset_of(UserSaveArea, rcx) == 528)
-#assert(offset_of(UserSaveArea, rdx) == 536)
-#assert(offset_of(UserSaveArea, rsi) == 544)
-#assert(offset_of(UserSaveArea, rdi) == 552)
-#assert(offset_of(UserSaveArea, rbp) == 560)
-#assert(offset_of(UserSaveArea, r8) == 568)
-#assert(offset_of(UserSaveArea, r9) == 576)
-#assert(offset_of(UserSaveArea, r10) == 584)
-#assert(offset_of(UserSaveArea, r11) == 592)
-#assert(offset_of(UserSaveArea, r12) == 600)
-#assert(offset_of(UserSaveArea, r13) == 608)
-#assert(offset_of(UserSaveArea, r14) == 616)
-#assert(offset_of(UserSaveArea, r15) == 624)
-#assert(offset_of(UserSaveArea, rip) == 632)
-#assert(offset_of(UserSaveArea, rsp) == 640)
-#assert(offset_of(UserSaveArea, rflags) == 648)
 
 GrantSaveAreaError :: enum u64 {
 	None,
@@ -61,9 +37,6 @@ Syscall :: enum u64 {
 	ProtDomainDestroy,
 	GrantSpawn,
 	GrantEdit,
-	// Parked at a high, isolated number (debug-build only, see ODIN_DEBUG
-	// below) so it never collides with a real syscall number as the table
-	// above grows.
 	DebugPrint = ILLU_SYSCALL_BIT + 1000,
 }
 
@@ -157,7 +130,7 @@ when !ODIN_TEST {
 		syscall_grant_spawn_userspace :: proc "contextless" (
 			handle: int,
 			cpu: u32,
-			saveArea: ^UserSaveArea,
+			saveArea: ^userschedule.UserSaveArea,
 			weight: u64,
 		) -> GrantError {
 			return GrantError(syscall_grant_spawn(handle, cpu, u64(uintptr(saveArea)), weight))
@@ -176,22 +149,13 @@ when !ODIN_TEST {
 			intrinsics.trap()
 		}
 
-		// Debug-only: writes `label: value (0xvalue)` to the kernel serial
-		// log. `label` is read directly out of adam's (identity-mapped)
-		// memory by the kernel -- same trust model as every other pointer
-		// adam already hands the kernel elsewhere in this syscall table, and
-		// fine for a debug-only path. Not gated by a protection domain
-		// permission, and only linked into -debug builds (see ODIN_DEBUG)
-		// -- never reachable from a release binary.
-		when ODIN_DEBUG {
-			@(default_calling_convention = "sysv")
-			foreign _ {
-				syscall_debug_print :: proc(labelPtr: rawptr, labelLen: u64, value: u64) ---
-			}
+		@(default_calling_convention = "sysv")
+		foreign _ {
+			syscall_debug_print :: proc(labelPtr: rawptr, labelLen: u64, value: u64) ---
+		}
 
-			syscall_debug_print_userspace :: proc "contextless" (label: string, value: u64) {
-				syscall_debug_print(raw_data(label), u64(len(label)), value)
-			}
+		syscall_debug_print_userspace :: proc "contextless" (label: string, value: u64) {
+			syscall_debug_print(raw_data(label), u64(len(label)), value)
 		}
 
 		syscall_mmap_userspace :: proc "contextless" (
@@ -307,24 +271,4 @@ mmap_page_size_bytes :: proc "contextless" (size: lmem.PageSize) -> u64 {
 		return mem.Gigabyte
 	}
 	return 0
-}
-
-
-SCHED_WEIGHT_TOTAL :: u64(1_000_000)
-
-CPU_INFO_ADDR :: u64(0x7FF0_0000_0000)
-
-CpuInfo :: struct #align (64) {
-	runnableWeight: u64,
-	online:         bool,
-}
-#assert(size_of(CpuInfo) == 64)
-
-CpuInfoPage :: struct {
-	cpuCount: u32,
-	cpus:     [0]CpuInfo,
-}
-
-cpu_infos :: proc "contextless" (page: ^CpuInfoPage) -> []CpuInfo {
-	return ([^]CpuInfo)(&page.cpus)[:page.cpuCount]
 }

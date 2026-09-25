@@ -4,36 +4,18 @@ import "../lib/spinlock"
 import "base:intrinsics"
 import "pmm"
 import "print"
-tlbShootdown := struct {
-	lock:  spinlock.Spinlock,
-	pcid:  u32,
-	acked: u32,
-}{}
-
-
-tlb_shootdown :: proc(pcid: u32) {
-	if !cpuHasInvpcid do return
-	spinlock.lock(&tlbShootdown.lock)
-	defer spinlock.unlock(&tlbShootdown.lock)
-
-	intrinsics.atomic_store(&tlbShootdown.acked, 0)
-	intrinsics.atomic_store(&tlbShootdown.pcid, pcid)
-
+tlb_wait_domain_flushed :: proc "contextless" (domain: ^ProtectionDomain) {
 	self := gs_read_cpustate()
-	target := 0
 	for &cpu in cpus {
-		if self != nil && cpu.index == self.index do continue
-		target += 1
-		print.kassert(intrinsics.atomic_load(&tlbShootdown.pcid) != 0, "tlb_shootdown: IPI sent before shootdown state armed")
-		send_ipi(cpu.apicId, VECTOR_APIC_IPI)
+		if &cpu == self do continue
+		start := intrinsics.atomic_load(&cpu.tlbEpoch)
+		for intrinsics.atomic_load(&cpu.currentGrant.domain) == domain &&
+		    intrinsics.atomic_load(&cpu.tlbEpoch) == start {
+			intrinsics.atomic_add(&self.tlbEpoch, 1)
+			intrinsics.cpu_relax()
+		}
 	}
-
-	ah.invpcid_asm(1, u64(pcid))
-
-	for intrinsics.atomic_load(&tlbShootdown.acked) < u32(target) {
-		ah.cpu_pause()
-	}
-	intrinsics.atomic_store(&tlbShootdown.pcid, 0)
+	ah.write_cr3(ah.read_cr3())
 }
 
 

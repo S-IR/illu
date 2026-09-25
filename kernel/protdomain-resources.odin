@@ -1,5 +1,23 @@
 package kernel
+import "../lib/lmem"
+import "../lib/syscalls"
+import "base:intrinsics"
 
+USER_ADDR_END :: u64(1) << 47
+
+mem_region_valid :: proc "contextless" (r: syscalls.MemRegion) -> bool {
+	pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+	if pageBytes == 0 || r.size == 0 do return false
+	if r.phys % pageBytes != 0 || r.logical % pageBytes != 0 || r.size % pageBytes != 0 do return false
+	_, physOverflow := intrinsics.overflow_add(r.phys, r.size)
+	logicalEnd, logicalOverflow := intrinsics.overflow_add(r.logical, r.size)
+	return !physOverflow && !logicalOverflow && logicalEnd <= USER_ADDR_END
+}
+
+region_flags_grantable :: proc "contextless" (want, have: lmem.PageFlags) -> bool {
+	if .NX in have && .NX not_in want do return false
+	return want - {.NX} <= have - {.NX}
+}
 
 resource_upper_bound :: proc "contextless" (resources: []MemoryResource, phys: u64) -> int {
 	low, high := 0, len(resources)

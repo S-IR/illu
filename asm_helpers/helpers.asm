@@ -3,7 +3,15 @@
 .equ CPU_USERSYSCALLRSP,16
 .equ CPU_USERFX,32
 
+.equ FRAME_RIP,136
 .equ FRAME_CS,144
+.equ FRAME_RFLAGS,152
+.equ FRAME_RSP,160
+.equ FRAME_GPR_COUNT,15
+.equ FX_QWORDS,64
+
+.equ USER_RFLAGS_MASK,0xCD5
+.equ USER_RFLAGS_FORCED,0x202
 
 .equ USER_CS,0x2B
 .equ USER_SS,0x23
@@ -26,6 +34,8 @@
 .equ SA_RIP,632
 .equ SA_RSP,640
 .equ SA_RFLAGS,648
+.equ SA_GSBASE,656
+.equ MSR_KERNEL_GS_BASE,0xC0000102
 
 .section .data
 .global irq_stub_table
@@ -421,15 +431,6 @@ rdmsr_asm:
     orq    %rdx, %rax
     ret
 
-.global invpcid_asm
-invpcid_asm:
-    # rdi = type, rsi = pcid
-    push $0
-    push %rsi
-    invpcid (%rsp), %rdi
-    add $16, %rsp
-    ret
-
 .global cpuid_asm
 cpuid_asm:
     push   %rbx
@@ -818,13 +819,58 @@ run_resume:
     jz 1f
     call verw_mitigate_asm
 1:
+    mov %rdi, %cr3
+    jmp .Lresume_load
+
+.global user_access_begin
+user_access_begin:
+
+.global user_save_area_store
+user_save_area_store:
+    # rdi = save area, rsi = interrupt frame, rdx = saved user fx
+    mov %rdi, %r8
+    mov %rsi, %r9
+    mov %rdx, %rsi
+    mov $FX_QWORDS, %ecx
+    cld
+    rep movsq
+    mov %r9, %rsi
+    mov $FRAME_GPR_COUNT, %ecx
+    rep movsq
+    mov FRAME_RIP(%r9), %rax
+    mov %rax, SA_RIP(%r8)
+    mov FRAME_RSP(%r9), %rax
+    mov %rax, SA_RSP(%r8)
+    mov FRAME_RFLAGS(%r9), %rax
+    mov %rax, SA_RFLAGS(%r8)
+    mov $MSR_KERNEL_GS_BASE, %ecx
+    rdmsr
+    shl $32, %rdx
+    or %rdx, %rax
+    mov %rax, SA_GSBASE(%r8)
+    ret
+
+.Lresume_load:
     fxrstor (%rsi)
+    mov SA_GSBASE(%rsi), %rax
+    mov %rax, %rdx
+    shr $32, %rdx
+    mov $MSR_KERNEL_GS_BASE, %ecx
+    wrmsr
+    mov SA_RIP(%rsi), %rax
+    mov %rax, %rcx
+    sar $47, %rcx
+    jz 2f
+    ud2
+2:
     pushq $USER_SS
     pushq SA_RSP(%rsi)
-    pushq SA_RFLAGS(%rsi)
+    mov SA_RFLAGS(%rsi), %rcx
+    and $USER_RFLAGS_MASK, %rcx
+    or $USER_RFLAGS_FORCED, %rcx
+    push %rcx
     pushq $USER_CS
-    pushq SA_RIP(%rsi)
-    mov %rdi, %cr3
+    push %rax
     mov SA_RAX(%rsi), %rax
     mov SA_RBX(%rsi), %rbx
     mov SA_RCX(%rsi), %rcx
@@ -840,6 +886,8 @@ run_resume:
     mov SA_R14(%rsi), %r14
     mov SA_R15(%rsi), %r15
     mov SA_RSI(%rsi), %rsi
+.global user_access_end
+user_access_end:
     swapgs
     iretq
 
