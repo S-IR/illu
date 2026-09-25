@@ -14,17 +14,19 @@ GrantSleepState :: bit_field u64 {
 
 #assert(size_of(GrantSleepState) == size_of(u64))
 
-SCHED_WEIGHT_TOTAL :: u64(1_000)
+SCHED_WEIGHT_TOTAL :: u64(1_000_000)
+GRANT_MAX_CHARGE_TICKS :: u64(1) << 40
+GRANT_REBASE_FLOOR :: u64(1) << 62
+
+#assert(SCHED_WEIGHT_TOTAL <= u64(1) << 20)
+#assert(GRANT_REBASE_FLOOR + GRANT_MAX_CHARGE_TICKS * SCHED_WEIGHT_TOTAL <= max(u64) / 2)
 
 CpuGrant :: struct {
-	domain:                                 ^ProtectionDomain,
-	weight:                                 u64,
-	virtualTime:                            u64,
-	accountingRemainder:                    u64,
-	entryRIP, entryRSP:                     u64,
-	entryRDI, entryRSI, entryRDX, entryRCX: u64,
-	saveArea:                               ^syscalls.UserSaveArea,
-	sleepState:                             GrantSleepState,
+	domain:      ^ProtectionDomain,
+	weight:      u64,
+	virtualTime: u64,
+	saveArea:    ^syscalls.UserSaveArea,
+	sleepState:  GrantSleepState,
 }
 // Larger values are stored earlier.
 grant_before :: proc(a, b: CpuGrant) -> bool {
@@ -40,7 +42,12 @@ grant_insert :: proc(cpu: ^CpuState, grant: CpuGrant) -> (err: mem.Allocator_Err
 	spinlock.lock(&cpu.grantLock)
 	defer spinlock.unlock(&cpu.grantLock)
 
+	_ = inject_at(&cpu.grants, grant_insert_index_LOCKED(cpu, grant), grant) or_return
+	grant_wake_cpu(cpu)
+	return .None
+}
 
+grant_insert_index_LOCKED :: proc(cpu: ^CpuState, grant: CpuGrant) -> int {
 	low := 0
 	high := len(cpu.grants)
 
@@ -53,13 +60,7 @@ grant_insert :: proc(cpu: ^CpuState, grant: CpuGrant) -> (err: mem.Allocator_Err
 			low = mid + 1
 		}
 	}
-
-	_, err = inject_at(&cpu.grants, low, grant)
-	if err != {} do return err
-
-
-	grant_wake_cpu(cpu)
-	return .None
+	return low
 }
 grant_add_new :: proc(cpu: ^CpuState, grant: CpuGrant) -> mem.Allocator_Error {
 	assert(cpu != nil)
@@ -73,11 +74,7 @@ grant_add_new :: proc(cpu: ^CpuState, grant: CpuGrant) -> mem.Allocator_Error {
 	defer spinlock.unlock(&cpu.grantLock)
 
 	grant.virtualTime = cpu.floorVirtualTime
-	if len(cpu.grants) > 0 {
-		grant.virtualTime = min(grant.virtualTime, cpu.grants[len(cpu.grants) - 1].virtualTime)
-	}
-	grant.accountingRemainder = 0
-	append(&cpu.grants, grant) or_return
+	_ = inject_at(&cpu.grants, grant_insert_index_LOCKED(cpu, grant), grant) or_return
 	grant_wake_cpu(cpu)
 	return .None
 }
@@ -112,6 +109,7 @@ cpu_next_grant :: proc "c" () -> bool {
 			selected = grant^
 			ordered_remove(&cpu.grants, idx)
 			found = true
+			assert(selected.virtualTime >= cpu.floorVirtualTime)
 			cpu.floorVirtualTime = selected.virtualTime
 
 			break
@@ -208,62 +206,37 @@ grant_rebase_virtual_times :: proc(cpu: ^CpuState) {
 	assert(cpu != nil)
 	if cpu == nil do return
 
-	minimum := max(u64)
-	if cpu.currentGrant.domain != nil {
-		minimum = min(minimum, cpu.currentGrant.virtualTime)
-	}
-
 	spinlock.lock(&cpu.grantLock)
 	defer spinlock.unlock(&cpu.grantLock)
-	for grant in cpu.grants {
-		if grant.domain != nil {
-			minimum = min(minimum, grant.virtualTime)
-		}
-	}
-	if minimum == max(u64) || minimum == 0 do return
+
+	base := cpu.floorVirtualTime
 	if cpu.currentGrant.domain != nil {
-		cpu.currentGrant.virtualTime -= minimum
+		assert(cpu.currentGrant.virtualTime >= base)
+		cpu.currentGrant.virtualTime -= base
 	}
 	for &grant in cpu.grants {
-		if grant.domain != nil do grant.virtualTime -= minimum
+		grant.virtualTime -= min(grant.virtualTime, base)
 	}
-	cpu.floorVirtualTime -= min(cpu.floorVirtualTime, minimum)
+	cpu.floorVirtualTime = 0
 }
 
 grant_account_current :: proc(cpu: ^CpuState) -> CpuGrant {
-	grant := cpu.currentGrant
-	assert(grant.domain != nil)
-	assert(grant.weight > 0 && grant.weight <= SCHED_WEIGHT_TOTAL)
+	assert(cpu.currentGrant.domain != nil)
+	assert(cpu.currentGrant.weight > 0 && cpu.currentGrant.weight <= SCHED_WEIGHT_TOTAL)
+	assert(cpu.currentGrant.virtualTime >= cpu.floorVirtualTime)
 
 	now := ah.rdtsc_asm()
 	elapsed, clockWrapped := intrinsics.overflow_sub(now, cpu.grantStartTsc)
 	assert(!clockWrapped, "grant clock moved backwards")
+	elapsed = min(elapsed, GRANT_MAX_CHARGE_TICKS)
 
-	whole := elapsed / grant.weight
-	fraction := elapsed % grant.weight
-	rem, remOverflow := intrinsics.overflow_add(fraction, grant.accountingRemainder)
-	assert(!remOverflow, "grant accounting remainder overflow")
+	if cpu.floorVirtualTime >= GRANT_REBASE_FLOOR do grant_rebase_virtual_times(cpu)
+	assert(cpu.floorVirtualTime < GRANT_REBASE_FLOOR)
+	assert(cpu.currentGrant.virtualTime - cpu.floorVirtualTime <= GRANT_MAX_CHARGE_TICKS * SCHED_WEIGHT_TOTAL)
 
-	carry := rem / grant.weight
-	grant.accountingRemainder = rem % grant.weight
-	delta, deltaOverflow := intrinsics.overflow_add(whole, carry)
-	if deltaOverflow {
-		grant.virtualTime = max(u64)
-	} else {
-		next, timeOverflow := intrinsics.overflow_add(grant.virtualTime, delta)
-		if timeOverflow {
-			cpu.currentGrant = grant
-			grant_rebase_virtual_times(cpu)
-			grant = cpu.currentGrant
-			next, timeOverflow = intrinsics.overflow_add(grant.virtualTime, delta)
-			assert(!timeOverflow, "grant virtual time overflow after rebase")
-		}
-		grant.virtualTime = next
-	}
-
-	cpu.currentGrant = grant
+	cpu.currentGrant.virtualTime += elapsed * SCHED_WEIGHT_TOTAL / cpu.currentGrant.weight
 	cpu.grantStartTsc = now
-	return grant
+	return cpu.currentGrant
 }
 
 grant_stop_current :: proc(cpu: ^CpuState, reason: GrantStopReason) {
@@ -316,10 +289,15 @@ grant_wake :: proc(cpu: ^CpuState, domain: ^ProtectionDomain) -> bool {
 	spinlock.lock(&cpu.grantLock)
 	defer spinlock.unlock(&cpu.grantLock)
 
-	for &grant in cpu.grants {
+	for grant, idx in cpu.grants {
 		if grant.domain != domain || !grant.sleepState.asleep do continue
 
-		grant.sleepState.asleep = false
+		woken := grant
+		woken.sleepState.asleep = false
+		woken.virtualTime = max(woken.virtualTime, cpu.floorVirtualTime)
+		ordered_remove(&cpu.grants, idx)
+		_, err := inject_at(&cpu.grants, grant_insert_index_LOCKED(cpu, woken), woken)
+		assert(err == nil)
 		grant_wake_cpu(cpu)
 		return true
 	}
