@@ -2,7 +2,6 @@
 package kernel
 
 import ah "../asm_helpers"
-import "print"
 GdtFlags :: bit_field u8 {
 	avl:  bool | 1,
 	long: bool | 1,
@@ -38,6 +37,8 @@ GDTEntryNames :: enum u8 {
 	Tss1,
 	Tss2,
 }
+#assert((u16(GDTEntryNames.UserData) << 3 | 3) == 0x23)
+#assert((u16(GDTEntryNames.UserCOde64) << 3 | 3) == 0x2B)
 
 @(private)
 gdtEntries: [GDTEntryNames]u64

@@ -62,13 +62,24 @@ PeRunError :: enum {
 	ImportNotFound,
 	ImportGrantFailed,
 	ExportNotFound,
-	ExecutionStartFailed,
 }
 
 pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 	if entryRva == 0 do return .NoEntryPoint
 
-	createErr, handle := syscalls.syscall_prot_domain_create_userspace(bc.image.regions[:])
+	authorityPtr: rawptr
+	for region in bc.image.regions {
+		if .Write in region.flags {
+			authorityPtr = rawptr(uintptr(region.logical))
+			break
+		}
+	}
+	if authorityPtr == nil do return .DomainCreateFailed
+
+	createErr, handle := syscalls.syscall_prot_domain_create_userspace(
+		authorityPtr,
+		bc.image.regions[:],
+	)
 	if createErr != .None do return .DomainCreateFailed
 
 
@@ -177,19 +188,5 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 			slot^ = dep.base + u64(rva)
 		}
 	}
-
-	stackTop := stackAddr + PE_STACK_SIZE - 8
-	entryAddr := bc.base + u64(entryRva)
-
-
-	execErr := syscalls.syscall_execution_start_userspace(
-		handle,
-		entryAddr,
-		stackTop,
-		arg0,
-		arg1,
-		tebLogical,
-	)
-	if execErr != .None do return .ExecutionStartFailed
 	return .None
 }

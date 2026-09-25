@@ -1,96 +1,62 @@
 package kernel
 import ah "../asm_helpers"
 import "../lib/acpi"
-import "../lib/lmem"
 import "../lib/shared"
 import "../lib/spinlock"
-import "../lib/syscalls"
 import "base:intrinsics"
 import "base:runtime"
 import "core:mem"
 import "pmm"
 import "print"
-SLICE_MS: u64 : 20
 KERNEL_STACK_PER_CPU_SIZE :: 16 * mem.Kilobyte
 #assert(KERNEL_STACK_PER_CPU_SIZE % 16 == 0)
 
 
-MemoryResourceFlag :: enum {
-	Multiplexed,
-	Volatile,
-	InterruptSource,
-}
+IdleLevel :: distinct u8
+when ODIN_ARCH == .amd64 {
+	MAX_IDLE_STATES :: 7
 
-MemoryResourceFlags :: bit_set[MemoryResourceFlag;u64]
+	IdleState :: struct {
+		level:     IdleLevel,
+		mwaitHint: u32,
+	}
+	CpuIdleInfo :: struct {
+		states: [dynamic; MAX_IDLE_STATES]IdleState,
+	}
+} else {
+	IdleState :: struct {
+		level:       IdleLevel,
+		psciStateId: u32,
+	}
 
-MemoryResource :: struct {
-	overlay:      syscalls.MemRegion,
-	overlayFlags: MemoryResourceFlags,
-	underlay:     ^MemoryUnderlay,
-}
-
-resource_init :: proc(
-	phys, size: u64,
-	pageSize: lmem.PageSize,
-	pageFlags: lmem.PageFlags,
-	flags: MemoryResourceFlags,
-	backend: MemorySlotBackend,
-) -> MemoryResource {
-	return MemoryResource {
-		overlay = {
-			phys = phys,
-			logical = phys,
-			size = size,
-			pageSize = pageSize,
-			flags = pageFlags,
-		},
-		overlayFlags = flags,
-		underlay = memory_underlay_create(phys, size, backend),
+	CpuIdleInfo :: struct {
+		states: [dynamic]IdleState,
 	}
 }
 
-ALLOC_INITIAL_CAPACITY :: 8
 
-PCIAddress :: bit_field u64 {
-	segment:  u16 | 16,
-	bus:      u8  | 8,
-	device:   u8  | 8,
-	function: u8  | 8,
-}
 CpuState :: struct #align (16) {
-	self:           ^CpuState,
-	kernelStackTop: u64,
-	userSyscallRsp: u64,
-	runState:       ^SavedState,
-	syscallFrame:   ^SavedState,
-	apicId:         u32,
-	index:          u32,
-	rrCurrent:      ^Execution,
-	rrHead, rrTail: ^Execution,
-	rrLock:         spinlock.Spinlock,
-	sleeping:       bool,
+	self:              ^CpuState,
+	kernelStackTop:    u64,
+	userSyscallRsp:    u64,
+	apicId:            u32,
+	index:             u32,
+	userFx:            [512]u8,
+	currentGrant:      CpuGrant,
+	grants:            [dynamic]CpuGrant,
+	grantStartTsc:     u64,
+	floorVirtualTime:  u64,
+	grantLock:         spinlock.Spinlock,
+	wakeEvent:         u32,
+	idleInfo:          CpuIdleInfo,
+	selectedIdleLevel: IdleLevel,
 }
+#assert(offset_of(CpuState, self) == 0)
 #assert(offset_of(CpuState, kernelStackTop) == 8)
 #assert(offset_of(CpuState, userSyscallRsp) == 16)
-#assert(offset_of(CpuState, runState) == 24)
-#assert(offset_of(CpuState, syscallFrame) == 32)
-#assert(offset_of(CpuState, rrCurrent) == 48)
-
-SavedState :: struct #align (16) {
-	rax, rbx, rcx, rdx:       u64,
-	rsi, rdi, rbp:            u64,
-	r8, r9, r10, r11:         u64,
-	r12, r13, r14, r15:       u64,
-	rip, cs, rflags, rsp, ss: u64,
-	fxsave:                   [512]u8,
-	valid:                    bool,
-}
-#assert(offset_of(SavedState, rbx) == 8)
-#assert(offset_of(SavedState, rip) == 120)
-#assert(offset_of(SavedState, ss) == 152)
-#assert(offset_of(SavedState, fxsave) == 160)
-#assert(offset_of(SavedState, fxsave) % 16 == 0)
-#assert(offset_of(SavedState, valid) == 672)
+#assert(offset_of(CpuState, apicId) == 24)
+#assert(offset_of(CpuState, userFx) == 32)
+#assert(align_of(CpuState) == 16)
 
 
 gKernelCtx: runtime.Context
@@ -100,6 +66,9 @@ nextCPUSlot: u32 = 0
 apReady: u32
 kernelStacksBase: u64
 sched_init :: proc(rsdp: ^acpi.Rsdp) {
+	(^u16)(&cleanFx.bytes[0])^ = FX_FCW_DEFAULT
+	(^u32)(&cleanFx.bytes[FX_MXCSR_OFFSET])^ = MXCSR_DEFAULT
+
 	bspId := u32(ah.rdmsr_asm(0x802))
 	apCount := acpi.collect_ap_ids(rsdp, bspId, nil)
 	totalCores := int(apCount) + 1
@@ -226,8 +195,39 @@ cpu_init :: proc(
 	cpu.kernelStackTop = top
 	tssRSP0^ = top
 	tssIST0^ = top
+
+	assert(uintptr(&cpu.userFx) % 16 == 0)
+	aErr: runtime.Allocator_Error
+	cpu.grants, aErr = make([dynamic]CpuGrant, 0, CPU_GRANT_STARTING_CAPACITY)
+	print.kensure(aErr == nil, "OOM cpu_init: grants")
+
+	when ODIN_ARCH == .amd64 do idle_info_init_x64(cpu)
+
 }
 
+when ODIN_ARCH == .amd64 {
+	idle_info_init_x64 :: proc(cpu: ^CpuState) {
+		maxLeaf: ah.CPUIDResult
+		ah.cpuid_asm(.VENDOR_STRING, 0, &maxLeaf)
+
+		if maxLeaf.eax < u32(ah.CPUIDLeaf.MONITOR_MWAIT) do return
+
+		r: ah.CPUIDResult
+		ah.cpuid_asm(.MONITOR_MWAIT, 0, &r)
+
+		for c in u32(1) ..< 8 {
+			substateCount := (r.edx >> (c * 4)) & 0xF
+			if substateCount == 0 do continue
+
+			state := IdleState {
+				level     = IdleLevel(len(cpu.idleInfo.states)),
+				mwaitHint = c,
+			}
+
+			append(&cpu.idleInfo.states, state)
+		}
+	}
+}
 KERNELGSBASE :: u32(0xC0000102); IA32_GS_BASE :: u32(0xC0000101)
 cpu_syscall_init :: proc() {
 	IA32_EFER :: u32(0xC0000080); IA32_STAR :: u32(0xC0000081)
@@ -240,15 +240,16 @@ cpu_syscall_init :: proc() {
 	ah.wrmsr_asm(IA32_FMASK, u64(0x200))
 	ah.wrmsr_asm(KERNELGSBASE, ah.rdmsr_asm(IA32_GS_BASE))
 }
-saved_state_fresh :: proc(entryRip, entryRsp: u64) -> SavedState {
-	assert(entryRsp % 16 == 8, "saved_state_fresh: unaligned entry stack")
-	return SavedState {
-		rip = entryRip,
-		rsp = entryRsp,
-		cs = 0x2B,
-		ss = 0x23,
-		rflags = 0x202,
-		fxsave = {},
-		valid = true,
-	}
+
+
+FX_FCW_DEFAULT :: u16(0x037F)
+MXCSR_DEFAULT :: u32(0x1F80)
+MXCSR_SAFE_MASK :: u32(0xFFBF)
+FX_MXCSR_OFFSET :: 24
+
+FxArea :: struct #align (16) {
+	bytes: [512]byte,
 }
+
+@(export, link_name = "kernel_clean_fx")
+cleanFx: FxArea

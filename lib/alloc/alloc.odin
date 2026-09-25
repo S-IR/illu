@@ -329,7 +329,7 @@ heap_proc :: proc(
 	case .Alloc:
 		p, err := heap_alloc(size, alignment, true)
 
-		if err != nil {
+		if err != {} {
 			return nil, err
 		}
 
@@ -338,7 +338,7 @@ heap_proc :: proc(
 	case .Alloc_Non_Zeroed:
 		p, err := heap_alloc(size, alignment, false)
 
-		if err != nil {
+		if err != {} {
 			return nil, err
 		}
 
@@ -372,7 +372,7 @@ heap_proc :: proc(
 
 		p, err := heap_alloc(size, alignment, true)
 
-		if err != nil {
+		if err != {} {
 			return nil, err
 		}
 
@@ -406,7 +406,7 @@ heap_proc :: proc(
 
 		p, err := heap_alloc(size, alignment, false)
 
-		if err != nil {
+		if err != {} {
 			return nil, err
 		}
 
@@ -427,4 +427,3 @@ heap_proc :: proc(
 
 	return nil, nil
 }
-

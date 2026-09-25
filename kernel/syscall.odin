@@ -16,24 +16,20 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 
 	switch syscalls.Syscall(nr) {
 	case .Exit:
+		context = gKernelCtx
 		spinlock.lock(&serialPrintLock)
 		print.serial_write("exit code: ")
 		print.serial_write_u64(a1)
 		print.serial_writeln("")
 		spinlock.unlock(&serialPrintLock)
-		exec_exit_current()
+		cpu := gs_read_cpustate()
+		if cpu != nil do grant_stop_current(cpu, .Exit)
+		run_abort()
 	case .MMap:
 		mmapErr, addr := syscall_mmap(a1, a2)
 		return u64(mmapErr), addr
 	case .MFree:
 		return u64(syscall_mfree(a1, a2)), 0
-	case .InterruptVectorGet:
-		interruptErr, vector, lapicID := syscall_interrupt_vector_get(a1)
-		// Preserve the two-register syscall ABI. RDX contains the vector
-		// in bits 0..7 and the destination LAPIC ID in bits 8..39.
-		return u64(interruptErr), u64(vector) | (u64(lapicID) << 8)
-	case .InterruptWait:
-		return u64(syscall_interrupt_wait(a1)), 0
 	case .MultiplexedMemoryCreate:
 		err, handle := syscall_multiplexed_memory_create(a1, a2)
 		return u64(err), handle
@@ -42,18 +38,13 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 	case .MultiplexedMemoryWrite:
 		return u64(syscall_multiplexed_memory_write(a1, a2, a3, a4, a5)), 0
 	case .ProtDomainCreate:
-		err, handle := syscall_prot_domain_create(a1, a2)
-		return u64(err), handle
+		err, handle := syscall_prot_domain_create((^byte)(uintptr(a1)), a2, a3)
+		return u64(err), transmute(u64)handle
 	case .ProtDomainEdit:
-		return u64(syscall_prot_domain_edit(a1, a2, a3, a4)), 0
+		return u64(syscall_prot_domain_edit(transmute(int)a1, a2, a3, a4)), 0
 	case .ProtDomainDestroy:
-		return u64(syscall_prot_domain_destroy(a1)), 0
-	case .ExecutionStart:
-		return u64(syscall_execution_start(a1, a2, a3, a4, a5, a6)), 0
-	case .AttachmentSet:
-		return u64(syscall_attachment_set(a1, a2)), 0
-	case .AttachmentRemove:
-		return u64(syscall_attachment_remove(a1)), 0
+		return u64(syscall_prot_domain_destroy(transmute(int)a1)), 0
+
 	case .DebugPrint:
 		// Debug-only: prints "dbg: <label>: <value> (0x<value>)" to the
 		// serial log. a1/a2 are a (ptr, len) string read straight out of
@@ -76,6 +67,17 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 	return max(u64), max(u64)
 }
 
+@(export)
+syscall_return_noncanonical :: proc "c" () -> ! {
+	context = gKernelCtx
+	cpu := gs_read_cpustate()
+	assert(cpu != nil)
+	assert(cpu.currentGrant.domain != nil)
+	print.serial_writeln("syscall: non-canonical return rip, grant dropped")
+	grant_stop_current(cpu, .Exit)
+	run_abort()
+}
+
 multiplexedMemoryLock: spinlock.Spinlock
 serialPrintLock: spinlock.Spinlock
 
@@ -87,12 +89,12 @@ syscall_multiplexed_memory_create :: proc "contextless" (
 ) {
 	context = gKernelCtx
 	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+	if cpu == nil || cpu.currentGrant.domain == nil {
 		return .NoPermission, 0
 	}
 	if size == 0 || phys + size < phys do return .InvalidRange, 0
 
-	domain := cpu.rrCurrent.domain
+	domain := cpu.currentGrant.domain
 
 	kernel_switch_cr3()
 	defer domain_switch_cr3(domain)
@@ -137,7 +139,7 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 ) -> syscalls.MultiplexedMemoryError {
 	context = gKernelCtx
 	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+	if cpu == nil || cpu.currentGrant.domain == nil {
 		return .NoPermission
 	}
 	if handle == 0 do return .InvalidHandle
@@ -145,7 +147,7 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 	if size == 0 || size % width != 0 do return .InvalidRange
 	if offset + size < offset do return .InvalidRange
 
-	domain := cpu.rrCurrent.domain
+	domain := cpu.currentGrant.domain
 
 	// resource is a pointer into domain.resources -- only safe to read while
 	// domain.lock is held. Copy out everything needed below, then release.
@@ -247,10 +249,10 @@ syscall_mmap :: proc "contextless" (
 	if regionsCount == 0 do return .InvalidSize, 0
 
 	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+	if cpu == nil || cpu.currentGrant.domain == nil {
 		return .InvalidSize, 0
 	}
-	domain := cpu.rrCurrent.domain
+	domain := cpu.currentGrant.domain
 
 	regionsBytes, overflow := intrinsics.overflow_mul(regionsCount, size_of(syscalls.MMapRegion))
 	if overflow do return .InvalidSize, 0
@@ -330,10 +332,10 @@ syscall_mfree :: proc "contextless" (addrsPtr, count: u64) -> (err: syscalls.MFr
 	if count == 0 do return .InvalidAddress
 
 	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+	if cpu == nil || cpu.currentGrant.domain == nil {
 		return .InvalidAddress
 	}
-	domain := cpu.rrCurrent.domain
+	domain := cpu.currentGrant.domain
 
 	addrsBytes, overflowed := intrinsics.overflow_mul(count, size_of(u64))
 	if overflowed do return .InvalidAddress
@@ -379,100 +381,25 @@ syscall_mfree :: proc "contextless" (addrsPtr, count: u64) -> (err: syscalls.MFr
 	return .None
 }
 
-MSI_VECTOR_FIRST :: 32
-MSI_VECTOR_COUNT :: 208
-
-syscall_interrupt_vector_get :: proc "contextless" (
-	resourcePhys: u64,
-) -> (
-	err: syscalls.InterruptVectorGetError,
-	vector: u64,
-	lapicID: u32,
-) {
-	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
-		return .NoPermission, 0, 0
-	}
-
-	domain := cpu.rrCurrent.domain
-	isInterruptSource: bool
-	{
-		spinlock.rw_read_lock(&domain.lock)
-		defer spinlock.rw_read_unlock(&domain.lock)
-		resource, found := resource_find_exact(domain.resources[:], resourcePhys)
-		isInterruptSource = found && .InterruptSource in resource.overlayFlags
-	}
-	if !isInterruptSource {
-		return .NoPermission, 0, 0
-	}
-
-	{
-		spinlock.lock(&interruptLock)
-		defer spinlock.unlock(&interruptLock)
-
-		for i in 0 ..< MSI_VECTOR_COUNT {
-			v := MSI_VECTOR_FIRST + i
-			if interruptExecutions[v] != nil do continue
-			interruptExecutions[v] = cpu.rrCurrent
-			return .None, u64(v), cpu.apicId
-		}
-	}
-
-	return .NoVectors, 0, 0
-}
-
-syscall_interrupt_wait :: proc "contextless" (
-	vectorRaw: u64,
-) -> (
-	err: syscalls.InterruptWaitError,
-) {
-	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
-		return .NoPermission
-	}
-	if vectorRaw >= 256 do return .InvalidVector
-	if cpu.syscallFrame == nil do return .NoPermission
-
-	execution := cpu.rrCurrent
-	vector := int(vectorRaw)
-
-	{
-		spinlock.lock(&interruptLock)
-		defer spinlock.unlock(&interruptLock)
-
-		if interruptExecutions[vector] != execution {
-			return .NoPermission
-		}
-		if execution.schedulerState == .WaitingOnInterrupt {
-			return .AlreadyWaiting
-		}
-
-		execution.state = cpu.syscallFrame^
-		fxsave_asm(&execution.state.fxsave)
-		execution.state.rax = u64(syscalls.InterruptWaitError.None)
-		execution.state.rdx = 0
-		execution.schedulerState = .WaitingOnInterrupt
-		cpu.rrCurrent = nil
-	}
-
-	lapic_disable_deadline()
-	run_abort()
-}
-
 syscall_prot_domain_create :: proc "contextless" (
+	authorityPtr: ^byte,
 	regionsPtr, count: u64,
 ) -> (
 	err: syscalls.ProtDomainCreateError,
-	handle: u64,
+	handle: int,
 ) {
 	context = gKernelCtx
 
 	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+	if cpu == nil || cpu.currentGrant.domain == nil {
 		return .NoPermission, 0
 	}
+	if authorityPtr == nil do return .NoPermission, 0
 
-	callerDomain := cpu.rrCurrent.domain
+	callerDomain := cpu.currentGrant.domain
+	if !pmm.user_range_accessible(callerDomain.pml4, u64(uintptr(authorityPtr)), 1, write = true) {
+		return .NoPermission, 0
+	}
 
 	if count == 0 do return .InvalidRegionCount, 0
 	regionBytes, overflowed := intrinsics.overflow_mul(count, size_of(syscalls.MemRegion))
@@ -498,24 +425,9 @@ syscall_prot_domain_create :: proc "contextless" (
 		}
 	}
 
-	newPml4 := pmm.alloc_zeroed(shared.PAGE_SIZE)
-	if newPml4 == 0 do return .OutOfMemory, 0
-	if cpuMeltdownVulnerable {
-		pmm.pml4_map_kernel_image(newPml4)
-	} else {
-		pmm.pml4_deep_copy(newPml4, pmm.kernelPML4, true)
-	}
-
-	pd, allocErr := new(ProtectionDomain)
-	if allocErr != nil {
-		pmm.free_pages(newPml4, shared.PAGE_SIZE)
-		return .OutOfMemory, 0
-	}
-
-	pd.pcid = cpuHasPCID ? pcid_alloc() : 0
-	pd.pml4 = newPml4
-	protdomain_register(pd)
-	defer if err != .None do domain_destroy(pd)
+	pd, pdIdx, allocErr := protdomain_new(authorityPtr)
+	if allocErr != {} do return .OutOfMemory, 0
+	defer if err != .None do protdomain_destroy(pdIdx)
 
 	{
 		// pd isn't reachable via any handle yet, so this is uncontended in
@@ -565,18 +477,19 @@ syscall_prot_domain_create :: proc "contextless" (
 			if _, ok := resource_insert(&pd.resources, resource); !ok do return .TrackingFailed, 0
 		}
 	}
-	return .None, protdomain_handle_encode(pd)
+	return .None, pdIdx
 }
 
 syscall_prot_domain_edit :: proc "contextless" (
-	handle, regionsPtr, count, opRaw: u64,
+	handle: int,
+	regionsPtr, count, opRaw: u64,
 ) -> (
 	err: syscalls.ProtDomainEditError,
 ) {
 	context = gKernelCtx
 
 	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+	if cpu == nil || cpu.currentGrant.domain == nil {
 		return .NoPermission
 	}
 
@@ -585,10 +498,13 @@ syscall_prot_domain_edit :: proc "contextless" (
 	}
 	op := syscalls.MemRegionOp(opRaw)
 
-	callerDomain := cpu.rrCurrent.domain
+	callerDomain := cpu.currentGrant.domain
 
-	target := protdomain_resolve_target(handle, callerDomain)
-	if target == nil do return .InvalidHandle
+	spinlock.rw_read_lock(&protDomainPool.rwLock)
+	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
+	target, targetErr := protdomain_resolve_target_RUN_ON_LOCK(handle, callerDomain)
+	if targetErr == .InvalidHandle do return .InvalidHandle
+	if targetErr == .NoPermission do return .NoPermission
 
 	if count == 0 do return .InvalidRegionCount
 	regionBytes, overflowed := intrinsics.overflow_mul(count, size_of(syscalls.MemRegion))
@@ -687,47 +603,23 @@ syscall_prot_domain_edit :: proc "contextless" (
 }
 
 syscall_prot_domain_destroy :: proc "contextless" (
-	handle: u64,
+	handle: int,
 ) -> (
 	err: syscalls.ProtDomainDestroyError,
 ) {
 	context = gKernelCtx
 
 	cpu := gs_read_cpustate()
-	if cpu == nil || cpu.rrCurrent == nil || cpu.rrCurrent.domain == nil {
+	if cpu == nil || cpu.currentGrant.domain == nil {
 		return .InvalidHandle
 	}
 
-	pd := protdomain_resolve_target(handle, cpu.rrCurrent.domain)
-	if pd == nil do return .InvalidHandle
-	if pd == cpu.rrCurrent.domain do return .InvalidHandle
-	domain_destroy(pd)
-	return .None
-}
-
-syscall_execution_start :: proc "contextless" (
-	handle, entryRip, entryRsp, arg0, arg1, tebBase: u64,
-) -> (
-	err: syscalls.ExecutionStartError,
-) {
-	context = gKernelCtx
-
-	domain := protdomain_handle_resolve(handle)
-	if domain == nil do return .InvalidHandle
-	if entryRip == 0 || entryRsp == 0 || entryRsp % 16 != 8 do return .InvalidEntry
-
-
-	savedState := saved_state_fresh(entryRip, entryRsp)
-	savedState.rdi = arg0
-	savedState.rsi = arg1
-
-	exec := execution_create(domain, savedState)
-	if exec == nil do return .OutOfMemory
-
-	exec.tebBase = tebBase
-
-	idx := u32(intrinsics.atomic_add(&rrCpuNext, 1)) % u32(len(cpus))
-	execution_enqueue(exec, &cpus[idx])
-
+	callerDomain := cpu.currentGrant.domain
+	spinlock.rw_read_lock(&protDomainPool.rwLock)
+	pd, targetErr := protdomain_resolve_target_RUN_ON_LOCK(handle, callerDomain)
+	spinlock.rw_read_unlock(&protDomainPool.rwLock)
+	if targetErr != .None do return .InvalidHandle
+	if pd == callerDomain do return .InvalidHandle
+	protdomain_destroy(handle)
 	return .None
 }

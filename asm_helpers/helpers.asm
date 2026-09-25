@@ -1,3 +1,32 @@
+.equ CPU_SELF,0
+.equ CPU_KERNELSTACKTOP,8
+.equ CPU_USERSYSCALLRSP,16
+.equ CPU_USERFX,32
+
+.equ FRAME_CS,144
+
+.equ USER_CS,0x2B
+.equ USER_SS,0x23
+
+.equ SA_RAX,512
+.equ SA_RBX,520
+.equ SA_RCX,528
+.equ SA_RDX,536
+.equ SA_RSI,544
+.equ SA_RDI,552
+.equ SA_RBP,560
+.equ SA_R8,568
+.equ SA_R9,576
+.equ SA_R10,584
+.equ SA_R11,592
+.equ SA_R12,600
+.equ SA_R13,608
+.equ SA_R14,616
+.equ SA_R15,624
+.equ SA_RIP,632
+.equ SA_RSP,640
+.equ SA_RFLAGS,648
+
 .section .data
 .global irq_stub_table
 irq_stub_table:
@@ -158,9 +187,6 @@ serial_write_byte_asm:
     out %al, %dx
     ret
 
-.global int3me
-int3me:
-    int3
 
 .global lgdt_asm
 lgdt_asm:
@@ -288,15 +314,17 @@ interrupt_dispatch:
     push %rbx
     push %rax
 
-    testb $3, 144(%rsp)
+    testb $3, FRAME_CS(%rsp)
     jz 1f
     swapgs
+    fxsave %gs:CPU_USERFX
 1:
     mov %rsp, %rdi
     call exception_handler
 
-    testb $3, 144(%rsp)
+    testb $3, FRAME_CS(%rsp)
     jz 2f
+    fxrstor %gs:CPU_USERFX
     testb $1, kernel_cpu_has_md_clear(%rip)
     jz 4f
     call verw_mitigate_asm
@@ -608,9 +636,12 @@ IRQ_STUB 245
 
 .global rdtsc_asm
 rdtsc_asm:
+    # Serialize timestamp reads at scheduler/accounting boundaries.
+    lfence
     rdtsc
     shlq $32, %rdx
     orq  %rdx, %rax
+    lfence
     ret
 
 .global inb
@@ -627,22 +658,12 @@ outb:
     outb   %al, %dx
     ret
 
-.global sti_asm
-sti_asm:
-    sti
-    ret
-
 .global cpu_pause
 cpu_pause:
     pause
     ret
 
 
-
-.global read_rsp
-read_rsp:
-    mov %rsp, %rax
-    ret
 
 .global read_rbp
 read_rbp:
@@ -660,7 +681,7 @@ gs_write_base:
 
 .global gs_read_cpustate
 gs_read_cpustate:
-    movq %gs:0, %rax
+    movq %gs:CPU_SELF, %rax
     ret
 
 .global syscall_entry
@@ -668,77 +689,20 @@ syscall_entry:
     # Kernel syscall ABI on entry:
     # rax = number, rdi/rsi/rdx/r10/r8/r9 = arguments 1..6.
     swapgs
-    bt $63, %rax
-    jnc guest_syscall_fast
-    jmp slow_entry
+    mov %rsp, %gs:CPU_USERSYSCALLRSP
+    mov %gs:CPU_KERNELSTACKTOP, %rsp
 
-guest_syscall_fast:
-    mov %gs:48, %rbx        # rbx = current Execution*
-    test %rbx, %rbx
-    jz slow_entry            # no execution -> can't check, bail to slow path
-
-    mov 704(%rbx), %rbp     # rbp = its ProtectionDomain*
-    mov 128(%rbp), %r12     # r12 = domain.attachmentEntry
-    test %r12, %r12
-    jz slow_entry            # ptr not set -> bail to slow path
-
-    mov %rcx, %r9            # hand the attachment the original return address --
-                              # he jumps back to it himself, no kernel call needed
-    mov %r12, %rcx           # redirect target for sysret
-    swapgs
-    sysretq
-
-slow_entry:
-    mov %rsp, %gs:16
-    mov %gs:8, %rsp
-
-    push %rax
-    push %rax
     push %rcx
     push %r11
-    sub $688, %rsp
-    mov %rsp, %gs:32
+    sub $8, %rsp
+    push %r9
 
-    mov 704(%rsp), %rax
-    mov %rax, SS_RAX(%rsp)
-    mov %rbx, SS_RBX(%rsp)
-    mov 696(%rsp), %rax
-    mov %rax, SS_RCX(%rsp)
-    mov %rdx, SS_RDX(%rsp)
-    mov %rsi, SS_RSI(%rsp)
-    mov %rdi, SS_RDI(%rsp)
-    mov %rbp, SS_RBP(%rsp)
-    mov %r8, SS_R8(%rsp)
-    mov %r9, SS_R9(%rsp)
-    mov %r10, SS_R10(%rsp)
-    mov 688(%rsp), %rax
-    mov %rax, SS_R11(%rsp)
-    mov %r12, SS_R12(%rsp)
-    mov %r13, SS_R13(%rsp)
-    mov %r14, SS_R14(%rsp)
-    mov %r15, SS_R15(%rsp)
-    mov 696(%rsp), %rax
-    mov %rax, SS_RIP(%rsp)
-    mov $0x2B, %rax
-    mov %rax, SS_CS(%rsp)
-    mov 688(%rsp), %rax
-    mov %rax, SS_RFLAGS(%rsp)
-    mov %gs:16, %rax
-    mov %rax, SS_RSP(%rsp)
-    mov $0x23, %rax
-    mov %rax, SS_SS(%rsp)
-    mov $1, %rax
-    mov %rax, 672(%rsp)
-
-    mov %r9, %rax
     mov %r8,  %r9
     mov %r10, %r8
     mov %rdx, %rcx
     mov %rsi, %rdx
     mov %rdi, %rsi
-    sub $16, %rsp
-    mov %rax, (%rsp)
-    mov 720(%rsp), %rdi
+    mov %rax, %rdi
     call syscall_dispatch
     add $16, %rsp
 
@@ -746,14 +710,18 @@ slow_entry:
     jz 1f
     call verw_mitigate_asm
 1:
-    movq $0, %gs:32
-    add $688, %rsp
     pop %r11
     pop %rcx
-    add $16, %rsp
-    mov %gs:16, %rsp
+    mov %rcx, %r10
+    sar $47, %r10
+    jnz syscall_noncanonical_trampoline
+    mov %gs:CPU_USERSYSCALLRSP, %rsp
     swapgs
     sysretq
+
+syscall_noncanonical_trampoline:
+    call syscall_return_noncanonical
+    ud2
 
 .global syscall_entry_meltdown_safe
 syscall_entry_meltdown_safe:
@@ -767,72 +735,37 @@ syscall_entry_meltdown_safe:
     mov %rsp, %rbx
     add $16, %rsp
 
-    mov %rsp, %gs:16
-    mov %gs:8, %rsp
+    mov %rsp, %gs:CPU_USERSYSCALLRSP
+    mov %gs:CPU_KERNELSTACKTOP, %rsp
 
-    push %rax
     push %rcx
     push %r11
-    mov 0(%rbx), %rcx
-    push %rcx
-    mov 8(%rbx), %rcx
-    sub $688, %rsp
-    mov %rsp, %gs:32
+    push 0(%rbx)
+    push 8(%rbx)
+    sub $8, %rsp
+    push %r9
 
-    mov %rax, SS_RAX(%rsp)
-    mov %rcx, SS_RBX(%rsp)
-    mov 704(%rsp), %rcx
-    mov %rcx, SS_RCX(%rsp)
-    mov %rdx, SS_RDX(%rsp)
-    mov %rsi, SS_RSI(%rsp)
-    mov %rdi, SS_RDI(%rsp)
-    mov %rbp, SS_RBP(%rsp)
-    mov %r8, SS_R8(%rsp)
-    mov %r9, SS_R9(%rsp)
-    mov %r10, SS_R10(%rsp)
-    mov 696(%rsp), %rcx
-    mov %rcx, SS_R11(%rsp)
-    mov %r12, SS_R12(%rsp)
-    mov %r13, SS_R13(%rsp)
-    mov %r14, SS_R14(%rsp)
-    mov %r15, SS_R15(%rsp)
-    mov 704(%rsp), %rcx
-    mov %rcx, SS_RIP(%rsp)
-    mov $0x2B, %rcx
-    mov %rcx, SS_CS(%rsp)
-    mov 696(%rsp), %rcx
-    mov %rcx, SS_RFLAGS(%rsp)
-    mov %gs:16, %rcx
-    mov %rcx, SS_RSP(%rsp)
-    mov $0x23, %rcx
-    mov %rcx, SS_SS(%rsp)
-    mov $1, %rcx
-    mov %rcx, 672(%rsp)
-
-    mov %r9, %rbp
     mov %r8,  %r9
     mov %r10, %r8
     mov %rdx, %rcx
     mov %rsi, %rdx
     mov %rdi, %rsi
     mov %rax, %rdi
-    sub $16, %rsp
-    mov %rbp, (%rsp)
     call syscall_dispatch
     add $16, %rsp
 
-    mov SS_RBX(%rsp), %rbx
     testb $1, kernel_cpu_has_md_clear(%rip)
     jz 1f
     call verw_mitigate_asm
 1:
-    movq $0, %gs:32
-    add $688, %rsp
+    pop %rbx
     pop %r10
     pop %r11
     pop %rcx
-    add $8, %rsp
-    mov %gs:16, %rsp
+    mov %rcx, %r9
+    sar $47, %r9
+    jnz syscall_noncanonical_trampoline
+    mov %gs:CPU_USERSYSCALLRSP, %rsp
     mov %r10, %cr3
     swapgs
     sysretq
@@ -840,56 +773,77 @@ syscall_entry_meltdown_safe:
 
 .global cpu_idle_loop
 cpu_idle_loop:
-    sti
-    sub $8, %rsp
-    call run_next_execution
-    add $8, %rsp
-    cli
+.Lcpu_next:
+	cli
+
+	sub $8, %rsp
+	call cpu_idle_mwait_address
+	add $8, %rsp
+
+	test %rax, %rax
+	jz .Lhlt
+
+	xor %edx, %edx
+	xor %ecx, %ecx
+	monitor
+
+	sub $8, %rsp
+	call cpu_next_grant
+	add $8, %rsp
     test %al, %al
-    jnz cpu_idle_loop
-    sub $8, %rsp
-    call cpu_prepare_sleep
+    jnz .Lcpu_next
+
+	sub $8, %rsp
+	call cpu_idle_mwait_hint
     add $8, %rsp
-    test %al, %al
-    jz cpu_idle_loop
-    sti
-    mov kernel_mwait_hint(%rip), %eax
+
+    test %eax, %eax
+    jz .Lhlt
+
+    mov %eax, %eax
     xor %ecx, %ecx
+    sti
     mwait
-    sub $8, %rsp
-    call cpu_clear_sleeping
-    add $8, %rsp
-    jmp cpu_idle_loop
+    jmp .Lcpu_next
+
+.Lhlt:
+    sti
+    hlt
+    jmp .Lcpu_next
+
+.global run_resume
+run_resume:
+    cli
+    testb $1, kernel_cpu_has_md_clear(%rip)
+    jz 1f
+    call verw_mitigate_asm
+1:
+    fxrstor (%rsi)
+    pushq $USER_SS
+    pushq SA_RSP(%rsi)
+    pushq SA_RFLAGS(%rsi)
+    pushq $USER_CS
+    pushq SA_RIP(%rsi)
+    mov %rdi, %cr3
+    mov SA_RAX(%rsi), %rax
+    mov SA_RBX(%rsi), %rbx
+    mov SA_RCX(%rsi), %rcx
+    mov SA_RDX(%rsi), %rdx
+    mov SA_RDI(%rsi), %rdi
+    mov SA_RBP(%rsi), %rbp
+    mov SA_R8(%rsi), %r8
+    mov SA_R9(%rsi), %r9
+    mov SA_R10(%rsi), %r10
+    mov SA_R11(%rsi), %r11
+    mov SA_R12(%rsi), %r12
+    mov SA_R13(%rsi), %r13
+    mov SA_R14(%rsi), %r14
+    mov SA_R15(%rsi), %r15
+    mov SA_RSI(%rsi), %rsi
+    swapgs
+    iretq
 
 
-.equ SS_RAX,0
-.equ SS_RBX,8
-.equ SS_RCX,16
-.equ SS_RDX,24
-.equ SS_RSI,32
-.equ SS_RDI,40
-.equ SS_RBP,48
-.equ SS_R8,56
-.equ SS_R9,64
-.equ SS_R10,72
-.equ SS_R11,80
-.equ SS_R12,88
-.equ SS_R13,96
-.equ SS_R14,104
-.equ SS_R15,112
-.equ SS_RIP,120
-.equ SS_CS,128
-.equ SS_RFLAGS,136
-.equ SS_RSP,144
-.equ SS_SS,152
-.equ SS_FXSAVE,160
-
-.equ CPU_KERNELSTACKTOP,8
-
-.global fxsave_asm
-fxsave_asm:
-    fxsave (%rdi)
-    ret
 
 .global mmio_read_u8
 mmio_read_u8:
@@ -921,14 +875,6 @@ mmio_write_u32:
     movl %esi, (%rdi)
     ret
 
-.global monitor_asm
-monitor_asm:
-    mov %rdi, %rax
-    xor %ecx, %ecx
-    xor %edx, %edx
-    monitor
-    ret
-
 .global lock_asm
 .type lock_asm, @function
 lock_asm:
@@ -947,48 +893,6 @@ lock_asm:
 unlock_asm:
     movl $0, (%rdi)
     ret
-
-.global run_domain
-run_domain:
-    cli
-    swapgs
-
-    mov %rdi, %rbx
-    mov %rdx, %rsp
-    mov %rsi, %r10
-
-    lea SS_FXSAVE(%rbx), %rax
-    fxrstor (%rax)
-
-    push SS_SS(%rbx)
-    push SS_RSP(%rbx)
-    push SS_RFLAGS(%rbx)
-    push SS_CS(%rbx)
-    push SS_RIP(%rbx)
-    push SS_R10(%rbx)
-
-    mov SS_RAX(%rbx), %rax
-    mov SS_RCX(%rbx), %rcx
-    mov SS_RDX(%rbx), %rdx
-    mov SS_RSI(%rbx), %rsi
-    mov SS_RDI(%rbx), %rdi
-    mov SS_RBP(%rbx), %rbp
-    mov SS_R8(%rbx),  %r8
-    mov SS_R9(%rbx),  %r9
-    mov SS_R11(%rbx), %r11
-    mov SS_R12(%rbx), %r12
-    mov SS_R13(%rbx), %r13
-    mov SS_R14(%rbx), %r14
-    mov SS_R15(%rbx), %r15
-    mov SS_RBX(%rbx), %rbx
-
-    mov %r10, %cr3
-    pop %r10
-    testb $1, kernel_cpu_has_md_clear(%rip)
-    jz 1f
-    call verw_mitigate_asm
-1:
-    iretq
 
 .global run_abort
 run_abort:

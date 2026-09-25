@@ -1,9 +1,6 @@
 package kernel
 import ah "../asm_helpers"
-import "../lib/spinlock"
 import "base:intrinsics"
-import "base:runtime"
-import "pmm"
 import "print"
 // SDM Vol 3A §6.14.1 Figure 6-8: 16-byte 64-bit IDT gate descriptor layout.
 // selector must be KERNEL_CS (0x08). ist=0 → use TSS.RSP0; ist=1..7 → use TSS.IST[ist-1].
@@ -17,11 +14,17 @@ IdtEntry :: struct #packed {
 	offsetHigh: u32,
 	reserved:   u32,
 }
+#assert(size_of(IdtEntry) == 16)
+#assert(offset_of(IdtEntry, offsetLow) == 0)
+#assert(offset_of(IdtEntry, selector) == 2)
+#assert(offset_of(IdtEntry, ist) == 4)
+#assert(offset_of(IdtEntry, flags) == 5)
+#assert(offset_of(IdtEntry, offsetMid) == 6)
+#assert(offset_of(IdtEntry, offsetHigh) == 8)
+#assert(offset_of(IdtEntry, reserved) == 12)
 
 idt: [256]IdtEntry
 GIDTDescriptor: ah.X86TableDescriptor
-interruptLock: spinlock.Spinlock
-interruptExecutions: [256]^Execution
 
 idt_init :: proc() {
 	for isrTable, i in ah.isr_table {
@@ -117,6 +120,14 @@ InterruptFrame :: struct #packed {
 	rsp:                u64,
 	ss:                 u64,
 }
+#assert(size_of(InterruptFrame) == 176)
+#assert(offset_of(InterruptFrame, interruptNumber) == 120)
+#assert(offset_of(InterruptFrame, error_code) == 128)
+#assert(offset_of(InterruptFrame, rip) == 136)
+#assert(offset_of(InterruptFrame, cs) == 144)
+#assert(offset_of(InterruptFrame, rflags) == 152)
+#assert(offset_of(InterruptFrame, rsp) == 160)
+#assert(offset_of(InterruptFrame, ss) == 168)
 
 interrupt_frame_from_user :: #force_inline proc "contextless" (frame: ^InterruptFrame) -> bool {
 	return (frame.cs & 3) == 3
@@ -131,6 +142,12 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 	}
 
 	context = gKernelCtx
+	if frame.interruptNumber == VECTOR_APIC_TIMER {
+		lapic_send_eoi()
+		if userMode do grant_preempt(gs_read_cpustate(), frame)
+		return
+	}
+
 	if frame.interruptNumber >= 32 {
 		irq_handler(frame)
 		if userMode do restore_current_domain_cr3()
@@ -146,13 +163,14 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		print.serial_write_hex(ah.read_cr2())
 		print.serial_write(" err=")
 		print.serial_write_hex(frame.error_code)
-		if cpu := gs_read_cpustate();
-		   cpu != nil && cpu.rrCurrent != nil && cpu.rrCurrent.domain != nil {
+		if cpu := gs_read_cpustate(); cpu != nil && cpu.currentGrant.domain != nil {
 			print.serial_write(" domain.pml4=")
-			print.serial_write_hex(cpu.rrCurrent.domain.pml4)
+			print.serial_write_hex(cpu.currentGrant.domain.pml4)
 		}
 		print.serial_writeln("")
-		exec_kill_current()
+		if cpu := gs_read_cpustate(); cpu != nil do grant_stop_current(cpu, .Exit)
+
+		run_abort()
 	}
 
 	name := exceptionNames[frame.interruptNumber]
@@ -229,10 +247,7 @@ print_reg :: proc "contextless" (name: string, val: u64) {
 }
 irq_handler :: proc(frame: ^InterruptFrame) {
 	v := int(frame.interruptNumber)
-	reschedule := false
-	vectorValueSwitch: switch v {
-	case VECTOR_APIC_TIMER:
-		reschedule = timer_tick(frame)
+	switch v {
 	case VECTOR_APIC_ERROR:
 		print.serial_writeln("lapic: error fired")
 	case VECTOR_APIC_THERMAL:
@@ -246,123 +261,11 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 			ah.invpcid_asm(1, u64(pending))
 			intrinsics.atomic_add(&tlbShootdown.acked, 1)
 		}
-
-		if ipiCpu := gs_read_cpustate(); ipiCpu != nil {
-			cur := ipiCpu.rrCurrent
-			if cur != nil && cur.domain.killed && interrupt_frame_from_user(frame) {
-				ipiCpu.rrCurrent = nil
-				execution_release(cur)
-				reschedule = true
-			}
-		}
 	case:
-		if v >= MSI_VECTOR_FIRST && v < MSI_VECTOR_FIRST + MSI_VECTOR_COUNT {
-			reschedule = interrupt_wake(v, frame)
-			break vectorValueSwitch
-		}
 		print.serial_write("lapic: unhandled irq=")
 		print.serial_write_hex(u64(v))
 		print.serial_writeln("")
 	}
 
 	lapic_send_eoi()
-	if reschedule do run_abort()
-}
-
-save_execution_from_interrupt :: proc(execution: ^Execution, frame: ^InterruptFrame) {
-	state := &execution.state
-	state.rax = frame.rax
-	state.rbx = frame.rbx
-	state.rcx = frame.rcx
-	state.rdx = frame.rdx
-	state.rsi = frame.rsi
-	state.rdi = frame.rdi
-	state.rbp = frame.rbp
-	state.r8 = frame.r8
-	state.r9 = frame.r9
-	state.r10 = frame.r10
-	state.r11 = frame.r11
-	state.r12 = frame.r12
-	state.r13 = frame.r13
-	state.r14 = frame.r14
-	state.r15 = frame.r15
-	state.rip = frame.rip
-	state.cs = frame.cs
-	state.rflags = frame.rflags
-	state.rsp = frame.rsp
-	state.ss = frame.ss
-	fxsave_asm(&state.fxsave)
-	state.valid = true
-}
-
-interrupt_wake :: proc(vector: int, frame: ^InterruptFrame) -> (reschedule: bool) {
-	cpu := gs_read_cpustate()
-	if cpu == nil do return false
-
-	{
-		spinlock.lock(&interruptLock)
-		defer spinlock.unlock(&interruptLock)
-
-		target := interruptExecutions[vector]
-		when ODIN_DEBUG {
-			assert(target != nil)
-			assert(target.schedulerState == .WaitingOnInterrupt)
-		}
-		if target == nil || target.schedulerState != .WaitingOnInterrupt do return false
-
-		current := cpu.rrCurrent
-		if current != nil && interrupt_frame_from_user(frame) {
-			save_execution_from_interrupt(current, frame)
-			current.schedulerState = .Runnable
-			cpu.rrCurrent = nil
-			execution_enqueue(current, cpu)
-			reschedule = true
-		}
-
-		target.schedulerState = .Runnable
-		execution_enqueue_front(target, cpu)
-	}
-
-	return reschedule
-}
-
-timer_tick :: proc(frame: ^InterruptFrame) -> (reschedule: bool) {
-	cpu := gs_read_cpustate()
-	if cpu == nil do return false
-
-	current := cpu.rrCurrent
-	if current == nil || !interrupt_frame_from_user(frame) do return false
-
-	save_execution_from_interrupt(current, frame)
-	current.schedulerState = .Runnable
-	cpu.rrCurrent = nil
-	execution_enqueue(current, cpu)
-	return true
-}
-
-interrupt_release_execution :: proc "contextless" (execution: ^Execution) -> (found: bool) {
-	if execution == nil do return false
-
-	spinlock.lock(&interruptLock)
-	defer spinlock.unlock(&interruptLock)
-
-	for vector in 0 ..< len(interruptExecutions) {
-		if interruptExecutions[vector] == execution {
-			interruptExecutions[vector] = nil
-			found = true
-		}
-	}
-	return found
-}
-
-//should not return
-exec_kill_current :: proc() {
-	cpu := gs_read_cpustate()
-	exec := cpu.rrCurrent
-	if exec == nil do return
-
-	cpu.rrCurrent = nil
-	execution_release(exec)
-	run_abort()
-
 }

@@ -121,7 +121,13 @@ pe_name_hash :: proc(s: string) -> u64 {
 	return hash.fnv64a(transmute([]u8)s)
 }
 
-parse_pe :: proc(data: []u8) -> (image: PeImage, sections: [dynamic; MAX_SECTIONS]PeSection, err: PeError) {
+parse_pe :: proc(
+	data: []u8,
+) -> (
+	image: PeImage,
+	sections: [dynamic; MAX_SECTIONS]PeSection,
+	err: PeError,
+) {
 	defer if err != .None do delete(image.relocations)
 	defer if err != .None do delete(image.regions)
 
@@ -325,7 +331,7 @@ parse_pe :: proc(data: []u8) -> (image: PeImage, sections: [dynamic; MAX_SECTION
 		sizeOfOptionalHeader,
 		.Export,
 	)
-	defer if err != nil do delete(image.exports)
+	defer if err != {} do delete(image.exports)
 
 	if exportSize > 0 {
 		dirOffset, dirOk := rva_to_file_offset(sections[:], exportRva)
@@ -357,7 +363,10 @@ parse_pe :: proc(data: []u8) -> (image: PeImage, sections: [dynamic; MAX_SECTION
 			if !ok2 || !has_range(data, ordOff, 2) do return image, sections, .InvalidExportTable
 			ordinal := read_u16(data, ordOff)
 
-			funcAddr, funcAddrOverflow := intrinsics.overflow_add(addressOfFunctionsRva, u32(ordinal) * 4)
+			funcAddr, funcAddrOverflow := intrinsics.overflow_add(
+				addressOfFunctionsRva,
+				u32(ordinal) * 4,
+			)
 			if funcAddrOverflow do return image, sections, .InvalidExportTable
 			funcOff, ok3 := rva_to_file_offset(sections[:], funcAddr)
 			if !ok3 || !has_range(data, funcOff, 4) do return image, sections, .InvalidExportTable
@@ -381,7 +390,13 @@ region_flags_for :: proc(characteristics: u32) -> (flags: lmem.PageFlags) {
 	return flags
 }
 
-rva_to_file_offset :: proc "contextless" (sections: []PeSection, rva: u32) -> (offset: u64, ok: bool) {
+rva_to_file_offset :: proc "contextless" (
+	sections: []PeSection,
+	rva: u32,
+) -> (
+	offset: u64,
+	ok: bool,
+) {
 	for section in sections {
 		start := section.virtualAddress
 		size := section.virtualSize
