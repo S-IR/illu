@@ -28,6 +28,7 @@ lapic_init :: proc() {
 
 	print.kensure(tscEnd > tscStart, "TSC did not advance during PIT calibration")
 	tscTicksPerMs = (tscEnd - tscStart) / calibrationMs
+	print.kensure(tscTicksPerMs * GRANT_SLICE_MS < u64(1) << 40, "lapic: tsc too fast for grant accounting")
 
 	lapic_enable_percpu()
 
@@ -41,8 +42,10 @@ lapic_enable_percpu :: proc() {
 	raw := ah.rdmsr_asm(MSR_IA32_APIC_BASE)
 	flags := transmute(ApicBaseFlags)raw
 	print.kensure(.EN in flags, "xapic not globally enabled, cannot upgrade to x2apic")
-	ah.wrmsr_asm(MSR_IA32_APIC_BASE, (raw & MSR_APIC_BASE_MASK) | 0x800)
-	ah.wrmsr_asm(MSR_IA32_APIC_BASE, (raw & MSR_APIC_BASE_MASK) | 0xC00)
+	if .EXTD not_in flags {
+		ah.wrmsr_asm(MSR_IA32_APIC_BASE, (raw & MSR_APIC_BASE_MASK) | 0x800)
+		ah.wrmsr_asm(MSR_IA32_APIC_BASE, (raw & MSR_APIC_BASE_MASK) | 0xC00)
+	}
 	VECTOR_APIC_SPURIOUS :: 0xFF
 
 	svr := SvrRegister {

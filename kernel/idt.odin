@@ -1,5 +1,6 @@
 package kernel
 import ah "../asm_helpers"
+import "../lib/userschedule"
 import "base:intrinsics"
 import "print"
 // SDM Vol 3A §6.14.1 Figure 6-8: 16-byte 64-bit IDT gate descriptor layout.
@@ -26,12 +27,21 @@ IdtEntry :: struct #packed {
 idt: [256]IdtEntry
 GIDTDescriptor: ah.X86TableDescriptor
 
+VECTOR_NMI :: 2
+VECTOR_DOUBLE_FAULT :: 8
+VECTOR_MACHINE_CHECK :: 18
+
 idt_init :: proc() {
 	for isrTable, i in ah.isr_table {
-		idt_set_entry(i, u64(isrTable), ist = 1)
+		ist: u8 = 0
+		switch i {
+		case VECTOR_NMI, VECTOR_DOUBLE_FAULT, VECTOR_MACHINE_CHECK:
+			ist = 1
+		}
+		idt_set_entry(i, u64(isrTable), ist)
 	}
 	for irqTable, i in ah.irq_stub_table {
-		idt_set_entry(32 + i, u64(irqTable), ist = 1)
+		idt_set_entry(32 + i, u64(irqTable))
 	}
 
 	GIDTDescriptor.base = u64(uintptr(&idt))
@@ -108,6 +118,7 @@ exceptionNames := [32]string {
 // For error-code exceptions, CPU also pushes error_code before RIP.
 // Our stubs push vector_number then jump to interrupt_dispatch which pushes all GPRs.
 InterruptFrame :: struct #packed {
+	fx:                 [512]u8,
 	rax, rbx, rcx, rdx: u64,
 	rsi, rdi, rbp:      u64,
 	r8, r9, r10, r11:   u64,
@@ -120,14 +131,20 @@ InterruptFrame :: struct #packed {
 	rsp:                u64,
 	ss:                 u64,
 }
-#assert(size_of(InterruptFrame) == 176)
-#assert(offset_of(InterruptFrame, interruptNumber) == 120)
-#assert(offset_of(InterruptFrame, error_code) == 128)
-#assert(offset_of(InterruptFrame, rip) == 136)
-#assert(offset_of(InterruptFrame, cs) == 144)
-#assert(offset_of(InterruptFrame, rflags) == 152)
-#assert(offset_of(InterruptFrame, rsp) == 160)
-#assert(offset_of(InterruptFrame, ss) == 168)
+#assert(size_of(InterruptFrame) == 688)
+#assert(size_of(InterruptFrame) % 16 == 0)
+#assert(offset_of(InterruptFrame, rax) == 512)
+#assert(offset_of(InterruptFrame, r15) == 624)
+#assert(offset_of(InterruptFrame, interruptNumber) == 632)
+#assert(offset_of(InterruptFrame, error_code) == 640)
+#assert(offset_of(InterruptFrame, rip) == 648)
+#assert(offset_of(InterruptFrame, cs) == 656)
+#assert(offset_of(InterruptFrame, rflags) == 664)
+#assert(offset_of(InterruptFrame, rsp) == 672)
+#assert(offset_of(InterruptFrame, ss) == 680)
+#assert(offset_of(InterruptFrame, rax) == offset_of(userschedule.UserSaveArea, rax))
+#assert(offset_of(InterruptFrame, r15) == offset_of(userschedule.UserSaveArea, r15))
+#assert(userschedule.SAVE_AREA_FX_RESERVED == 464)
 
 interrupt_frame_from_user :: #force_inline proc "contextless" (frame: ^InterruptFrame) -> bool {
 	return (frame.cs & 3) == 3
@@ -152,40 +169,30 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		irq_handler(frame)
 		if userMode {
 			cpu := gs_read_cpustate()
-			if intrinsics.atomic_load(&cpu.currentGrant.weight) == 0 {
-				grant_stop_current(cpu)
-				run_abort()
-			}
-			restore_current_domain_cr3()
+			if intrinsics.atomic_load(&cpu.currentGrant.weight) == 0 do grant_exit()
+			domain_switch_cr3(cpu.currentGrant.domain)
 		}
 		return
 	}
 	if !userMode && user_access_faulted(frame) {
-		kernel_switch_cr3()
 		print.serial_write("domain fault: save area ")
 		print.serial_write(exceptionNames[frame.interruptNumber])
 		print.serial_writeln(", grant dropped")
-		grant_exit_current(gs_read_cpustate())
-		run_abort()
+		grant_exit()
 	}
 	if userMode {
-		name := exceptionNames[frame.interruptNumber]
 		print.serial_write("domain fault: ")
-		print.serial_write(name)
+		print.serial_write(exceptionNames[frame.interruptNumber])
 		print.serial_write(" at rip=")
 		print.serial_write_hex(frame.rip)
 		print.serial_write(" cr2=")
 		print.serial_write_hex(ah.read_cr2())
 		print.serial_write(" err=")
 		print.serial_write_hex(frame.error_code)
-		if cpu := gs_read_cpustate(); cpu != nil && cpu.currentGrant.domain != nil {
-			print.serial_write(" domain.pml4=")
-			print.serial_write_hex(cpu.currentGrant.domain.pml4)
-		}
+		print.serial_write(" domain.pml4=")
+		print.serial_write_hex(gs_read_cpustate().currentGrant.domain.pml4)
 		print.serial_writeln("")
-		if cpu := gs_read_cpustate(); cpu != nil && cpu.currentGrant.domain != nil do grant_exit_current(cpu)
-
-		run_abort()
+		grant_exit()
 	}
 
 	name := exceptionNames[frame.interruptNumber]
@@ -279,4 +286,13 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 	}
 
 	lapic_send_eoi()
+}
+
+user_access_faulted :: proc "contextless" (frame: ^InterruptFrame) -> bool {
+	VECTOR_GENERAL_PROTECTION :: 13
+	VECTOR_PAGE_FAULT :: 14
+	if frame.interruptNumber != VECTOR_GENERAL_PROTECTION && frame.interruptNumber != VECTOR_PAGE_FAULT do return false
+	begin := u64(uintptr(rawptr(user_access_begin)))
+	end := u64(uintptr(rawptr(user_access_end)))
+	return frame.rip >= begin && frame.rip < end
 }

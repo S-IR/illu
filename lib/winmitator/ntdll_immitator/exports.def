@@ -16,3 +16,4 @@ EXPORTS
     strcpy
     strlen
     unimplemented_stub
+    user_resume

@@ -1,40 +1,17 @@
+.include "lib/syscalls/user_resume.inc"
+
 .equ CPU_SELF,0
 .equ CPU_KERNELSTACKTOP,8
 .equ CPU_USERSYSCALLRSP,16
-.equ CPU_USERFX,32
 
-.equ FRAME_RIP,136
-.equ FRAME_CS,144
-.equ FRAME_RFLAGS,152
-.equ FRAME_RSP,160
-.equ FRAME_GPR_COUNT,15
-.equ FX_QWORDS,64
+.equ FRAME_FX_SIZE,512
+.equ FRAME_RIP,648
+.equ FRAME_CS,656
+.equ FRAME_RFLAGS,664
+.equ FRAME_RSP,672
+.equ FRAME_COPY_QWORDS,79
 
-.equ USER_RFLAGS_MASK,0xCD5
 .equ USER_RFLAGS_FORCED,0x202
-
-.equ USER_CS,0x2B
-.equ USER_SS,0x23
-
-.equ SA_RAX,512
-.equ SA_RBX,520
-.equ SA_RCX,528
-.equ SA_RDX,536
-.equ SA_RSI,544
-.equ SA_RDI,552
-.equ SA_RBP,560
-.equ SA_R8,568
-.equ SA_R9,576
-.equ SA_R10,584
-.equ SA_R11,592
-.equ SA_R12,600
-.equ SA_R13,608
-.equ SA_R14,616
-.equ SA_R15,624
-.equ SA_RIP,632
-.equ SA_RSP,640
-.equ SA_RFLAGS,648
-.equ SA_GSBASE,656
 .equ MSR_KERNEL_GS_BASE,0xC0000102
 
 .section .data
@@ -308,6 +285,7 @@ IRQ_STUB 62
 IRQ_STUB 63
 
 interrupt_dispatch:
+    cld
     push %r15
     push %r14
     push %r13
@@ -323,24 +301,26 @@ interrupt_dispatch:
     push %rcx
     push %rbx
     push %rax
+    sub $FRAME_FX_SIZE, %rsp
 
     testb $3, FRAME_CS(%rsp)
     jz 1f
     swapgs
-    fxsave %gs:CPU_USERFX
 1:
+    fxsave (%rsp)
     mov %rsp, %rdi
     call exception_handler
+    fxrstor (%rsp)
 
     testb $3, FRAME_CS(%rsp)
     jz 2f
-    fxrstor %gs:CPU_USERFX
     testb $1, kernel_cpu_has_md_clear(%rip)
     jz 4f
     call verw_mitigate_asm
 4:
     swapgs
 2:
+    add $FRAME_FX_SIZE, %rsp
     pop %rax
     pop %rbx
     pop %rcx
@@ -772,71 +752,88 @@ syscall_entry_meltdown_safe:
     sysretq
 
 
-.global cpu_idle_loop
-cpu_idle_loop:
-.Lcpu_next:
-	cli
+.global cpu_cli
+cpu_cli:
+    cli
+    ret
 
-	sub $8, %rsp
-	call cpu_idle_mwait_address
-	add $8, %rsp
+.global cpu_monitor
+cpu_monitor:
+    mov %rdi, %rax
+    xor %ecx, %ecx
+    xor %edx, %edx
+    monitor
+    ret
 
-	test %rax, %rax
-	jz .Lhlt
-
-	xor %edx, %edx
-	xor %ecx, %ecx
-	monitor
-
-	sub $8, %rsp
-	call cpu_next_grant
-	add $8, %rsp
-    test %al, %al
-    jnz .Lcpu_next
-
-	sub $8, %rsp
-	call cpu_idle_mwait_hint
-    add $8, %rsp
-
-    test %eax, %eax
-    jz .Lhlt
-
-    mov %eax, %eax
+.global cpu_mwait
+cpu_mwait:
+    mov %edi, %eax
     xor %ecx, %ecx
     sti
     mwait
-    jmp .Lcpu_next
+    ret
 
-.Lhlt:
+.global cpu_halt
+cpu_halt:
     sti
     hlt
-    jmp .Lcpu_next
+    ret
 
 .global run_resume
 run_resume:
     cli
+    fxrstor kernel_clean_fx(%rip)
+    mov %rdi, %cr3
+    mov %rsi, %r8
+    mov %rdx, %r9
+    mov $MSR_KERNEL_GS_BASE, %ecx
+    xor %eax, %eax
+    xor %edx, %edx
+    wrmsr
     testb $1, kernel_cpu_has_md_clear(%rip)
     jz 1f
     call verw_mitigate_asm
 1:
-    mov %rdi, %cr3
-    jmp .Lresume_load
+    pushq $USER_SS
+    pushq $0
+    pushq $USER_RFLAGS_FORCED
+    pushq $USER_CS
+    push %r8
+    mov $RESUME_REASON, %edi
+    mov %r9, %rsi
+    xor %eax, %eax
+    xor %ebx, %ebx
+    xor %ecx, %ecx
+    xor %edx, %edx
+    xor %ebp, %ebp
+    xor %r8d, %r8d
+    xor %r9d, %r9d
+    xor %r10d, %r10d
+    xor %r11d, %r11d
+    xor %r12d, %r12d
+    xor %r13d, %r13d
+    xor %r14d, %r14d
+    xor %r15d, %r15d
+    swapgs
+    iretq
 
 .global user_access_begin
 user_access_begin:
 
 .global user_save_area_store
 user_save_area_store:
-    # rdi = save area, rsi = interrupt frame, rdx = saved user fx
+    # rdi = save area, rsi = interrupt frame
+    testq $SA_CONTROL_RESTORING, SA_CONTROL(%rdi)
+    jnz 1f
     mov %rdi, %r8
     mov %rsi, %r9
-    mov %rdx, %rsi
-    mov $FX_QWORDS, %ecx
+    mov $FRAME_COPY_QWORDS, %ecx
     cld
     rep movsq
-    mov %r9, %rsi
-    mov $FRAME_GPR_COUNT, %ecx
-    rep movsq
+    lea SA_FX_RESERVED(%r8), %rdi
+    mov $SA_FX_RESERVED_QWORDS, %ecx
+    xor %eax, %eax
+    rep stosq
     mov FRAME_RIP(%r9), %rax
     mov %rax, SA_RIP(%r8)
     mov FRAME_RSP(%r9), %rax
@@ -848,50 +845,12 @@ user_save_area_store:
     shl $32, %rdx
     or %rdx, %rax
     mov %rax, SA_GSBASE(%r8)
+    orq $SA_CONTROL_RESTORING, SA_CONTROL(%r8)
+1:
     ret
 
-.Lresume_load:
-    fxrstor (%rsi)
-    mov SA_GSBASE(%rsi), %rax
-    mov %rax, %rdx
-    shr $32, %rdx
-    mov $MSR_KERNEL_GS_BASE, %ecx
-    wrmsr
-    mov SA_RIP(%rsi), %rax
-    mov %rax, %rcx
-    sar $47, %rcx
-    jz 2f
-    ud2
-2:
-    pushq $USER_SS
-    pushq SA_RSP(%rsi)
-    mov SA_RFLAGS(%rsi), %rcx
-    and $USER_RFLAGS_MASK, %rcx
-    or $USER_RFLAGS_FORCED, %rcx
-    push %rcx
-    pushq $USER_CS
-    push %rax
-    mov SA_RAX(%rsi), %rax
-    mov SA_RBX(%rsi), %rbx
-    mov SA_RCX(%rsi), %rcx
-    mov SA_RDX(%rsi), %rdx
-    mov SA_RDI(%rsi), %rdi
-    mov SA_RBP(%rsi), %rbp
-    mov SA_R8(%rsi), %r8
-    mov SA_R9(%rsi), %r9
-    mov SA_R10(%rsi), %r10
-    mov SA_R11(%rsi), %r11
-    mov SA_R12(%rsi), %r12
-    mov SA_R13(%rsi), %r13
-    mov SA_R14(%rsi), %r14
-    mov SA_R15(%rsi), %r15
-    mov SA_RSI(%rsi), %rsi
 .global user_access_end
 user_access_end:
-    swapgs
-    iretq
-
-
 
 .global mmio_read_u8
 mmio_read_u8:
@@ -947,4 +906,4 @@ run_abort:
     cli
     mov %gs:CPU_KERNELSTACKTOP, %rsp
     sub $8, %rsp
-    jmp cpu_idle_loop
+    jmp grant_loop

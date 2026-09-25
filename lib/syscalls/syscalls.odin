@@ -17,6 +17,7 @@ ILLU_SYSCALL_BIT :: u64(1) << 63
 SchedulerEnterReason :: enum u64 {
 	Start,
 	Fault,
+	Resume,
 }
 
 
@@ -102,6 +103,7 @@ GrantError :: enum u64 {
 	NotOnCpu,
 	InsufficientWeight,
 	OutOfMemory,
+	InvalidEntry,
 }
 ProtDomainDestroyError :: enum u64 {
 	None,
@@ -122,9 +124,10 @@ when !ODIN_TEST {
 			syscall_prot_domain_create :: proc(authorityPtr, regionsPtr, count: u64) -> (err: u64, handle: int) ---
 			syscall_prot_domain_edit :: proc(handle: int, regionsPtr, count, op: u64) -> (err: u64) ---
 			syscall_prot_domain_destroy :: proc(handle: int) -> (err: u64) ---
-			syscall_grant_spawn :: proc(handle: int, cpu: u32, saveArea: u64, weight: u64) -> (err: u64) ---
-			syscall_grant_edit :: proc(handle: int, cpu: u32, weight: u64) -> (err: u64) ---
+			syscall_grant_spawn :: proc(handle: int, cpu: u64, saveArea: u64, weight: u64, entry: u64) -> (err: u64) ---
+			syscall_grant_edit :: proc(handle: int, cpu: u64, weight: u64) -> (err: u64) ---
 			cpu_current_index :: proc() -> u32 ---
+			user_resume :: proc() ---
 		}
 
 		syscall_grant_spawn_userspace :: proc "contextless" (
@@ -132,8 +135,11 @@ when !ODIN_TEST {
 			cpu: u32,
 			saveArea: ^userschedule.UserSaveArea,
 			weight: u64,
+			entry: u64,
 		) -> GrantError {
-			return GrantError(syscall_grant_spawn(handle, cpu, u64(uintptr(saveArea)), weight))
+			return GrantError(
+				syscall_grant_spawn(handle, u64(cpu), u64(uintptr(saveArea)), weight, entry),
+			)
 		}
 
 		syscall_grant_edit_userspace :: proc "contextless" (
@@ -141,11 +147,11 @@ when !ODIN_TEST {
 			cpu: u32,
 			weight: u64,
 		) -> GrantError {
-			return GrantError(syscall_grant_edit(handle, cpu, weight))
+			return GrantError(syscall_grant_edit(handle, u64(cpu), weight))
 		}
 
 		grant_exit :: proc "contextless" () -> ! {
-			syscall_grant_edit(max(int), cpu_current_index(), 0)
+			syscall_grant_edit(max(int), u64(cpu_current_index()), 0)
 			intrinsics.trap()
 		}
 

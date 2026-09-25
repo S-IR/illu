@@ -17,8 +17,8 @@ PAGE_MMIO :: lmem.PageFlags{.Present, .Write, .PWT, .PCD}
 kernelPML4: u64
 
 kernelImgGlobal: elf.ElfImage
-trampolineRegionBase: u64
-trampolineRegionSize: u64
+istStacksRegionBase: u64
+istStacksRegionSize: u64
 kernelStacksRegionBase: u64
 kernelStacksRegionStride: u64
 kernelStacksRegionCount: u64
@@ -49,6 +49,10 @@ paging_init :: proc(
 	ah.write_cr3(kernelPML4)
 }
 
+identity_map_end :: proc "contextless" () -> u64 {
+	return state.totalPages * shared.PAGE_SIZE
+}
+
 pml4_map_kernel_image :: proc(dstPML4Phys: u64, bootstrap := false) {
 	for seg in kernelImgGlobal.segments {
 		flags := lmem.PageFlags{.Present, .NX}
@@ -62,9 +66,9 @@ pml4_map_kernel_image :: proc(dstPML4Phys: u64, bootstrap := false) {
 		}
 	}
 
-	if trampolineRegionSize > 0 {
-		phys := addr_round_down_to_page(trampolineRegionBase)
-		end := addr_round_up_to_page(trampolineRegionBase + trampolineRegionSize)
+	if istStacksRegionSize > 0 {
+		phys := addr_round_down_to_page(istStacksRegionBase)
+		end := addr_round_up_to_page(istStacksRegionBase + istStacksRegionSize)
 		for phys < end {
 			map_page(dstPML4Phys, phys, phys, ._4KB, {.Present, .Write, .NX}, bootstrap)
 			phys += shared.PAGE_SIZE
@@ -151,6 +155,25 @@ map_page :: proc "contextless" (
 	ah.invlpg_asm(logical)
 }
 
+
+leaf_entry :: proc "contextless" (pml4Idx, virt: u64) -> u64 {
+	pml4 := ([^]u64)(uintptr(pml4Idx))
+	pml4e := pml4[(virt >> PT_SHIFT_PML4) & PT_INDEX_MASK]
+	if .Present not_in transmute(lmem.PageFlags)pml4e do return 0
+
+	pdpt := ([^]u64)(uintptr(pml4e & ENTRY_ADDR_MASK))
+	pdpte := pdpt[(virt >> PT_SHIFT_PDPT) & PT_INDEX_MASK]
+	pdpteFlags := transmute(lmem.PageFlags)pdpte
+	if .Present not_in pdpteFlags || .PS in pdpteFlags do return pdpte
+
+	pd := ([^]u64)(uintptr(pdpte & ENTRY_ADDR_MASK))
+	pde := pd[(virt >> PT_SHIFT_PD) & PT_INDEX_MASK]
+	pdeFlags := transmute(lmem.PageFlags)pde
+	if .Present not_in pdeFlags || .PS in pdeFlags do return pde
+
+	pt := ([^]u64)(uintptr(pde & ENTRY_ADDR_MASK))
+	return pt[(virt >> PT_SHIFT_PT) & PT_INDEX_MASK]
+}
 
 unmap_page :: proc "contextless" (pml4Idx, virt: u64) -> bool {
 	pml4eIdx := (virt >> PT_SHIFT_PML4) & PT_INDEX_MASK
