@@ -15,16 +15,6 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 
 
 	switch syscalls.Syscall(nr) {
-	case .Exit:
-		context = gKernelCtx
-		spinlock.lock(&serialPrintLock)
-		print.serial_write("exit code: ")
-		print.serial_write_u64(a1)
-		print.serial_writeln("")
-		spinlock.unlock(&serialPrintLock)
-		cpu := gs_read_cpustate()
-		if cpu != nil do grant_stop_current(cpu, .Exit)
-		run_abort()
 	case .MMap:
 		mmapErr, addr := syscall_mmap(a1, a2)
 		return u64(mmapErr), addr
@@ -45,6 +35,11 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 	case .ProtDomainDestroy:
 		return u64(syscall_prot_domain_destroy(transmute(int)a1)), 0
 
+	case .GrantSpawn:
+		return u64(syscall_grant_spawn(transmute(int)a1, a2, a3, a4)), 0
+	case .GrantEdit:
+		return u64(syscall_grant_edit(transmute(int)a1, a2, a3)), 0
+
 	case .DebugPrint:
 		// Debug-only: prints "dbg: <label>: <value> (0x<value>)" to the
 		// serial log. a1/a2 are a (ptr, len) string read straight out of
@@ -55,17 +50,20 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 		// ODIN_DEBUG).
 		when ODIN_DEBUG {
 			label := string(([^]u8)(uintptr(a1))[:a2])
+			spinlock.lock(&serialPrintLock)
+			defer spinlock.unlock(&serialPrintLock)
 			print.serial_write("dbg: ")
 			print.serial_write(label)
 			print.serial_write(": ")
 			print.serial_write_u64(a3)
-			print.serial_write(" (0x")
+			print.serial_write(" (")
 			print.serial_write_hex(a3)
 			print.serial_writeln(")")
 		}
 	}
 	return max(u64), max(u64)
 }
+
 
 @(export)
 syscall_return_noncanonical :: proc "c" () -> ! {
@@ -74,7 +72,7 @@ syscall_return_noncanonical :: proc "c" () -> ! {
 	assert(cpu != nil)
 	assert(cpu.currentGrant.domain != nil)
 	print.serial_writeln("syscall: non-canonical return rip, grant dropped")
-	grant_stop_current(cpu, .Exit)
+	grant_exit_current(cpu)
 	run_abort()
 }
 
@@ -179,8 +177,11 @@ syscall_multiplexed_memory_access :: proc "contextless" (
 		return .InvalidHandle
 	}
 	if offset > resourceRegionSize || size > resourceRegionSize - offset do return .InvalidRange
-	userBufferOK := pmm.user_range_accessible(domain.pml4, userPtr, size, write = !writeTarget)
-	if !userBufferOK do return .InvalidBuffer
+	{
+		spinlock.rw_read_lock(&domain.lock)
+		defer spinlock.rw_read_unlock(&domain.lock)
+		if !user_range_accessible(domain, userPtr, size, !writeTarget) do return .InvalidBuffer
+	}
 
 	// Copy the whole user buffer into a kernel-owned bounce buffer right after
 	// validation, and never touch userPtr again below. Otherwise the loop
@@ -257,13 +258,15 @@ syscall_mmap :: proc "contextless" (
 	regionsBytes, overflow := intrinsics.overflow_mul(regionsCount, size_of(syscalls.MMapRegion))
 	if overflow do return .InvalidSize, 0
 
-	if !pmm.user_range_accessible(domain.pml4, regionsPtr, regionsBytes, write = false) {
-		return .InvalidSize, 0
-	}
 	regions, allocErr := make([]syscalls.MMapRegion, int(regionsCount))
 	if allocErr != nil do return .OutOfMemory, 0
 	defer delete(regions)
-	mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionsBytes))
+	{
+		spinlock.rw_read_lock(&domain.lock)
+		defer spinlock.rw_read_unlock(&domain.lock)
+		if !user_range_accessible(domain, regionsPtr, regionsBytes, false) do return .InvalidSize, 0
+		mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionsBytes))
+	}
 	totalBytes: u64
 
 	for r in regions {
@@ -339,16 +342,15 @@ syscall_mfree :: proc "contextless" (addrsPtr, count: u64) -> (err: syscalls.MFr
 
 	addrsBytes, overflowed := intrinsics.overflow_mul(count, size_of(u64))
 	if overflowed do return .InvalidAddress
-	if !pmm.user_range_accessible(domain.pml4, addrsPtr, addrsBytes, write = false) {
-		return .InvalidAddress
-	}
 	addrs, allocErr := make([]u64, int(count))
 	if allocErr != nil do return .OutOfMemory
 	defer delete(addrs)
-	mem.copy(raw_data(addrs), rawptr(uintptr(addrsPtr)), int(addrsBytes))
 
 	spinlock.rw_write_lock(&domain.lock)
 	defer spinlock.rw_write_unlock(&domain.lock)
+
+	if !user_range_accessible(domain, addrsPtr, addrsBytes, false) do return .InvalidAddress
+	mem.copy(raw_data(addrs), rawptr(uintptr(addrsPtr)), int(addrsBytes))
 
 	// Pass 1: validate everything, mutate nothing.
 	for a, i in addrs {
@@ -397,22 +399,21 @@ syscall_prot_domain_create :: proc "contextless" (
 	if authorityPtr == nil do return .NoPermission, 0
 
 	callerDomain := cpu.currentGrant.domain
-	if !pmm.user_range_accessible(callerDomain.pml4, u64(uintptr(authorityPtr)), 1, write = true) {
-		return .NoPermission, 0
-	}
 
 	if count == 0 do return .InvalidRegionCount, 0
 	regionBytes, overflowed := intrinsics.overflow_mul(count, size_of(syscalls.MemRegion))
 	if overflowed do return .InvalidRegionCount, 0
 
-	if !pmm.user_range_accessible(callerDomain.pml4, regionsPtr, regionBytes, write = false) {
-		return .InvalidRegionCount, 0
-	}
-
 	regions, regionsAllocErr := make([]syscalls.MemRegion, int(count))
 	if regionsAllocErr != nil do return .OutOfMemory, 0
 	defer delete(regions)
-	mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
+	{
+		spinlock.rw_read_lock(&callerDomain.lock)
+		defer spinlock.rw_read_unlock(&callerDomain.lock)
+		if !user_range_accessible(callerDomain, u64(uintptr(authorityPtr)), 1, true) do return .NoPermission, 0
+		if !user_range_accessible(callerDomain, regionsPtr, regionBytes, false) do return .InvalidRegionCount, 0
+		mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
+	}
 
 	{
 		spinlock.rw_read_lock(&callerDomain.lock)
@@ -422,6 +423,7 @@ syscall_prot_domain_create :: proc "contextless" (
 			if !found do return .NotOwned, 0
 			if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned, 0
 			if r.flags - owner.overlay.flags != {} do return .NotOwned, 0
+			if resource_ranges_overlap(r.logical, r.size, syscalls.CPU_INFO_ADDR, cpu_infos_bytes(int(CpuInfos.cpuCount))) do return .InvalidRegion, 0
 		}
 	}
 
@@ -502,20 +504,22 @@ syscall_prot_domain_edit :: proc "contextless" (
 
 	spinlock.rw_read_lock(&protDomainPool.rwLock)
 	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
-	target, targetErr := protdomain_resolve_target_RUN_ON_LOCK(handle, callerDomain)
+	target, targetErr := protdomain_resolve_target_DOESNT_LOCK(handle, callerDomain)
 	if targetErr == .InvalidHandle do return .InvalidHandle
 	if targetErr == .NoPermission do return .NoPermission
 
 	if count == 0 do return .InvalidRegionCount
 	regionBytes, overflowed := intrinsics.overflow_mul(count, size_of(syscalls.MemRegion))
 	if overflowed do return .InvalidRegionCount
-	if !pmm.user_range_accessible(callerDomain.pml4, regionsPtr, regionBytes, write = false) {
-		return .InvalidRegionCount
-	}
 	regions, allocErr := make([]syscalls.MemRegion, int(count))
 	if allocErr != nil do return .OutOfMemory
 	defer delete(regions)
-	mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
+	{
+		spinlock.rw_read_lock(&callerDomain.lock)
+		defer spinlock.rw_read_unlock(&callerDomain.lock)
+		if !user_range_accessible(callerDomain, regionsPtr, regionBytes, false) do return .InvalidRegionCount
+		mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
+	}
 
 	// Held across both passes below: pass 1's guarantees about target's (and,
 	// for Add, callerDomain's) resources must still hold when pass 2 applies
@@ -543,6 +547,7 @@ syscall_prot_domain_edit :: proc "contextless" (
 			if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned
 			if r.flags - owner.overlay.flags != {} do return .NotOwned
 			if resource_overlaps(target.resources[:], r.phys, r.size) do return .InvalidRegion
+			if resource_ranges_overlap(r.logical, r.size, syscalls.CPU_INFO_ADDR, cpu_infos_bytes(int(CpuInfos.cpuCount))) do return .InvalidRegion
 		case .Delete:
 			if _, found := resource_find_exact(target.resources[:], r.phys); !found do return .NotFound
 		}
@@ -602,6 +607,7 @@ syscall_prot_domain_edit :: proc "contextless" (
 	return .None
 }
 
+
 syscall_prot_domain_destroy :: proc "contextless" (
 	handle: int,
 ) -> (
@@ -616,7 +622,7 @@ syscall_prot_domain_destroy :: proc "contextless" (
 
 	callerDomain := cpu.currentGrant.domain
 	spinlock.rw_read_lock(&protDomainPool.rwLock)
-	pd, targetErr := protdomain_resolve_target_RUN_ON_LOCK(handle, callerDomain)
+	pd, targetErr := protdomain_resolve_target_DOESNT_LOCK(handle, callerDomain)
 	spinlock.rw_read_unlock(&protDomainPool.rwLock)
 	if targetErr != .None do return .InvalidHandle
 	if pd == callerDomain do return .InvalidHandle

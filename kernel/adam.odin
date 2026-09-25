@@ -168,12 +168,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pcies: [dynamic]pci.Device) {
 	(^u16)(&area.fx[0])^ = FX_FCW_DEFAULT
 	(^u32)(&area.fx[FX_MXCSR_OFFSET])^ = MXCSR_DEFAULT
 
-	grant := CpuGrant {
-		domain   = pd,
-		weight   = SCHED_WEIGHT_TOTAL,
-		saveArea = area,
-	}
-	grantErr := grant_add_new(&cpus[0], grant)
-	print.kensure(grantErr == {}, "adam_init: failed to enqueue initial grant")
+	grantErr := grant_spawn(pd, &cpus[0], area, syscalls.SCHED_WEIGHT_TOTAL)
+	print.kensure(grantErr == .None, "adam_init: failed to spawn initial grant")
 
 }

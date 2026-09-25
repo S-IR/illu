@@ -44,6 +44,29 @@ resource_find_containing :: proc "contextless" (
 	return candidate, true
 }
 
+// Callers dereference phys directly. Without meltdown isolation that happens on the
+// domain's page tables, so a domain's own logical mapping at phys can redirect the
+// access. Safe: domains can only map memory they own, so it only hits itself.
+user_range_accessible :: proc "contextless" (
+	domain: ^ProtectionDomain,
+	phys, size: u64,
+	write: bool,
+) -> bool {
+	if size == 0 || phys + size < phys do return false
+	end := phys + size
+	covered := phys
+	idx := resource_upper_bound(domain.resources[:], phys) - 1
+	for covered < end {
+		if idx < 0 || idx >= len(domain.resources) do return false
+		overlay := domain.resources[idx].overlay
+		if covered < overlay.phys || covered >= overlay.phys + overlay.size do return false
+		if write && .Write not_in overlay.flags do return false
+		covered = overlay.phys + overlay.size
+		idx += 1
+	}
+	return true
+}
+
 resource_ranges_overlap :: proc "contextless" (aPhys, aSize, bPhys, bSize: u64) -> bool {
 	return aPhys < bPhys + bSize && bPhys < aPhys + aSize
 }

@@ -118,3 +118,9 @@ cpuid_enable_pcid :: proc "contextless" () {
 	print.kassert(ah.read_cr3() & 0xFFF == 0, "cpuid_enable_pcid: CR3 already has a PCID tag")
 	ah.write_cr4(ah.read_cr4() | CR4_PCIDE_BIT)
 }
+
+cpuid_has_rdtscp :: proc() -> bool {
+	r: ah.CPUIDResult
+	ah.cpuid_asm(.EXTENDED_FEATURE_INFO, 0, &r)
+	return (r.edx >> 27) & 1 == 1
+}

@@ -150,7 +150,14 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 
 	if frame.interruptNumber >= 32 {
 		irq_handler(frame)
-		if userMode do restore_current_domain_cr3()
+		if userMode {
+			cpu := gs_read_cpustate()
+			if intrinsics.atomic_load(&cpu.currentGrant.weight) == 0 {
+				grant_stop_current(cpu)
+				run_abort()
+			}
+			restore_current_domain_cr3()
+		}
 		return
 	}
 	if userMode {
@@ -168,7 +175,7 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 			print.serial_write_hex(cpu.currentGrant.domain.pml4)
 		}
 		print.serial_writeln("")
-		if cpu := gs_read_cpustate(); cpu != nil do grant_stop_current(cpu, .Exit)
+		if cpu := gs_read_cpustate(); cpu != nil && cpu.currentGrant.domain != nil do grant_exit_current(cpu)
 
 		run_abort()
 	}
