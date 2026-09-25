@@ -2,7 +2,6 @@ package pmm
 
 import "../../lib/lmem"
 import "../../lib/shared"
-import "core:mem"
 
 pml4_deep_copy :: proc(dstPML4Phys, srcPML4Phys: u64, removeUserBit := true) {
 	assert(srcPML4Phys != 0)
@@ -19,46 +18,6 @@ pml4_deep_copy :: proc(dstPML4Phys, srcPML4Phys: u64, removeUserBit := true) {
 		if .Present not_in transmute(lmem.PageFlags)entry do continue
 		dstPML4[i] = copy_pdpt(entry, removeUserBit)
 	}
-}
-
-user_range_accessible :: proc(pml4Phys, address, size: u64, write: bool) -> bool {
-	if size == 0 || address + size < address do return false
-	end := address + size
-	page := address & ~u64(shared.PAGE_SIZE - 1)
-	for page < end {
-		pml4 := ([^]u64)(uintptr(pml4Phys))
-		pml4e := pml4[(page >> PT_SHIFT_PML4) & PT_INDEX_MASK]
-		if .Present not_in transmute(lmem.PageFlags)pml4e do return false
-		if .User not_in transmute(lmem.PageFlags)pml4e do return false
-
-		pdpt := ([^]u64)(uintptr(pml4e & ENTRY_ADDR_MASK))
-		pdpte := pdpt[(page >> PT_SHIFT_PDPT) & PT_INDEX_MASK]
-		pdptFlags := transmute(lmem.PageFlags)pdpte
-		if .Present not_in pdptFlags || .User not_in pdptFlags do return false
-		if write && .Write not_in pdptFlags do return false
-		if .PS in pdptFlags {
-			page += u64(mem.Gigabyte)
-			continue
-		}
-
-		pd := ([^]u64)(uintptr(pdpte & ENTRY_ADDR_MASK))
-		pde := pd[(page >> PT_SHIFT_PD) & PT_INDEX_MASK]
-		pdFlags := transmute(lmem.PageFlags)pde
-		if .Present not_in pdFlags || .User not_in pdFlags do return false
-		if write && .Write not_in pdFlags do return false
-		if .PS in pdFlags {
-			page += u64(2 * mem.Megabyte)
-			continue
-		}
-
-		pt := ([^]u64)(uintptr(pde & ENTRY_ADDR_MASK))
-		pte := pt[(page >> PT_SHIFT_PT) & PT_INDEX_MASK]
-		ptFlags := transmute(lmem.PageFlags)pte
-		if .Present not_in ptFlags || .User not_in ptFlags do return false
-		if write && .Write not_in ptFlags do return false
-		page += shared.PAGE_SIZE
-	}
-	return true
 }
 
 pml4_destroy :: proc(pml4Phys: u64) {

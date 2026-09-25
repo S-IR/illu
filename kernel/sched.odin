@@ -3,6 +3,7 @@ import ah "../asm_helpers"
 import "../lib/acpi"
 import "../lib/shared"
 import "../lib/spinlock"
+import "../lib/syscalls"
 import "base:intrinsics"
 import "base:runtime"
 import "core:mem"
@@ -10,6 +11,8 @@ import "pmm"
 import "print"
 KERNEL_STACK_PER_CPU_SIZE :: 16 * mem.Kilobyte
 #assert(KERNEL_STACK_PER_CPU_SIZE % 16 == 0)
+
+IA32_TSC_AUX :: u32(0xC0000103)
 
 
 IdleLevel :: distinct u8
@@ -50,6 +53,7 @@ CpuState :: struct #align (16) {
 	wakeEvent:         u32,
 	idleInfo:          CpuIdleInfo,
 	selectedIdleLevel: IdleLevel,
+	info:              ^syscalls.CpuInfo,
 }
 #assert(offset_of(CpuState, self) == 0)
 #assert(offset_of(CpuState, kernelStackTop) == 8)
@@ -66,6 +70,8 @@ nextCPUSlot: u32 = 0
 apReady: u32
 kernelStacksBase: u64
 sched_init :: proc(rsdp: ^acpi.Rsdp) {
+	print.kensure(cpuid_has_rdtscp(), "sched_init: rdtscp unsupported")
+
 	(^u16)(&cleanFx.bytes[0])^ = FX_FCW_DEFAULT
 	(^u32)(&cleanFx.bytes[FX_MXCSR_OFFSET])^ = MXCSR_DEFAULT
 
@@ -91,6 +97,10 @@ sched_init :: proc(rsdp: ^acpi.Rsdp) {
 	cpus, aErr = make([]CpuState, totalCores)
 	print.kensure(aErr == nil, "OOM sched_init: cpus")
 
+	CpuInfos = (^syscalls.CpuInfoPage)(uintptr(pmm.alloc_zeroed(cpu_infos_bytes(totalCores))))
+	print.kensure(CpuInfos != nil, "sched_init: cpu info alloc failed")
+	CpuInfos.cpuCount = u32(totalCores)
+
 	trampolineStacksBase = pmm.alloc_zeroed(u64(totalCores) * TRAMPOLINE_STACK_SIZE)
 	print.kensure(trampolineStacksBase != 0, "sched_init: trampoline stack allocation failed")
 	pmm.trampolineRegionBase = trampolineStacksBase
@@ -106,6 +116,8 @@ sched_init :: proc(rsdp: ^acpi.Rsdp) {
 	cpu_init(cpus, 0, bspId, &gdts[0].tss.rsp[0], kernelStacksBase, &gdts[0].tss.ist[0])
 
 	ah.gs_write_base(u64(uintptr(&cpus[0]))) // AFTER alloc
+	ah.wrmsr_asm(IA32_TSC_AUX, u64(cpus[0].index))
+	intrinsics.atomic_store(&cpus[0].info.online, true)
 	cpu_syscall_init() // AFTER alloc
 
 	intrinsics.atomic_add(&nextCPUSlot, 1)
@@ -158,6 +170,8 @@ ap_init :: proc "c" (cpu: ^CpuState) {
 	cpuid_enable_pcid()
 
 	ah.gs_write_base(u64(uintptr(cpu)))
+	ah.wrmsr_asm(IA32_TSC_AUX, u64(cpu.index))
+	intrinsics.atomic_store(&cpu.info.online, true)
 	lapic_enable_percpu()
 	print.serial_writeln("lapic: x2apic enabled (ap)")
 	intrinsics.atomic_store(&apReady, 1)
@@ -190,6 +204,7 @@ cpu_init :: proc(
 	cpu.self = cpu
 	cpu.apicId = apicId
 	cpu.index = idx
+	cpu.info = &syscalls.cpu_infos(CpuInfos)[idx]
 
 	top := map_cpu_stack(stackBase)
 	cpu.kernelStackTop = top
@@ -253,3 +268,26 @@ FxArea :: struct #align (16) {
 
 @(export, link_name = "kernel_clean_fx")
 cleanFx: FxArea
+
+
+CpuInfos: ^syscalls.CpuInfoPage
+
+cpu_infos_bytes :: proc(count: int) -> u64 {
+	return u64(size_of(syscalls.CpuInfoPage) + size_of(syscalls.CpuInfo) * count)
+}
+
+cpu_info_map :: proc(pml4: u64) {
+	assert(CpuInfos != nil)
+	assert(CpuInfos.cpuCount > 0)
+	for offset := u64(0);
+	    offset < cpu_infos_bytes(int(CpuInfos.cpuCount));
+	    offset += shared.PAGE_SIZE {
+		pmm.map_page(
+			pml4,
+			u64(uintptr(CpuInfos)) + offset,
+			syscalls.CPU_INFO_ADDR + offset,
+			._4KB,
+			{.Present, .User, .NX},
+		)
+	}
+}

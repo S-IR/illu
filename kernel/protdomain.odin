@@ -1,13 +1,17 @@
 package kernel
 import "../lib/shared"
 import "../lib/spinlock"
+import "../lib/syscalls"
+import "core:container/bit_array"
 import "core:mem"
 import "pmm"
 ProtectionDomain :: struct {
-	pml4:           u64,
-	lock:           spinlock.RWLock,
+	pml4:         u64,
+	lock:         spinlock.RWLock,
 	resources:    [dynamic]MemoryResource,
+	grantCpus:    bit_array.Bit_Array,
 	authorityPtr: ^byte,
+	weightFree:   u64,
 	pcid:         u32,
 }
 
@@ -28,7 +32,7 @@ ProtDomainTargetError :: enum {
 
 // Caller must hold protDomainPool.rwLock before calling this procedure and
 // must keep it held while using the returned domain.
-protdomain_resolve_target_RUN_ON_LOCK :: proc(
+protdomain_resolve_target_DOESNT_LOCK :: proc(
 	handle: int,
 	caller: ^ProtectionDomain,
 ) -> (
@@ -46,12 +50,9 @@ protdomain_resolve_target_RUN_ON_LOCK :: proc(
 	}
 
 	if target.authorityPtr == nil do return nil, .NoPermission
-	if !pmm.user_range_accessible(
-		caller.pml4,
-		u64(uintptr(target.authorityPtr)),
-		size_of(target.authorityPtr^),
-		true,
-	) {
+	spinlock.rw_read_lock(&caller.lock)
+	defer spinlock.rw_read_unlock(&caller.lock)
+	if !user_range_accessible(caller, u64(uintptr(target.authorityPtr)), size_of(target.authorityPtr^), true) {
 		return nil, .NoPermission
 	}
 
@@ -82,11 +83,16 @@ protdomain_new :: proc(
 	if newPD.pml4 == 0 do return nil, -1, .Out_Of_Memory
 	defer if err != {} do pmm.pml4_destroy(newPD.pml4)
 
+	newPD.weightFree = syscalls.SCHED_WEIGHT_TOTAL
+	if !bit_array.init(&newPD.grantCpus, len(cpus)) do return nil, -1, .Out_Of_Memory
+	defer if err != {} do bit_array.destroy(&newPD.grantCpus)
+
 	if cpuMeltdownVulnerable {
 		pmm.pml4_map_kernel_image(newPD.pml4)
 	} else {
 		pmm.pml4_deep_copy(newPD.pml4, pmm.kernelPML4, true)
 	}
+	cpu_info_map(newPD.pml4)
 
 	if cpuHasPCID {
 		newPD.pcid = pcid_alloc()
@@ -144,9 +150,11 @@ protdomain_destroy :: proc(idx: int) -> (err: mem.Allocator_Error) {
 		protDomainPool.prots[idx] = nil
 	}
 
+	grant_kill_all(pd)
 	pmm.pml4_destroy(pd.pml4)
 	if pd.pcid != 0 do pcid_free(pd.pcid)
 	delete(pd.resources)
+	bit_array.destroy(&pd.grantCpus)
 	free(pd)
 	return
 }

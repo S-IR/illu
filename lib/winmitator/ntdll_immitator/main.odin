@@ -7,7 +7,7 @@ import "base:runtime"
 
 @(export)
 ExitProcess :: proc "c" (exitCode: u32) {
-	syscalls.syscall_exit(u64(exitCode))
+	syscalls.grant_exit()
 }
 
 
@@ -84,7 +84,7 @@ RtlFreeHeap :: proc "c" (heap: rawptr, flags: u32, mem: rawptr) -> i32 {
 
 @(export)
 RtlExitUserProcess :: proc "c" (exitCode: u32) {
-	syscalls.syscall_exit(u64(exitCode))
+	syscalls.grant_exit()
 }
 
 @(export)
@@ -107,8 +107,7 @@ strcmp :: proc "c" (a: cstring, b: cstring) -> i32 {
 	return 0
 }
 
-UNIMPLEMENTED_EXIT_CODE :: 0xDEAD0000
 @(export)
 unimplemented_stub :: proc "c" () {
-	syscalls.syscall_exit(UNIMPLEMENTED_EXIT_CODE)
+	syscalls.grant_exit()
 }

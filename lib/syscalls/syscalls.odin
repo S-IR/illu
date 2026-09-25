@@ -1,5 +1,6 @@
 package syscalls
 import "../lmem"
+import "base:intrinsics"
 import "core:mem"
 MemRegion :: struct #packed {
 	phys, logical, size: u64,
@@ -50,15 +51,16 @@ GrantSaveAreaError :: enum u64 {
 }
 
 Syscall :: enum u64 {
-	Exit = ILLU_SYSCALL_BIT,
-	MMap,
+	MMap = ILLU_SYSCALL_BIT,
 	MFree,
-	MultiplexedMemoryCreate = 5,
-	MultiplexedMemoryRead = 6,
-	MultiplexedMemoryWrite = 7,
-	ProtDomainCreate = 8,
-	ProtDomainEdit = 9,
-	ProtDomainDestroy = 10,
+	MultiplexedMemoryCreate,
+	MultiplexedMemoryRead,
+	MultiplexedMemoryWrite,
+	ProtDomainCreate,
+	ProtDomainEdit,
+	ProtDomainDestroy,
+	GrantSpawn,
+	GrantEdit,
 	// Parked at a high, isolated number (debug-build only, see ODIN_DEBUG
 	// below) so it never collides with a real syscall number as the table
 	// above grows.
@@ -117,7 +119,17 @@ ProtDomainEditError :: enum u64 {
 	TrackingFailed,
 	OutOfMemory,
 }
-
+GrantError :: enum u64 {
+	None,
+	InvalidHandle,
+	NoPermission,
+	InvalidCpu,
+	InvalidSaveArea,
+	AlreadyOnCpu,
+	NotOnCpu,
+	InsufficientWeight,
+	OutOfMemory,
+}
 ProtDomainDestroyError :: enum u64 {
 	None,
 	InvalidHandle,
@@ -129,7 +141,6 @@ when !ODIN_TEST {
 	when !KERNEL_BUILD {
 		@(default_calling_convention = "sysv")
 		foreign _ {
-			syscall_exit :: proc(code: u64) -> ! ---
 			syscall_mmap :: proc(regionsPtr: u64, regionCount: u64) -> (err: u64, addr: u64) ---
 			syscall_mfree :: proc(addrsPtr: u64, count: u64) -> (err: u64) ---
 			syscall_multiplexed_memory_create :: proc(phys, size: u64) -> (err: u64, handle: u64) ---
@@ -138,7 +149,31 @@ when !ODIN_TEST {
 			syscall_prot_domain_create :: proc(authorityPtr, regionsPtr, count: u64) -> (err: u64, handle: int) ---
 			syscall_prot_domain_edit :: proc(handle: int, regionsPtr, count, op: u64) -> (err: u64) ---
 			syscall_prot_domain_destroy :: proc(handle: int) -> (err: u64) ---
+			syscall_grant_spawn :: proc(handle: int, cpu: u32, saveArea: u64, weight: u64) -> (err: u64) ---
+			syscall_grant_edit :: proc(handle: int, cpu: u32, weight: u64) -> (err: u64) ---
+			cpu_current_index :: proc() -> u32 ---
+		}
 
+		syscall_grant_spawn_userspace :: proc "contextless" (
+			handle: int,
+			cpu: u32,
+			saveArea: ^UserSaveArea,
+			weight: u64,
+		) -> GrantError {
+			return GrantError(syscall_grant_spawn(handle, cpu, u64(uintptr(saveArea)), weight))
+		}
+
+		syscall_grant_edit_userspace :: proc "contextless" (
+			handle: int,
+			cpu: u32,
+			weight: u64,
+		) -> GrantError {
+			return GrantError(syscall_grant_edit(handle, cpu, weight))
+		}
+
+		grant_exit :: proc "contextless" () -> ! {
+			syscall_grant_edit(max(int), cpu_current_index(), 0)
+			intrinsics.trap()
 		}
 
 		// Debug-only: writes `label: value (0xvalue)` to the kernel serial
@@ -272,4 +307,24 @@ mmap_page_size_bytes :: proc "contextless" (size: lmem.PageSize) -> u64 {
 		return mem.Gigabyte
 	}
 	return 0
+}
+
+
+SCHED_WEIGHT_TOTAL :: u64(1_000_000)
+
+CPU_INFO_ADDR :: u64(0x7FF0_0000_0000)
+
+CpuInfo :: struct #align (64) {
+	runnableWeight: u64,
+	online:         bool,
+}
+#assert(size_of(CpuInfo) == 64)
+
+CpuInfoPage :: struct {
+	cpuCount: u32,
+	cpus:     [0]CpuInfo,
+}
+
+cpu_infos :: proc "contextless" (page: ^CpuInfoPage) -> []CpuInfo {
+	return ([^]CpuInfo)(&page.cpus)[:page.cpuCount]
 }

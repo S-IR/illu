@@ -17,5 +17,5 @@ adam_assertion_failure_handler :: proc(
 	when ODIN_DEBUG {
 		syscalls.syscall_debug_print_userspace(loc.file_path, u64(loc.line))
 	}
-	syscalls.syscall_exit(255)
+	syscalls.grant_exit()
 }

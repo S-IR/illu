@@ -1,25 +1,33 @@
 package kernel
 import ah "../asm_helpers"
+import "../lib/shared"
 import "../lib/spinlock"
 import "../lib/syscalls"
 import "base:intrinsics"
+import "core:container/bit_array"
 import "core:mem"
-import "pmm"
 import "print"
+
+
+GRANT_MAX_CHARGE_TICKS :: u64(1) << 40
+GRANT_REBASE_FLOOR :: u64(1) << 62
+GRANT_SLICE_MS :: 5
+CPU_GRANT_STARTING_CAPACITY :: 128
+USER_RFLAGS_MASK :: u64(0xCD5)
+USER_RFLAGS_FORCED :: u64(0x202)
+
+#assert(syscalls.SCHED_WEIGHT_TOTAL <= u64(1) << 20)
+#assert(
+	GRANT_REBASE_FLOOR + 2 * GRANT_MAX_CHARGE_TICKS * syscalls.SCHED_WEIGHT_TOTAL <= max(u64) / 2,
+)
+#assert(size_of(syscalls.UserSaveArea) <= shared.PAGE_SIZE)
+
 GrantSleepState :: bit_field u64 {
 	idleLevel: IdleLevel | 8,
 	reserved:  u64       | 55,
 	asleep:    bool      | 1,
 }
-
 #assert(size_of(GrantSleepState) == size_of(u64))
-
-SCHED_WEIGHT_TOTAL :: u64(1_000_000)
-GRANT_MAX_CHARGE_TICKS :: u64(1) << 40
-GRANT_REBASE_FLOOR :: u64(1) << 62
-
-#assert(SCHED_WEIGHT_TOTAL <= u64(1) << 20)
-#assert(GRANT_REBASE_FLOOR + GRANT_MAX_CHARGE_TICKS * SCHED_WEIGHT_TOTAL <= max(u64) / 2)
 
 CpuGrant :: struct {
 	saveArea:    ^syscalls.UserSaveArea,
@@ -27,145 +35,6 @@ CpuGrant :: struct {
 	domain:      ^ProtectionDomain,
 	virtualTime: u64,
 	sleepState:  GrantSleepState,
-}
-// Larger values are stored earlier.
-grant_before :: proc(a, b: CpuGrant) -> bool {
-	return a.virtualTime > b.virtualTime
-}
-CPU_GRANT_STARTING_CAPACITY :: 128
-//RETURNS INVALID PTR ON CPU NIL
-grant_insert :: proc(cpu: ^CpuState, grant: CpuGrant) -> (err: mem.Allocator_Error) {
-	assert(cpu != nil)
-	if cpu == nil do return .Invalid_Pointer
-	assert(grant.weight > 0 && grant.weight <= SCHED_WEIGHT_TOTAL)
-
-	spinlock.lock(&cpu.grantLock)
-	defer spinlock.unlock(&cpu.grantLock)
-
-	_ = inject_at(&cpu.grants, grant_insert_index_LOCKED(cpu, grant), grant) or_return
-	grant_wake_cpu(cpu)
-	return .None
-}
-
-grant_insert_index_LOCKED :: proc(cpu: ^CpuState, grant: CpuGrant) -> int {
-	low := 0
-	high := len(cpu.grants)
-
-	for low < high {
-		mid := low + (high - low) / 2
-
-		if grant_before(grant, cpu.grants[mid]) {
-			high = mid
-		} else {
-			low = mid + 1
-		}
-	}
-	return low
-}
-grant_add_new :: proc(cpu: ^CpuState, grant: CpuGrant) -> mem.Allocator_Error {
-	assert(cpu != nil)
-	assert(grant.domain != nil)
-	assert(grant.weight > 0 && grant.weight <= SCHED_WEIGHT_TOTAL)
-	assert(grant.saveArea != nil)
-
-	grant := grant
-
-	spinlock.lock(&cpu.grantLock)
-	defer spinlock.unlock(&cpu.grantLock)
-
-	grant.virtualTime = cpu.floorVirtualTime
-	_ = inject_at(&cpu.grants, grant_insert_index_LOCKED(cpu, grant), grant) or_return
-	grant_wake_cpu(cpu)
-	return .None
-}
-
-@(export)
-cpu_next_grant :: proc "c" () -> bool {
-	context = gKernelCtx
-	cpu := gs_read_cpustate()
-	assert(cpu != nil)
-
-	if cpu == nil do return false
-
-	selected: CpuGrant
-	found := false
-	bestIdle: IdleLevel
-	{
-		spinlock.lock(&cpu.grantLock)
-		defer spinlock.unlock(&cpu.grantLock)
-
-		bestIdle = cpu_deepest_idle_level(cpu)
-
-		for idx := len(cpu.grants) - 1; idx >= 0; idx -= 1 {
-			grant := &cpu.grants[idx]
-
-			if grant.sleepState.asleep {
-				if grant.sleepState.idleLevel < bestIdle {
-					bestIdle = grant.sleepState.idleLevel
-				}
-				continue
-			}
-
-			selected = grant^
-			ordered_remove(&cpu.grants, idx)
-			found = true
-			assert(selected.virtualTime >= cpu.floorVirtualTime)
-			cpu.floorVirtualTime = selected.virtualTime
-
-			break
-		}
-
-		cpu.selectedIdleLevel = bestIdle
-	}
-
-	if !found {
-		lapic_disable_deadline()
-		return false
-	}
-
-	cpu.currentGrant = selected
-	cpu.grantStartTsc = ah.rdtsc_asm()
-
-	area: syscalls.UserSaveArea
-	if !grant_read_save_area(selected, &area) {
-		grant_stop_current(cpu, .Exit)
-		return true
-	}
-	lapic_set_deadline(tscTicksPerMs * GRANT_SLICE_MS)
-	run_resume(selected.domain.pml4, &area)
-}
-
-when ODIN_ARCH == .amd64 {
-	@(export)
-	cpu_idle_mwait_address :: proc "c" () -> u64 {
-		context = gKernelCtx
-
-		cpu := gs_read_cpustate()
-		if cpu == nil do return 0
-
-		return u64(uintptr(&cpu.wakeEvent))
-	}
-
-	@(export)
-	cpu_idle_mwait_hint :: proc "c" () -> u32 {
-		context = gKernelCtx
-
-		cpu := gs_read_cpustate()
-		if cpu == nil || len(cpu.idleInfo.states) == 0 do return 0
-
-		for state in cpu.idleInfo.states {
-			if state.level == cpu.selectedIdleLevel {
-				return state.mwaitHint
-			}
-		}
-
-		return 0
-	}
-}
-
-cpu_deepest_idle_level :: proc "contextless" (cpu: ^CpuState) -> IdleLevel {
-	if len(cpu.idleInfo.states) == 0 do return 0
-	return cpu.idleInfo.states[len(cpu.idleInfo.states) - 1].level
 }
 
 TRAMPOLINE_STACK_SIZE :: 256
@@ -189,26 +58,257 @@ when !ODIN_TEST {
 	cpu_idle_loop :: proc "contextless" () -> ! {for {}}
 }
 
+grant_insert_index_DOESNT_LOCK :: proc(cpu: ^CpuState, grant: CpuGrant) -> int {
+	low := 0
+	high := len(cpu.grants)
+	for low < high {
+		mid := low + (high - low) / 2
+		if grant.virtualTime > cpu.grants[mid].virtualTime {
+			high = mid
+		} else {
+			low = mid + 1
+		}
+	}
+	return low
+}
+
+grant_insert_DOESNT_LOCK :: proc(cpu: ^CpuState, grant: CpuGrant) -> mem.Allocator_Error {
+	assert(grant.domain != nil)
+	assert(grant.saveArea != nil)
+	assert(grant.weight > 0 && grant.weight <= syscalls.SCHED_WEIGHT_TOTAL)
+	_ = inject_at(&cpu.grants, grant_insert_index_DOESNT_LOCK(cpu, grant), grant) or_return
+	return .None
+}
+
+runnable_weight_add_DOESNT_LOCK :: proc(cpu: ^CpuState, weight: u64) {
+	intrinsics.atomic_store(&cpu.info.runnableWeight, cpu.info.runnableWeight + weight)
+}
+
+runnable_weight_sub_DOESNT_LOCK :: proc(cpu: ^CpuState, weight: u64) {
+	assert(cpu.info.runnableWeight >= weight)
+	intrinsics.atomic_store(&cpu.info.runnableWeight, cpu.info.runnableWeight - weight)
+}
+
+grant_find_DOESNT_LOCK :: proc(
+	cpu: ^CpuState,
+	domain: ^ProtectionDomain,
+) -> (
+	grant: ^CpuGrant,
+	queueIdx: int,
+) {
+	if cpu.currentGrant.domain == domain && cpu.currentGrant.weight > 0 {
+		return &cpu.currentGrant, -1
+	}
+	for &queued, idx in cpu.grants {
+		if queued.domain == domain do return &queued, idx
+	}
+	return nil, -1
+}
+
+grant_kill_DOESNT_LOCK :: proc(cpu: ^CpuState, domain: ^ProtectionDomain) {
+	grant, queueIdx := grant_find_DOESNT_LOCK(cpu, domain)
+	assert(grant != nil)
+	assert(grant.weight > 0)
+
+	domain.weightFree += grant.weight
+	assert(domain.weightFree <= syscalls.SCHED_WEIGHT_TOTAL)
+	unset := bit_array.unset(&domain.grantCpus, cpu.index)
+	assert(unset)
+	if !grant.sleepState.asleep do runnable_weight_sub_DOESNT_LOCK(cpu, grant.weight)
+
+	if queueIdx >= 0 {
+		ordered_remove(&cpu.grants, queueIdx)
+		return
+	}
+	intrinsics.atomic_store(&grant.weight, 0)
+	grant_wake_cpu(cpu)
+}
+
+grant_wake_cpu :: proc(cpu: ^CpuState) {
+	intrinsics.atomic_add(&cpu.wakeEvent, 1)
+	if gs_read_cpustate() == cpu do return
+	send_ipi(cpu.apicId, VECTOR_APIC_IPI)
+}
+
+grant_spawn :: proc(
+	domain: ^ProtectionDomain,
+	cpu: ^CpuState,
+	saveArea: ^syscalls.UserSaveArea,
+	weight: u64,
+) -> syscalls.GrantError {
+	assert(domain != nil)
+	assert(cpu != nil)
+
+	if saveArea == nil || uintptr(saveArea) % align_of(syscalls.UserSaveArea) != 0 do return .InvalidSaveArea
+
+	spinlock.rw_write_lock(&domain.lock)
+	defer spinlock.rw_write_unlock(&domain.lock)
+
+	if bit_array.get(&domain.grantCpus, cpu.index) do return .AlreadyOnCpu
+	if weight == 0 || weight > domain.weightFree do return .InsufficientWeight
+	if !user_range_accessible(domain, u64(uintptr(saveArea)), size_of(syscalls.UserSaveArea), true) do return .InvalidSaveArea
+
+	{
+		spinlock.lock(&cpu.grantLock)
+		defer spinlock.unlock(&cpu.grantLock)
+
+		if !cpu.info.online do return .InvalidCpu
+
+		charge := min(tscTicksPerMs * GRANT_SLICE_MS, GRANT_MAX_CHARGE_TICKS)
+		grant := CpuGrant {
+			saveArea = saveArea,
+			weight = weight,
+			domain = domain,
+			virtualTime = cpu.floorVirtualTime + charge * syscalls.SCHED_WEIGHT_TOTAL / weight,
+			sleepState = {idleLevel = cpu_deepest_idle_level(cpu)},
+		}
+		if grant_insert_DOESNT_LOCK(cpu, grant) != nil do return .OutOfMemory
+		runnable_weight_add_DOESNT_LOCK(cpu, weight)
+	}
+
+	domain.weightFree -= weight
+	set := bit_array.set(&domain.grantCpus, cpu.index)
+	assert(set)
+	grant_wake_cpu(cpu)
+	return .None
+}
+
+grant_edit :: proc(domain: ^ProtectionDomain, cpu: ^CpuState, weight: u64) -> syscalls.GrantError {
+	assert(domain != nil)
+	assert(cpu != nil)
+
+	spinlock.rw_write_lock(&domain.lock)
+	defer spinlock.rw_write_unlock(&domain.lock)
+
+	if !bit_array.get(&domain.grantCpus, cpu.index) do return .NotOnCpu
+
+	spinlock.lock(&cpu.grantLock)
+	defer spinlock.unlock(&cpu.grantLock)
+
+	if weight == 0 {
+		grant_kill_DOESNT_LOCK(cpu, domain)
+		return .None
+	}
+
+	grant, _ := grant_find_DOESNT_LOCK(cpu, domain)
+	assert(grant != nil)
+	assert(grant.weight > 0)
+	if weight > syscalls.SCHED_WEIGHT_TOTAL || weight > grant.weight + domain.weightFree do return .InsufficientWeight
+
+	domain.weightFree = domain.weightFree + grant.weight - weight
+	assert(domain.weightFree <= syscalls.SCHED_WEIGHT_TOTAL)
+	if !grant.sleepState.asleep {
+		runnable_weight_add_DOESNT_LOCK(cpu, weight)
+		runnable_weight_sub_DOESNT_LOCK(cpu, grant.weight)
+	}
+	intrinsics.atomic_store(&grant.weight, weight)
+	return .None
+}
+
+grant_kill_all :: proc(domain: ^ProtectionDomain) {
+	assert(domain != nil)
+	{
+		spinlock.rw_write_lock(&domain.lock)
+		defer spinlock.rw_write_unlock(&domain.lock)
+
+		for &cpu in cpus {
+			if !bit_array.get(&domain.grantCpus, cpu.index) do continue
+			spinlock.lock(&cpu.grantLock)
+			grant_kill_DOESNT_LOCK(&cpu, domain)
+			spinlock.unlock(&cpu.grantLock)
+		}
+		assert(domain.weightFree == syscalls.SCHED_WEIGHT_TOTAL)
+		domain.weightFree = 0
+	}
+	for &cpu in cpus {
+		for intrinsics.atomic_load(&cpu.currentGrant.domain) == domain {
+			intrinsics.cpu_relax()
+		}
+	}
+}
+
+@(export)
+cpu_next_grant :: proc "c" () -> bool {
+	context = gKernelCtx
+	cpu := gs_read_cpustate()
+	assert(cpu != nil)
+	if cpu == nil do return false
+
+	selected: CpuGrant
+	{
+		spinlock.lock(&cpu.grantLock)
+		defer spinlock.unlock(&cpu.grantLock)
+
+		bestIdle := cpu_deepest_idle_level(cpu)
+		found := false
+		for idx := len(cpu.grants) - 1; idx >= 0; idx -= 1 {
+			grant := cpu.grants[idx]
+			if grant.sleepState.asleep {
+				bestIdle = min(bestIdle, grant.sleepState.idleLevel)
+				continue
+			}
+
+			selected = grant
+			ordered_remove(&cpu.grants, idx)
+			found = true
+			break
+		}
+		cpu.selectedIdleLevel = bestIdle
+
+		if !found {
+			lapic_disable_deadline()
+			return false
+		}
+
+		assert(selected.weight > 0)
+		assert(selected.virtualTime >= cpu.floorVirtualTime)
+		cpu.floorVirtualTime = selected.virtualTime
+		cpu.currentGrant = selected
+		cpu.grantStartTsc = ah.rdtsc_asm()
+	}
+
+	area: syscalls.UserSaveArea
+	if !grant_read_save_area(selected, &area) {
+		grant_exit_current(cpu)
+		return true
+	}
+	lapic_set_deadline(tscTicksPerMs * GRANT_SLICE_MS)
+	run_resume(selected.domain.pml4, &area)
+}
+
+when ODIN_ARCH == .amd64 {
+	@(export)
+	cpu_idle_mwait_address :: proc "c" () -> u64 {
+		context = gKernelCtx
+		cpu := gs_read_cpustate()
+		if cpu == nil do return 0
+		return u64(uintptr(&cpu.wakeEvent))
+	}
+
+	@(export)
+	cpu_idle_mwait_hint :: proc "c" () -> u32 {
+		context = gKernelCtx
+		cpu := gs_read_cpustate()
+		if cpu == nil do return 0
+		for state in cpu.idleInfo.states {
+			if state.level == cpu.selectedIdleLevel do return state.mwaitHint
+		}
+		return 0
+	}
+}
+
+cpu_deepest_idle_level :: proc "contextless" (cpu: ^CpuState) -> IdleLevel {
+	if len(cpu.idleInfo.states) == 0 do return 0
+	return cpu.idleInfo.states[len(cpu.idleInfo.states) - 1].level
+}
+
 restore_current_domain_cr3 :: proc "contextless" () {
 	cpu := gs_read_cpustate()
 	if cpu == nil || cpu.currentGrant.domain == nil do return
 	domain_switch_cr3(cpu.currentGrant.domain)
 }
 
-
-GrantStopReason :: enum {
-	Yield,
-	Sleep,
-	Exit,
-}
-
-grant_rebase_virtual_times :: proc(cpu: ^CpuState) {
-	assert(cpu != nil)
-	if cpu == nil do return
-
-	spinlock.lock(&cpu.grantLock)
-	defer spinlock.unlock(&cpu.grantLock)
-
+grant_rebase_virtual_times_DOESNT_LOCK :: proc(cpu: ^CpuState) {
 	base := cpu.floorVirtualTime
 	if cpu.currentGrant.domain != nil {
 		assert(cpu.currentGrant.virtualTime >= base)
@@ -220,9 +320,9 @@ grant_rebase_virtual_times :: proc(cpu: ^CpuState) {
 	cpu.floorVirtualTime = 0
 }
 
-grant_account_current :: proc(cpu: ^CpuState) -> CpuGrant {
+grant_account_current_DOESNT_LOCK :: proc(cpu: ^CpuState) -> CpuGrant {
 	assert(cpu.currentGrant.domain != nil)
-	assert(cpu.currentGrant.weight > 0 && cpu.currentGrant.weight <= SCHED_WEIGHT_TOTAL)
+	assert(cpu.currentGrant.weight > 0 && cpu.currentGrant.weight <= syscalls.SCHED_WEIGHT_TOTAL)
 	assert(cpu.currentGrant.virtualTime >= cpu.floorVirtualTime)
 
 	now := ah.rdtsc_asm()
@@ -230,106 +330,89 @@ grant_account_current :: proc(cpu: ^CpuState) -> CpuGrant {
 	assert(!clockWrapped, "grant clock moved backwards")
 	elapsed = min(elapsed, GRANT_MAX_CHARGE_TICKS)
 
-	if cpu.floorVirtualTime >= GRANT_REBASE_FLOOR do grant_rebase_virtual_times(cpu)
+	if cpu.floorVirtualTime >= GRANT_REBASE_FLOOR do grant_rebase_virtual_times_DOESNT_LOCK(cpu)
 	assert(cpu.floorVirtualTime < GRANT_REBASE_FLOOR)
 	assert(
 		cpu.currentGrant.virtualTime - cpu.floorVirtualTime <=
-		GRANT_MAX_CHARGE_TICKS * SCHED_WEIGHT_TOTAL,
+		2 * GRANT_MAX_CHARGE_TICKS * syscalls.SCHED_WEIGHT_TOTAL,
 	)
 
-	cpu.currentGrant.virtualTime += elapsed * SCHED_WEIGHT_TOTAL / cpu.currentGrant.weight
+	cpu.currentGrant.virtualTime += elapsed * syscalls.SCHED_WEIGHT_TOTAL / cpu.currentGrant.weight
 	cpu.grantStartTsc = now
 	return cpu.currentGrant
 }
 
-grant_stop_current :: proc(cpu: ^CpuState, reason: GrantStopReason) {
+grant_stop_current :: proc(cpu: ^CpuState) {
 	assert(cpu != nil)
-	if cpu == nil || cpu.currentGrant.domain == nil do return
+	assert(cpu.currentGrant.domain != nil)
+	assert(!cpu.currentGrant.sleepState.asleep)
 
-	grant := grant_account_current(cpu)
-
-	switch reason {
-	case .Yield:
-		err := grant_insert(cpu, grant)
-		print.kensure(err == {}, "grant requeue failed")
-
-	case .Sleep:
-		grant.sleepState.asleep = true
-		err := grant_insert(cpu, grant)
-		print.kensure(err == {}, "grant sleep requeue failed")
-
-	case .Exit:
-	// Finished grants are not reinserted.
+	spinlock.lock(&cpu.grantLock)
+	defer spinlock.unlock(&cpu.grantLock)
+	defer {
+		cpu.currentGrant = {}
+		cpu.grantStartTsc = 0
 	}
 
-	cpu.currentGrant = {}
-	cpu.grantStartTsc = 0
-}
+	if cpu.currentGrant.weight == 0 do return
 
-grant_wake_cpu :: proc(cpu: ^CpuState) {
-	intrinsics.atomic_add(&cpu.wakeEvent, 1)
-
-	current := gs_read_cpustate()
-	if current != nil && current == cpu do return
-
-	send_ipi(cpu.apicId, VECTOR_APIC_IPI)
-}
-grant_sleep_current :: proc(cpu: ^CpuState, idleLevel: IdleLevel) {
-	if cpu == nil || cpu.currentGrant.domain == nil do return
-
-	cpu.currentGrant.sleepState = GrantSleepState {
-		idleLevel = idleLevel,
-		asleep    = true,
-	}
-
-	grant_stop_current(cpu, .Sleep)
-	run_abort()
+	grant := grant_account_current_DOESNT_LOCK(cpu)
+	err := grant_insert_DOESNT_LOCK(cpu, grant)
+	print.kensure(err == {}, "grant requeue failed")
 }
 
 grant_wake :: proc(cpu: ^CpuState, domain: ^ProtectionDomain) -> bool {
-	if cpu == nil || domain == nil do return false
+	assert(cpu != nil)
+	assert(domain != nil)
 
 	spinlock.lock(&cpu.grantLock)
 	defer spinlock.unlock(&cpu.grantLock)
 
-	for grant, idx in cpu.grants {
-		if grant.domain != domain || !grant.sleepState.asleep do continue
+	grant, queueIdx := grant_find_DOESNT_LOCK(cpu, domain)
+	if grant == nil || queueIdx < 0 || !grant.sleepState.asleep do return false
 
-		woken := grant
-		woken.sleepState.asleep = false
-		woken.virtualTime = max(woken.virtualTime, cpu.floorVirtualTime)
-		ordered_remove(&cpu.grants, idx)
-		_, err := inject_at(&cpu.grants, grant_insert_index_LOCKED(cpu, woken), woken)
-		assert(err == nil)
-		grant_wake_cpu(cpu)
-		return true
-	}
-
-	return false
+	woken := grant^
+	woken.sleepState.asleep = false
+	woken.virtualTime = max(woken.virtualTime, cpu.floorVirtualTime)
+	ordered_remove(&cpu.grants, queueIdx)
+	err := grant_insert_DOESNT_LOCK(cpu, woken)
+	assert(err == nil)
+	runnable_weight_add_DOESNT_LOCK(cpu, woken.weight)
+	grant_wake_cpu(cpu)
+	return true
 }
 
-GRANT_SLICE_MS :: 5
-USER_RFLAGS_MASK :: u64(0xCD5)
-USER_RFLAGS_FORCED :: u64(0x202)
-
+grant_exit_current :: proc(cpu: ^CpuState) {
+	assert(cpu != nil)
+	domain := cpu.currentGrant.domain
+	assert(domain != nil)
+	{
+		spinlock.rw_write_lock(&domain.lock)
+		defer spinlock.rw_write_unlock(&domain.lock)
+		spinlock.lock(&cpu.grantLock)
+		defer spinlock.unlock(&cpu.grantLock)
+		if cpu.currentGrant.weight > 0 do grant_kill_DOESNT_LOCK(cpu, domain)
+	}
+	grant_stop_current(cpu)
+}
 
 grant_preempt :: proc(cpu: ^CpuState, frame: ^InterruptFrame) -> ! {
 	assert(cpu != nil)
 	grant := &cpu.currentGrant
 	assert(grant.domain != nil)
 	assert(grant.saveArea != nil)
-	domain := grant.domain
 
+	if intrinsics.atomic_load(&grant.weight) == 0 {
+		grant_stop_current(cpu)
+		run_abort()
+	}
+
+	domain := grant.domain
 	saved := false
 	{
 		spinlock.rw_read_lock(&domain.lock)
 		defer spinlock.rw_read_unlock(&domain.lock)
-		if pmm.user_range_accessible(
-			domain.pml4,
-			u64(uintptr(grant.saveArea)),
-			size_of(syscalls.UserSaveArea),
-			write = true,
-		) {
+		if user_range_accessible(domain, u64(uintptr(grant.saveArea)), size_of(syscalls.UserSaveArea), true) {
 			area := grant.saveArea
 			area.fx = cpu.userFx
 			area.rax, area.rbx, area.rcx, area.rdx = frame.rax, frame.rbx, frame.rcx, frame.rdx
@@ -341,7 +424,11 @@ grant_preempt :: proc(cpu: ^CpuState, frame: ^InterruptFrame) -> ! {
 		}
 	}
 
-	grant_stop_current(cpu, saved ? .Yield : .Exit)
+	if saved {
+		grant_stop_current(cpu)
+	} else {
+		grant_exit_current(cpu)
+	}
 	run_abort()
 }
 
@@ -352,14 +439,8 @@ grant_read_save_area :: proc(grant: CpuGrant, out: ^syscalls.UserSaveArea) -> bo
 
 	spinlock.rw_read_lock(&domain.lock)
 	defer spinlock.rw_read_unlock(&domain.lock)
-	if !pmm.user_range_accessible(
-		domain.pml4,
-		u64(uintptr(grant.saveArea)),
-		size_of(syscalls.UserSaveArea),
-		write = false,
-	) {
-		return false
-	}
+	if !user_range_accessible(domain, u64(uintptr(grant.saveArea)), size_of(syscalls.UserSaveArea), false) do return false
+
 	out^ = grant.saveArea^
 	out.rflags = (out.rflags & USER_RFLAGS_MASK) | USER_RFLAGS_FORCED
 	mxcsr := (^u32)(&out.fx[FX_MXCSR_OFFSET])
