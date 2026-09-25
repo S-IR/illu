@@ -22,10 +22,10 @@ GRANT_REBASE_FLOOR :: u64(1) << 62
 #assert(GRANT_REBASE_FLOOR + GRANT_MAX_CHARGE_TICKS * SCHED_WEIGHT_TOTAL <= max(u64) / 2)
 
 CpuGrant :: struct {
-	domain:      ^ProtectionDomain,
-	weight:      u64,
-	virtualTime: u64,
 	saveArea:    ^syscalls.UserSaveArea,
+	weight:      u64,
+	domain:      ^ProtectionDomain,
+	virtualTime: u64,
 	sleepState:  GrantSleepState,
 }
 // Larger values are stored earlier.
@@ -232,7 +232,10 @@ grant_account_current :: proc(cpu: ^CpuState) -> CpuGrant {
 
 	if cpu.floorVirtualTime >= GRANT_REBASE_FLOOR do grant_rebase_virtual_times(cpu)
 	assert(cpu.floorVirtualTime < GRANT_REBASE_FLOOR)
-	assert(cpu.currentGrant.virtualTime - cpu.floorVirtualTime <= GRANT_MAX_CHARGE_TICKS * SCHED_WEIGHT_TOTAL)
+	assert(
+		cpu.currentGrant.virtualTime - cpu.floorVirtualTime <=
+		GRANT_MAX_CHARGE_TICKS * SCHED_WEIGHT_TOTAL,
+	)
 
 	cpu.currentGrant.virtualTime += elapsed * SCHED_WEIGHT_TOTAL / cpu.currentGrant.weight
 	cpu.grantStartTsc = now
