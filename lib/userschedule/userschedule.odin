@@ -1,12 +1,19 @@
 package userschedule
 
 
+SaveControl :: bit_field u64 {
+	restoring: bool | 1,
+	reserved:  u64  | 63,
+}
+#assert(size_of(SaveControl) == size_of(u64))
+
 UserSaveArea :: struct #align (64) {
 	fx:                                   [512]u8,
 	rax, rbx, rcx, rdx, rsi, rdi, rbp:    u64,
 	r8, r9, r10, r11, r12, r13, r14, r15: u64,
 	rip, rsp, rflags:                     u64,
 	gsBase:                               u64,
+	control:                              SaveControl,
 }
 
 
@@ -30,6 +37,7 @@ UserSaveArea :: struct #align (64) {
 #assert(offset_of(UserSaveArea, rsp) == 640)
 #assert(offset_of(UserSaveArea, rflags) == 648)
 #assert(offset_of(UserSaveArea, gsBase) == 656)
+#assert(offset_of(UserSaveArea, control) == 664)
 
 FX_FCW_DEFAULT :: u16(0x037F)
 MXCSR_DEFAULT :: u32(0x1F80)
@@ -37,9 +45,10 @@ FX_MXCSR_OFFSET :: 24
 
 save_area_init :: proc "contextless" (area: ^UserSaveArea, rip, rsp: u64) {
 	area^ = {
-		rip    = rip,
-		rsp    = rsp,
-		rflags = 0x202,
+		rip     = rip,
+		rsp     = rsp,
+		rflags  = 0x202,
+		control = {restoring = true},
 	}
 	(^u16)(&area.fx[0])^ = FX_FCW_DEFAULT
 	(^u32)(&area.fx[FX_MXCSR_OFFSET])^ = MXCSR_DEFAULT
@@ -47,11 +56,17 @@ save_area_init :: proc "contextless" (area: ^UserSaveArea, rip, rsp: u64) {
 
 
 SCHED_WEIGHT_TOTAL :: u64(1_000_000)
+SAVE_AREA_FX_RESERVED :: 464
 
 CPU_INFO_ADDR :: u64(0x7FF0_0000_0000)
 
+MAX_IDLE_STATES :: 7
+
 CpuInfo :: struct #align (64) {
 	runnableWeight: u64,
+	apicId:         u32,
+	mwaitHints:     [MAX_IDLE_STATES]u32,
+	idleCount:      u8,
 	online:         bool,
 }
 #assert(size_of(CpuInfo) == 64)

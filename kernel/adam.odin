@@ -157,19 +157,13 @@ adam_init :: proc(adamImg: elf.ElfImage, pcies: [dynamic]pci.Device) {
 	}
 
 	area := (^userschedule.UserSaveArea)(uintptr(saveAreaPhys))
-	area^ = {
-		rip    = adamImg.entry,
-		rsp    = stackTop,
-		rdi    = u64(syscalls.SchedulerEnterReason.Start),
-		rsi    = u64(uintptr(raw_data(pcies))),
-		rdx    = u64(len(pcies)),
-		rcx    = saveAreaPhys,
-		rflags = USER_RFLAGS_FORCED,
-	}
-	(^u16)(&area.fx[0])^ = FX_FCW_DEFAULT
-	(^u32)(&area.fx[FX_MXCSR_OFFSET])^ = MXCSR_DEFAULT
+	userschedule.save_area_init(area, adamImg.entry, stackTop)
+	area.rdi = u64(syscalls.SchedulerEnterReason.Start)
+	area.rsi = u64(uintptr(raw_data(pcies)))
+	area.rdx = u64(len(pcies))
+	area.rcx = saveAreaPhys
 
-	grantErr := grant_spawn(pd, &cpus[0], area, userschedule.SCHED_WEIGHT_TOTAL)
+	grantErr := grant_spawn(pd, &cpus[0], area, adamImg.entry, userschedule.SCHED_WEIGHT_TOTAL)
 	print.kensure(grantErr == .None, "adam_init: failed to spawn initial grant")
 
 }

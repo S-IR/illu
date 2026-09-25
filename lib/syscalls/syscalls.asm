@@ -1,4 +1,5 @@
 .equ ILLU_SYSCALL_BIT, 0x8000000000000000
+.include "lib/syscalls/user_resume.inc"
 
 .macro SYSCALL_STUB name, nr
 .global \name
@@ -58,3 +59,7 @@ cpu_current_index:
     ret
 
 SYSCALL_STUB  syscall_debug_print, 1000
+
+.global user_resume
+user_resume:
+    USER_RESUME_BODY

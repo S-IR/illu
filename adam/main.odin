@@ -17,7 +17,9 @@ SPIN_COUNTER_OFFSET :: 0x800
 SETTLE_CYCLES :: u64(50_000_000)
 POLL_CYCLES :: u64(100_000)
 WORKER_PRINT_MASK :: u64(1) << 12 - 1
-SPINNER_CODE :: [6]u8{0xF0, 0x48, 0xFF, 0x07, 0xEB, 0xFA}
+ALIVE_PRINT_MASK :: u64(1) << 24 - 1
+PRINTER_PAGES :: 5
+SPINNER_CODE :: [10]u8{0xF0, 0x48, 0xFF, 0x86, 0x00, 0x08, 0x00, 0x00, 0xEB, 0xF6}
 #assert(SPIN_COUNTER_OFFSET >= size_of(userschedule.UserSaveArea))
 #assert(ADAM_WEIGHT + WORKER_EDITED_WEIGHT <= userschedule.SCHED_WEIGHT_TOTAL)
 
@@ -25,7 +27,7 @@ FIRSTPE_BYTES := #load("../firstpe/firstpe.exe", []u8)
 NTD_IMMITATOR_BYTE := #load("../diskimg/ntdll_immitator.dll")
 
 @(export)
-_start :: proc "c" (
+adam_entry :: proc "c" (
 	reason: syscalls.SchedulerEnterReason,
 	pciesPtr: ^pci.Device,
 	pciesLen: u64,
@@ -39,7 +41,7 @@ _start :: proc "c" (
 	switch reason {
 	case .Start:
 		adam_start()
-	case .Fault:
+	case .Fault, .Resume:
 		syscalls.grant_exit()
 	}
 	unreachable()
@@ -64,7 +66,37 @@ adam_start :: proc() -> ! {
 	syscalls.syscall_debug_print_userspace("test passed: destroy running domain", 0)
 	test_firstpe(infos, others[0])
 	syscalls.syscall_debug_print_userspace("test passed: firstpe", 0)
-	syscalls.grant_exit()
+	spawn_printers(others[:])
+	alive_loop()
+}
+
+spawn_printers :: proc(cpus: []u32) {
+	weight := (userschedule.SCHED_WEIGHT_TOTAL - ADAM_WEIGHT) / u64(len(cpus))
+	regions := [1]syscalls.MMapRegion {
+		{pageSize = ._4KB, count = u64(len(cpus)) * PRINTER_PAGES, flags = {.Write, .NX}},
+	}
+	mmapErr, base := syscalls.syscall_mmap_userspace(regions[:])
+	assert(mmapErr == .None)
+	assert(base != nil)
+
+	entry := u64(uintptr(rawptr(syscalls.user_resume)))
+	for cpu, i in cpus {
+		page := u64(uintptr(base)) + u64(i) * PRINTER_PAGES * shared.PAGE_SIZE
+		area := (^userschedule.UserSaveArea)(uintptr(page))
+		stackTop := page + PRINTER_PAGES * shared.PAGE_SIZE
+		userschedule.save_area_init(area, u64(uintptr(rawptr(alive_loop))), stackTop - 8)
+		assert(syscalls.syscall_grant_spawn_userspace(max(int), cpu, area, weight, entry) == .None)
+	}
+}
+
+alive_loop :: proc "c" () -> ! {
+	counter: u64
+	for {
+		if counter & ALIVE_PRINT_MASK == 0 {
+			syscalls.syscall_debug_print_userspace("alive on cpu", u64(syscalls.cpu_current_index()))
+		}
+		counter += 1
+	}
 }
 
 test_worker_edit_kill :: proc(infos: []userschedule.CpuInfo, cpu: u32) {
@@ -82,9 +114,10 @@ test_worker_edit_kill :: proc(infos: []userschedule.CpuInfo, cpu: u32) {
 	userschedule.save_area_init(area, u64(uintptr(rawptr(worker_entry))), stackTop - 8)
 	area.rdi = u64(uintptr(counter))
 
-	assert(syscalls.syscall_grant_spawn_userspace(max(int), cpu, area, WORKER_WEIGHT) == .None)
+	entry := u64(uintptr(rawptr(syscalls.user_resume)))
+	assert(syscalls.syscall_grant_spawn_userspace(max(int), cpu, area, WORKER_WEIGHT, entry) == .None)
 	assert(
-		syscalls.syscall_grant_spawn_userspace(max(int), cpu, area, WORKER_WEIGHT) ==
+		syscalls.syscall_grant_spawn_userspace(max(int), cpu, area, WORKER_WEIGHT, entry) ==
 		.AlreadyOnCpu,
 	)
 	assert(intrinsics.atomic_load(&infos[cpu].runnableWeight) == baseline + WORKER_WEIGHT)
@@ -138,11 +171,9 @@ test_domain_destroy_while_running :: proc(infos: []userschedule.CpuInfo, cpus: [
 	for cpu, i in cpus {
 		page := areas + u64(i) * shared.PAGE_SIZE
 		area := (^userschedule.UserSaveArea)(uintptr(page))
-		userschedule.save_area_init(area, code, 0)
 		counters[i] = (^u64)(uintptr(page + SPIN_COUNTER_OFFSET))
-		area.rdi = u64(uintptr(counters[i]))
 		baselines[i] = intrinsics.atomic_load(&infos[cpu].runnableWeight)
-		assert(syscalls.syscall_grant_spawn_userspace(handle, cpu, area, weight) == .None)
+		assert(syscalls.syscall_grant_spawn_userspace(handle, cpu, area, weight, code) == .None)
 	}
 	for counter in counters do wait_counter_moves(counter)
 

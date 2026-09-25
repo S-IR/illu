@@ -1,17 +1,32 @@
 package kernel
 import "../lib/lmem"
+import "../lib/shared"
 import "../lib/syscalls"
+import "../lib/userschedule"
 import "base:intrinsics"
+import "pmm"
 
 USER_ADDR_END :: u64(1) << 47
 
 mem_region_valid :: proc "contextless" (r: syscalls.MemRegion) -> bool {
+	if r.pageSize != ._4KB || r.size == 0 do return false
 	pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
-	if pageBytes == 0 || r.size == 0 do return false
 	if r.phys % pageBytes != 0 || r.logical % pageBytes != 0 || r.size % pageBytes != 0 do return false
 	_, physOverflow := intrinsics.overflow_add(r.phys, r.size)
 	logicalEnd, logicalOverflow := intrinsics.overflow_add(r.logical, r.size)
-	return !physOverflow && !logicalOverflow && logicalEnd <= USER_ADDR_END
+	if physOverflow || logicalOverflow || logicalEnd > USER_ADDR_END do return false
+	cpuInfoBytes := cpu_infos_bytes(int(CpuInfos.cpuCount))
+	return !resource_ranges_overlap(r.logical, r.size, userschedule.CPU_INFO_ADDR, cpuInfoBytes)
+}
+
+region_covers_kernel :: proc "contextless" (pml4: u64, r: syscalls.MemRegion) -> bool {
+	for offset := u64(0); offset < r.size; offset += shared.PAGE_SIZE {
+		leaf := pmm.leaf_entry(pml4, r.logical + offset)
+		flags := transmute(lmem.PageFlags)leaf
+		if .Present not_in flags || .User in flags do continue
+		if leaf & pmm.ENTRY_ADDR_MASK != r.phys + offset do return true
+	}
+	return false
 }
 
 region_flags_grantable :: proc "contextless" (want, have: lmem.PageFlags) -> bool {

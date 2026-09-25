@@ -108,6 +108,22 @@ cpuid_enable_pcid :: proc "contextless" () {
 	ah.write_cr4(ah.read_cr4() | CR4_PCIDE_BIT)
 }
 
+CR4_FSGSBASE_BIT :: u64(1) << 16
+
+cpuid_has_fsgsbase :: proc() -> bool {
+	FSGSBASE_CPUID_BIT :: 0
+	vendor: ah.CPUIDResult
+	ah.cpuid_asm(.VENDOR_STRING, 0, &vendor)
+	if vendor.eax < u32(ah.CPUIDLeaf.STRUCTURED_EXTENDED_FEATURES) do return false
+	r: ah.CPUIDResult
+	ah.cpuid_asm(.STRUCTURED_EXTENDED_FEATURES, 0, &r)
+	return (r.ebx >> FSGSBASE_CPUID_BIT) & 1 == 1
+}
+
+cpuid_enable_fsgsbase :: proc "contextless" () {
+	ah.write_cr4(ah.read_cr4() | CR4_FSGSBASE_BIT)
+}
+
 cpuid_has_rdtscp :: proc() -> bool {
 	r: ah.CPUIDResult
 	ah.cpuid_asm(.EXTENDED_FEATURE_INFO, 0, &r)

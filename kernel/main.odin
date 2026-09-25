@@ -30,7 +30,6 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	cpuid_init_meltdown_check()
 	cpuid_init_speculation_mitigations()
 	cpuid_init_pcid()
-	cpuid_enable_pcid()
 
 	gdt_tss_fill(&gdtBeforeSched)
 	gdt_tss_load(&gdtBeforeSched)
@@ -54,10 +53,10 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 	mem.arena_init(&tempArena, tempBuf)
 	gKernelCtx = context
 
-	sched_init(params.rsdp)
+	cpus_init(params.rsdp)
 
 	pcies := find_pci_devices(params.rsdp)
 	adam_init(params.adamImg, pcies)
 
-	cpu_idle_loop()
+	grant_loop()
 }

@@ -64,6 +64,7 @@ PeRunError :: enum {
 	ImportGrantFailed,
 	ExportNotFound,
 	SpawnFailed,
+	ResumeEntryNotFound,
 }
 
 pe_run :: proc(
@@ -92,8 +93,17 @@ pe_run :: proc(
 		authorityPtr,
 		bc.image.regions[:],
 	)
-	if createErr != .None do return 0, .DomainCreateFailed
+	if createErr != .None do return -1, .DomainCreateFailed
 	defer if err != .None do syscalls.syscall_prot_domain_destroy_userspace(handle)
+
+	ntdll, ntdllFound := get("ntdll.dll")
+	if !ntdllFound do return handle, .ResumeEntryNotFound
+	resumeRva, resumeFound := ntdll.image.exports[pe_name_hash("user_resume")]
+	if !resumeFound do return handle, .ResumeEntryNotFound
+	resumeEntry := ntdll.base + u64(resumeRva)
+
+	parentCopies := make([dynamic]u64, context.temp_allocator)
+	defer if len(parentCopies) > 0 do syscalls.syscall_mfree_userspace(parentCopies[:])
 
 	mmapRegions := [4]syscalls.MMapRegion {
 		{pageSize = ._4KB, count = 1, flags = {}},
@@ -103,6 +113,9 @@ pe_run :: proc(
 	}
 	mmapErr, base := syscalls.syscall_mmap_userspace(mmapRegions[:])
 	if mmapErr != .None || base == nil do return handle, .StackAllocFailed
+	for _, i in mmapRegions {
+		append(&parentCopies, u64(uintptr(base)) + syscalls.descriptor_offset(mmapRegions[:], i))
+	}
 
 	guardAddr := u64(uintptr(base))
 	stackAddr := guardAddr + syscalls.descriptor_offset(mmapRegions[:], 1)
@@ -183,6 +196,10 @@ pe_run :: proc(
 		if len(privateRegions) > 0 {
 			privErr, privBase := syscalls.syscall_mmap_userspace(privateRegions[:])
 			if privErr != .None || privBase == nil do return handle, .ImportGrantFailed
+			for _, i in privateRegions {
+				offset := syscalls.descriptor_offset(privateRegions[:], i)
+				append(&parentCopies, u64(uintptr(privBase)) + offset)
+			}
 
 			idx := 0
 			for region in dep.image.regions {
@@ -214,7 +231,7 @@ pe_run :: proc(
 	entryRsp := stackAddr + PE_STACK_SIZE - WIN64_SHADOW_SPACE - RETURN_ADDRESS_SIZE
 	userschedule.save_area_init(area, bc.base + u64(entryRva), entryRsp)
 	area.gsBase = tebLogical
-	if syscalls.syscall_grant_spawn_userspace(handle, cpu, area, weight) != .None do return handle, .SpawnFailed
+	if syscalls.syscall_grant_spawn_userspace(handle, cpu, area, weight, resumeEntry) != .None do return handle, .SpawnFailed
 
 	return handle, .None
 }

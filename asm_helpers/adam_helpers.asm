@@ -1,4 +1,12 @@
+.include "lib/syscalls/user_resume.inc"
+
 .text
+
+.global _start
+_start:
+    cmp $RESUME_REASON, %rdi
+    jne adam_entry
+    USER_RESUME_BODY
 
 .global mmio_read_u8
 mmio_read_u8:
