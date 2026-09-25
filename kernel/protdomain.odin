@@ -1,205 +1,155 @@
 package kernel
+import "../lib/shared"
 import "../lib/spinlock"
-import "../lib/syscalls"
+import "core:mem"
 import "pmm"
-import "print"
 ProtectionDomain :: struct {
 	pml4:           u64,
 	lock:           spinlock.RWLock,
-	resources:      [dynamic]MemoryResource,
-	executionCount: int,
-	slotIdx:        int,
-	generation:     u32,
-	executions:     [dynamic]^Execution,
-	pcid:           u32,
-	killed:         bool,
-	attachmentEntry: u64,
+	resources:    [dynamic]MemoryResource,
+	authorityPtr: ^byte,
+	pcid:         u32,
 }
-#assert(offset_of(ProtectionDomain, attachmentEntry) == 128)
 
-currentProtDomains := struct {
-	lock:        spinlock.Spinlock,
-	prots:       [dynamic]^ProtectionDomain,
-	generations: [dynamic]u32,
-	freeSlots:   [dynamic]int,
+protDomainPool := struct {
+	rwLock:    spinlock.RWLock,
+	prots:     [dynamic]^ProtectionDomain,
+	freeSlots: [dynamic]int,
 }{}
 
-PROT_DOMAIN_ARRAY_START_CAP :: 8
+PROT_DOMAIN_ARRAY_START_CAP :: 64
+MEMORY_RESOURCES_STARTING_CAP :: 16
 
+ProtDomainTargetError :: enum {
+	None,
+	InvalidHandle,
+	NoPermission,
+}
 
-protdomain_register :: proc(pd: ^ProtectionDomain) {
-	print.kassert(pd != nil, "protdomain_register: nil domain")
-	if pd == nil do return
+// Caller must hold protDomainPool.rwLock before calling this procedure and
+// must keep it held while using the returned domain.
+protdomain_resolve_target_RUN_ON_LOCK :: proc(
+	handle: int,
+	caller: ^ProtectionDomain,
+) -> (
+	target: ^ProtectionDomain,
+	err: ProtDomainTargetError,
+) {
+	if caller == nil do return nil, .NoPermission
 
-	spinlock.lock(&currentProtDomains.lock)
-	defer spinlock.unlock(&currentProtDomains.lock)
-
-	if currentProtDomains.prots == nil {
-		currentProtDomains.prots = make([dynamic]^ProtectionDomain, 0, PROT_DOMAIN_ARRAY_START_CAP)
-		currentProtDomains.generations = make([dynamic]u32, 0, PROT_DOMAIN_ARRAY_START_CAP)
-	}
-
-	if len(currentProtDomains.freeSlots) > 0 {
-		idx := pop(&currentProtDomains.freeSlots)
-		currentProtDomains.prots[idx] = pd
-		currentProtDomains.generations[idx] += 1
-		pd.slotIdx = idx
-		pd.generation = currentProtDomains.generations[idx]
+	if handle == max(int) {
+		target = caller
 	} else {
-		append(&currentProtDomains.prots, pd)
-		append(&currentProtDomains.generations, u32(1))
-		pd.slotIdx = len(currentProtDomains.prots) - 1
-		pd.generation = 1
+		if handle < 0 || handle >= len(protDomainPool.prots) do return nil, .InvalidHandle
+		target = protDomainPool.prots[handle]
+		if target == nil do return nil, .InvalidHandle
 	}
-}
 
-protdomain_handle_encode :: proc "contextless" (pd: ^ProtectionDomain) -> u64 {
-	return u64(u32(pd.slotIdx)) | (u64(pd.generation) << 32)
-}
-
-protdomain_handle_resolve :: proc "contextless" (handle: u64) -> ^ProtectionDomain {
-	idx := int(u32(handle))
-	gen := u32(handle >> 32)
-	spinlock.lock(&currentProtDomains.lock)
-	defer spinlock.unlock(&currentProtDomains.lock)
-	if idx < 0 || idx >= len(currentProtDomains.prots) do return nil
-	pd := currentProtDomains.prots[idx]
-	if pd == nil || pd.generation != gen do return nil
-	return pd
-}
-
-// handle == 0 means "the caller's own domain" -- 0 can never be a real
-// encoded handle since generation starts at 1 and only increases.
-protdomain_resolve_target :: proc "contextless" (
-	handle: u64,
-	callerDomain: ^ProtectionDomain,
-) -> ^ProtectionDomain {
-	if handle == 0 do return callerDomain
-	return protdomain_handle_resolve(handle)
-}
-
-protdomain_unregister :: proc(pd: ^ProtectionDomain) {
-	print.kassert(pd != nil, "protdomain_unregister: nil domain")
-	if pd == nil do return
-
-	spinlock.lock(&currentProtDomains.lock)
-	defer spinlock.unlock(&currentProtDomains.lock)
-
-	print.kassert(currentProtDomains.prots != nil, "protdomain_unregister: registry empty")
-	print.kassert(
-		pd.slotIdx >= 0 && pd.slotIdx < len(currentProtDomains.prots),
-		"protdomain_unregister: bad slotIdx",
-	)
-	print.kassert(
-		currentProtDomains.prots[pd.slotIdx] == pd,
-		"protdomain_unregister: slot mismatch",
-	)
-
-	currentProtDomains.prots[pd.slotIdx] = nil
-	if currentProtDomains.freeSlots == nil {
-		currentProtDomains.freeSlots = make([dynamic]int, 0, PROT_DOMAIN_ARRAY_START_CAP)
+	if target.authorityPtr == nil do return nil, .NoPermission
+	if !pmm.user_range_accessible(
+		caller.pml4,
+		u64(uintptr(target.authorityPtr)),
+		size_of(target.authorityPtr^),
+		true,
+	) {
+		return nil, .NoPermission
 	}
-	append(&currentProtDomains.freeSlots, pd.slotIdx)
+
+	return target, .None
 }
 
-resource_upper_bound :: proc "contextless" (resources: []MemoryResource, phys: u64) -> int {
-	low, high := 0, len(resources)
-	for low < high {
-		mid := (low + high) / 2
-		if resources[mid].overlay.phys <= phys {
-			low = mid + 1
-		} else {
-			high = mid
-		}
-	}
-	return low
-}
-
-resource_find_exact :: proc "contextless" (
-	resources: []MemoryResource,
-	phys: u64,
+protdomain_new :: proc(
+	authorityPtr: ^byte,
 ) -> (
-	ptr: ^MemoryResource,
-	found: bool,
+	pd: ^ProtectionDomain,
+	idx: int = -1,
+	err: mem.Allocator_Error,
 ) {
-	insertIdx := resource_upper_bound(resources, phys)
-	if insertIdx == 0 do return nil, false
+	assert(len(cpus) > 0)
+	assert(authorityPtr != nil)
 
-	candidate := &resources[insertIdx - 1]
-	if candidate.overlay.phys != phys do return nil, false
-	return candidate, true
-}
+	newPD, allocErr := new(ProtectionDomain)
+	if allocErr != {} do return nil, -1, allocErr
+	assert(newPD != nil)
+	defer if err != {} do free(newPD)
 
-resource_find_containing :: proc "contextless" (
-	resources: []MemoryResource,
-	phys: u64,
-) -> (
-	ptr: ^MemoryResource,
-	found: bool,
-) {
-	insertIdx := resource_upper_bound(resources, phys)
-	if insertIdx == 0 do return nil, false
+	newPD.authorityPtr = authorityPtr
 
-	candidate := &resources[insertIdx - 1]
-	if phys < candidate.overlay.phys || phys >= candidate.overlay.phys + candidate.overlay.size do return nil, false
-	return candidate, true
-}
+	newPD.resources = make([dynamic]MemoryResource, 0, MEMORY_RESOURCES_STARTING_CAP) or_return
+	defer if err != {} do delete(newPD.resources)
 
-resource_ranges_overlap :: proc "contextless" (aPhys, aSize, bPhys, bSize: u64) -> bool {
-	return aPhys < bPhys + bSize && bPhys < aPhys + aSize
-}
+	newPD.pml4 = pmm.alloc_zeroed(shared.PAGE_SIZE)
+	if newPD.pml4 == 0 do return nil, -1, .Out_Of_Memory
+	defer if err != {} do pmm.pml4_destroy(newPD.pml4)
 
-// Whether [phys, phys+size) would collide with anything already tracked.
-// Shared by resource_insert and by callers that need to check without
-// mutating anything.
-resource_overlaps :: proc "contextless" (resources: []MemoryResource, phys, size: u64) -> bool {
-	insertIdx := resource_upper_bound(resources, phys)
-	if insertIdx > 0 {
-		prev := resources[insertIdx - 1]
-		if resource_ranges_overlap(phys, size, prev.overlay.phys, prev.overlay.size) do return true
+	if cpuMeltdownVulnerable {
+		pmm.pml4_map_kernel_image(newPD.pml4)
+	} else {
+		pmm.pml4_deep_copy(newPD.pml4, pmm.kernelPML4, true)
 	}
-	if insertIdx < len(resources) {
-		next := resources[insertIdx]
-		if resource_ranges_overlap(phys, size, next.overlay.phys, next.overlay.size) do return true
+
+	if cpuHasPCID {
+		newPD.pcid = pcid_alloc()
+		assert(newPD.pcid != 0)
+		defer if err != {} do pcid_free(newPD.pcid)
 	}
-	return false
+
+	spinlock.rw_write_lock(&protDomainPool.rwLock)
+	defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
+
+	if protDomainPool.prots == nil {
+		assert(protDomainPool.freeSlots == nil || len(protDomainPool.freeSlots) == 0)
+		protDomainPool.prots = make(
+			[dynamic]^ProtectionDomain,
+			0,
+			PROT_DOMAIN_ARRAY_START_CAP,
+		) or_return
+	}
+
+	if len(protDomainPool.freeSlots) > 0 {
+		idx = pop(&protDomainPool.freeSlots)
+		assert(idx >= 0 && idx < len(protDomainPool.prots))
+		assert(protDomainPool.prots[idx] == nil)
+	} else {
+		idx = len(protDomainPool.prots)
+		append(&protDomainPool.prots, (^ProtectionDomain)(nil)) or_return
+	}
+
+	assert(idx >= 0 && idx < len(protDomainPool.prots))
+	assert(protDomainPool.prots[idx] == nil)
+	protDomainPool.prots[idx] = newPD
+	pd = newPD
+	newPD = nil
+
+	return pd, idx, {}
 }
 
-resource_insert :: proc(
-	resources: ^[dynamic]MemoryResource,
-	resource: MemoryResource,
-) -> (
-	ptr: ^MemoryResource,
-	inserted: bool,
-) {
-	if resource.overlay.size == 0 do return nil, false
-	if resource.overlay.phys + resource.overlay.size < resource.overlay.phys do return nil, false
-	if resource_overlaps(resources[:], resource.overlay.phys, resource.overlay.size) do return nil, false
+protdomain_destroy :: proc(idx: int) -> (err: mem.Allocator_Error) {
+	pd: ^ProtectionDomain
+	{
+		spinlock.rw_write_lock(&protDomainPool.rwLock)
+		defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
 
-	insertIdx := resource_upper_bound(resources[:], resource.overlay.phys)
-	_, aErr := inject_at(resources, insertIdx, resource)
-	if aErr != nil do return nil, false
-	return &resources[insertIdx], true
+		if protDomainPool.prots == nil do return
+		if idx < 0 || idx >= len(protDomainPool.prots) do return
+
+		pd = protDomainPool.prots[idx]
+		assert(pd != nil)
+		if pd == nil do return
+		assert(pd.pml4 != 0)
+		assert(pd.resources != nil)
+		assert(pd.authorityPtr != nil)
+
+		append(&protDomainPool.freeSlots, idx) or_return
+		protDomainPool.prots[idx] = nil
+	}
+
+	pmm.pml4_destroy(pd.pml4)
+	if pd.pcid != 0 do pcid_free(pd.pcid)
+	delete(pd.resources)
+	free(pd)
+	return
 }
-
-resource_remove :: proc(
-	resources: ^[dynamic]MemoryResource,
-	phys: u64,
-) -> (
-	removed: MemoryResource,
-	found: bool,
-) {
-	insertIdx := resource_upper_bound(resources[:], phys)
-	if insertIdx == 0 do return {}, false
-
-	candidate := &resources[insertIdx - 1]
-	if candidate.overlay.phys != phys do return {}, false
-
-	removed = candidate^
-	ordered_remove(resources, insertIdx - 1)
-	return removed, true
-}
-
 
 domains_write_lock :: proc "contextless" (a, b: ^ProtectionDomain) {
 	if a == b {

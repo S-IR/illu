@@ -39,7 +39,7 @@ GetProcessHeap :: proc "c" () -> rawptr {
 HeapAlloc :: proc "c" (heap: rawptr, flags: u32, size: uint) -> rawptr {
 	context = runtime.default_context()
 	p, err := alloc.heap_alloc(int(size), 0, true)
-	if err != nil do return nil
+	if err != {} do return nil
 	return p
 }
 

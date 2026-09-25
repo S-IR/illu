@@ -43,7 +43,7 @@ run_tests :: proc() {
 
 collect_objs :: proc(dir: string) -> [dynamic]string {
 	d, err := os.read_directory_by_path(dir, -1, context.temp_allocator)
-	if err != nil {
+	if err != {} {
 		panic(fmt.tprintf("failed to read directory %s: %s", dir, os.error_string(err)))
 	}
 	out := make([dynamic]string, context.temp_allocator)
@@ -73,7 +73,7 @@ exec :: proc(command: []string) {
 		os.Process_Desc{working_dir = ".", command = command},
 		allocator = context.temp_allocator,
 	)
-	if err != nil {
+	if err != {} {
 		panic(fmt.tprintf("error executing %v: %s", command, os.error_string(err)))
 	}
 	msg := fmt.tprintf("%s%s", string(stdout), string(stderr))

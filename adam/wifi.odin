@@ -1,35 +1,35 @@
 package adam
 
+import ah "../asm_helpers"
 import "../lib/pci"
 import "../lib/spinlock"
-import ah "../asm_helpers"
 
 import "base:runtime"
 import "core:mem"
 
 
 RTL8822BE_State :: struct #all_or_none {
-	bar: pci.Bar,
-	mmio: u64,
-	txDma: rawptr,
-	txDmaPhys: u64,
+	bar:        pci.Bar,
+	mmio:       u64,
+	txDma:      rawptr,
+	txDmaPhys:  u64,
 	txSlotSize: u32,
-	txSlots: u16,
-	txHead:           u16,
-	txLock:           spinlock.Spinlock,
-	rxDma: rawptr,
-	rxDmaPhys: u64,
+	txSlots:    u16,
+	txHead:     u16,
+	txLock:     spinlock.Spinlock,
+	rxDma:      rawptr,
+	rxDmaPhys:  u64,
 	rxSlotSize: u32,
-	rxSlots: u16,
-	rxHead:           u16,
-	rxTail:           u16,
-	rxLock:           spinlock.Spinlock,
+	rxSlots:    u16,
+	rxHead:     u16,
+	rxTail:     u16,
+	rxLock:     spinlock.Spinlock,
 }
 
 WifiDma :: struct {
-	tx: rawptr,
+	tx:     rawptr,
 	txPhys: u64,
-	rx: rawptr,
+	rx:     rawptr,
 	rxPhys: u64,
 }
 
@@ -57,7 +57,7 @@ wifi_register :: proc(device: WifiDevice) -> (err: runtime.Allocator_Error) {
 
 	if networkRegistry.wifis == nil {
 		networkRegistry.wifis, err = make([dynamic]WifiDevice, 0, 1)
-		if err != nil do return err
+		if err != {} do return err
 	}
 
 	_, err = append(&networkRegistry.wifis, device)
@@ -143,7 +143,9 @@ rtl8822be_poll :: proc(state: ^RTL8822BE_State, buffer: []u8) -> (WifiError, int
 	slot := uintptr(state.rxTail)
 	desc := rawptr(uintptr(state.rxDma) + slot * 8)
 	count := min(u32(len(buffer)), u32((^u16)(rawptr(uintptr(desc) + 2))^))
-	source := rawptr(uintptr(state.rxDma) + uintptr(state.rxSlots * 8) + slot * uintptr(state.rxSlotSize))
+	source := rawptr(
+		uintptr(state.rxDma) + uintptr(state.rxSlots * 8) + slot * uintptr(state.rxSlotSize),
+	)
 	mem.copy(rawptr(&buffer[0]), source, int(count))
 	(^u16)(rawptr(uintptr(desc) + 2))^ = 0
 	state.rxTail = (state.rxTail + 1) % state.rxSlots

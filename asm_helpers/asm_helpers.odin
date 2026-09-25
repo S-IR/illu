@@ -10,12 +10,9 @@ PIT_CMD_PORT :: u16(0x43)
 PIT_CH2_PORT :: u16(0x42)
 PIT_CH2_GATE :: u16(0x61)
 
-KERNEL_DS :: 0x10
 when !ODIN_TEST {
 	@(default_calling_convention = "c")
 	foreign _ {
-		user_thread_entry :: proc() ---
-		int3me :: proc() ---
 		kernel_start_setup :: proc() ---
 		halt :: proc() -> ! ---
 		serial_init_asm :: proc() ---
@@ -55,9 +52,6 @@ when !ODIN_TEST {
 		inb :: proc(port: u16) -> u8 ---
 		cpu_pause :: proc() ---
 
-		sti_asm :: proc() ---
-		monitor_asm :: proc(addr: rawptr) ---
-		read_rsp :: proc() -> u64 ---
 		read_rbp :: proc() -> u64 ---
 
 		invpcid_asm :: proc(type: u64, pcid: u64) ---
@@ -75,9 +69,8 @@ when !ODIN_TEST {
 
 } else {
 
-	int3me :: proc "contextless" () {}
 	kernel_start_setup :: proc "contextless" () {}
-	halt :: proc "contextless" () {}
+	halt :: proc "contextless" () -> ! {for {}}
 	serial_init_asm :: proc "contextless" () {}
 	serial_write_byte_asm :: proc "contextless" (c: u8) {}
 
@@ -116,12 +109,9 @@ when !ODIN_TEST {
 	inb :: proc "contextless" (port: u16) -> u8 {return 0}
 	cpu_pause :: proc "contextless" () {}
 
-	sti_asm :: proc "contextless" () {}
-	monitor_asm :: proc "contextless" (addr: rawptr) {}
 
 	invpcid_asm :: proc "contextless" (type: u64, pcid: u64) {}
 
 	pit_delay_us :: proc "contextless" (us: u32) {}
-	read_rsp :: proc "contextless" () -> u64 {return 0}
 	read_rbp :: proc "contextless" () -> u64 {return 0}
 }

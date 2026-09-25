@@ -21,8 +21,6 @@
 SYSCALL_NORET syscall_exit,  0
 SYSCALL_STUB  syscall_mmap,  1
 SYSCALL_STUB  syscall_mfree, 2
-SYSCALL_STUB  syscall_interrupt_vector_get, 3
-SYSCALL_STUB  syscall_interrupt_wait, 4
 SYSCALL_STUB  syscall_multiplexed_memory_create, 5
 
 .global syscall_multiplexed_memory_read
@@ -52,16 +50,5 @@ syscall_prot_domain_edit:
     ret
 
 SYSCALL_STUB  syscall_prot_domain_destroy, 10
-
-.global syscall_execution_start
-syscall_execution_start:
-    # System V arg4 is rcx; syscall arg4 is r10.
-    mov %rcx, %r10
-    movabs $(ILLU_SYSCALL_BIT + 11), %rax
-    syscall
-    ret
-
-SYSCALL_STUB  syscall_attachment_set, 12
-SYSCALL_STUB  syscall_attachment_remove, 13
 
 SYSCALL_STUB  syscall_debug_print, 1000

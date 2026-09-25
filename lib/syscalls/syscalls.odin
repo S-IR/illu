@@ -12,25 +12,56 @@ MMapRegion :: struct #packed {
 	flags:    lmem.PageFlags,
 }
 ILLU_SYSCALL_BIT :: u64(1) << 63
+SchedulerEnterReason :: enum u64 {
+	Start,
+	Fault,
+}
+
+UserSaveArea :: struct #align (64) {
+	fx:                                   [512]u8,
+	rax, rbx, rcx, rdx, rsi, rdi, rbp:    u64,
+	r8, r9, r10, r11, r12, r13, r14, r15: u64,
+	rip, rsp, rflags:                     u64,
+}
+#assert(offset_of(UserSaveArea, fx) == 0)
+#assert(offset_of(UserSaveArea, rax) == 512)
+#assert(offset_of(UserSaveArea, rbx) == 520)
+#assert(offset_of(UserSaveArea, rcx) == 528)
+#assert(offset_of(UserSaveArea, rdx) == 536)
+#assert(offset_of(UserSaveArea, rsi) == 544)
+#assert(offset_of(UserSaveArea, rdi) == 552)
+#assert(offset_of(UserSaveArea, rbp) == 560)
+#assert(offset_of(UserSaveArea, r8) == 568)
+#assert(offset_of(UserSaveArea, r9) == 576)
+#assert(offset_of(UserSaveArea, r10) == 584)
+#assert(offset_of(UserSaveArea, r11) == 592)
+#assert(offset_of(UserSaveArea, r12) == 600)
+#assert(offset_of(UserSaveArea, r13) == 608)
+#assert(offset_of(UserSaveArea, r14) == 616)
+#assert(offset_of(UserSaveArea, r15) == 624)
+#assert(offset_of(UserSaveArea, rip) == 632)
+#assert(offset_of(UserSaveArea, rsp) == 640)
+#assert(offset_of(UserSaveArea, rflags) == 648)
+
+GrantSaveAreaError :: enum u64 {
+	None,
+	Misaligned,
+	NoPermission,
+}
 
 Syscall :: enum u64 {
 	Exit = ILLU_SYSCALL_BIT,
 	MMap,
 	MFree,
-	InterruptVectorGet,
-	InterruptWait,
-	MultiplexedMemoryCreate,
-	MultiplexedMemoryRead,
-	MultiplexedMemoryWrite,
-	ProtDomainCreate,
-	ProtDomainEdit,
-	ProtDomainDestroy,
-	ExecutionStart,
+	MultiplexedMemoryCreate = 5,
+	MultiplexedMemoryRead = 6,
+	MultiplexedMemoryWrite = 7,
+	ProtDomainCreate = 8,
+	ProtDomainEdit = 9,
+	ProtDomainDestroy = 10,
 	// Parked at a high, isolated number (debug-build only, see ODIN_DEBUG
 	// below) so it never collides with a real syscall number as the table
 	// above grows.
-	AttachmentSet,
-	AttachmentRemove,
 	DebugPrint = ILLU_SYSCALL_BIT + 1000,
 }
 
@@ -47,19 +78,6 @@ MFreeError :: enum u64 {
 	InvalidAddress,
 	InvalidSize,
 	OutOfMemory,
-}
-
-InterruptVectorGetError :: enum u64 {
-	None,
-	NoPermission,
-	NoVectors,
-}
-
-InterruptWaitError :: enum u64 {
-	None,
-	NoPermission,
-	InvalidVector,
-	AlreadyWaiting,
 }
 
 MultiplexedMemoryError :: enum u64 {
@@ -105,29 +123,7 @@ ProtDomainDestroyError :: enum u64 {
 	InvalidHandle,
 }
 
-ExecutionStartError :: enum u64 {
-	None,
-	NoPermission,
-	InvalidHandle,
-	InvalidEntry,
-	OutOfMemory,
-}
-
 KERNEL_BUILD :: #config(KERNEL_BUILD, false)
-
-AttachmentSetError :: enum u64 {
-	None,
-	NoPermission,
-	InvalidHandle,
-	InvalidEntry,
-}
-
-AttachmentRemoveError :: enum u64 {
-	None,
-	NoPermission,
-	InvalidHandle,
-}
-
 
 when !ODIN_TEST {
 	when !KERNEL_BUILD {
@@ -136,17 +132,12 @@ when !ODIN_TEST {
 			syscall_exit :: proc(code: u64) -> ! ---
 			syscall_mmap :: proc(regionsPtr: u64, regionCount: u64) -> (err: u64, addr: u64) ---
 			syscall_mfree :: proc(addrsPtr: u64, count: u64) -> (err: u64) ---
-			syscall_interrupt_vector_get :: proc(resource_phys: u64) -> (err: u64, vector: u64) ---
-			syscall_interrupt_wait :: proc(vector: u64) -> (err: u64) ---
 			syscall_multiplexed_memory_create :: proc(phys, size: u64) -> (err: u64, handle: u64) ---
 			syscall_multiplexed_memory_read :: proc(handle, offset, dest, size, width: u64) -> (err: u64) ---
 			syscall_multiplexed_memory_write :: proc(handle, offset, source, size, width: u64) -> (err: u64) ---
-			syscall_prot_domain_create :: proc(regionsPtr, count: u64) -> (err: u64, handle: u64) ---
-			syscall_prot_domain_edit :: proc(handle, regionsPtr, count, op: u64) -> (err: u64) ---
-			syscall_prot_domain_destroy :: proc(handle: u64) -> (err: u64) ---
-			syscall_execution_start :: proc(handle, entryRip, entryRsp, arg0, arg1, tebBase: u64) -> (err: u64) ---
-			syscall_attachment_set :: proc(handle, entryRip: u64) -> (err: u64) ---
-			syscall_attachment_remove :: proc(handle: u64) -> (err: u64) ---
+			syscall_prot_domain_create :: proc(authorityPtr, regionsPtr, count: u64) -> (err: u64, handle: int) ---
+			syscall_prot_domain_edit :: proc(handle: int, regionsPtr, count, op: u64) -> (err: u64) ---
+			syscall_prot_domain_destroy :: proc(handle: int) -> (err: u64) ---
 
 		}
 
@@ -168,18 +159,6 @@ when !ODIN_TEST {
 			}
 		}
 
-		syscall_attachment_set_userspace :: proc "contextless" (
-			handle, entryRip: u64,
-		) -> AttachmentSetError {
-			return AttachmentSetError(syscall_attachment_set(handle, entryRip))
-		}
-
-		syscall_attachment_remove_userspace :: proc "contextless" (
-			handle: u64,
-		) -> AttachmentRemoveError {
-			return AttachmentRemoveError(syscall_attachment_remove(handle))
-		}
-
 		syscall_mmap_userspace :: proc "contextless" (
 			regions: []MMapRegion,
 		) -> (
@@ -195,25 +174,6 @@ when !ODIN_TEST {
 		syscall_mfree_userspace :: proc "contextless" (addrs: []u64) -> (err: MFreeError) {
 			if len(addrs) == 0 do return .InvalidAddress
 			return MFreeError(syscall_mfree(u64(uintptr(raw_data(addrs))), u64(len(addrs))))
-		}
-
-		syscall_interrupt_vector_get_userspace :: proc "contextless" (
-			resource_phys: u64,
-		) -> (
-			err: InterruptVectorGetError,
-			vector: u8,
-			lapic_id: u32,
-		) {
-			rawErr, packed := syscall_interrupt_vector_get(resource_phys)
-			return InterruptVectorGetError(rawErr), u8(packed & 0xFF), u32(packed >> 8)
-		}
-
-		syscall_interrupt_wait_userspace :: proc "contextless" (
-			vector: u8,
-		) -> (
-			err: InterruptWaitError,
-		) {
-			return InterruptWaitError(syscall_interrupt_wait(u64(vector)))
 		}
 
 		syscall_multiplexed_memory_create_userspace :: proc "contextless" (
@@ -253,12 +213,14 @@ when !ODIN_TEST {
 		}
 
 		syscall_prot_domain_create_userspace :: proc "contextless" (
+			authorityPtr: rawptr,
 			regions: []MemRegion,
 		) -> (
 			err: ProtDomainCreateError,
-			handle: u64,
+			handle: int,
 		) {
 			rawErr, rawHandle := syscall_prot_domain_create(
+				u64(uintptr(authorityPtr)),
 				u64(uintptr(raw_data(regions))),
 				u64(len(regions)),
 			)
@@ -266,7 +228,7 @@ when !ODIN_TEST {
 		}
 
 		syscall_prot_domain_edit_userspace :: proc "contextless" (
-			handle: u64,
+			handle: int,
 			regions: []MemRegion,
 			op: MemRegionOp,
 		) -> (
@@ -283,23 +245,13 @@ when !ODIN_TEST {
 		}
 
 		syscall_prot_domain_destroy_userspace :: proc "contextless" (
-			handle: u64,
+			handle: int,
 		) -> (
 			err: ProtDomainDestroyError,
 		) {
 			return ProtDomainDestroyError(syscall_prot_domain_destroy(handle))
 		}
 
-		syscall_execution_start_userspace :: proc "contextless" (
-			handle, entryRip, entryRsp, arg0, arg1: u64,
-			tebBase: u64,
-		) -> (
-			err: ExecutionStartError,
-		) {
-			return ExecutionStartError(
-				syscall_execution_start(handle, entryRip, entryRsp, arg0, arg1, tebBase),
-			)
-		}
 	}
 }
 
