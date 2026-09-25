@@ -1,10 +1,13 @@
 package pe
 import "../shared"
 import "../syscalls"
+import "../userschedule"
 import "core:mem"
-
 PE_STACK_SIZE :: u64(16 * mem.Kilobyte)
-
+#assert(PE_STACK_SIZE % shared.PAGE_SIZE == 0)
+WIN64_SHADOW_SPACE :: u64(32)
+RETURN_ADDRESS_SIZE :: u64(8)
+#assert((WIN64_SHADOW_SPACE + RETURN_ADDRESS_SIZE) % 16 == 8)
 pe_load_into_memory :: proc(
 	image: ^PeImage,
 	sections: []PeSection,
@@ -17,9 +20,7 @@ pe_load_into_memory :: proc(
 	if !alignOk do return 0, false
 	imagePages := imageBytes / shared.PAGE_SIZE
 
-	mmapRegions := [1]syscalls.MMapRegion {
-		{pageSize = ._4KB, count = imagePages, flags = {.Write, .NX}},
-	}
+	mmapRegions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = imagePages, flags = {.Write}}}
 	mmapErr, base := syscalls.syscall_mmap_userspace(mmapRegions[:])
 	if mmapErr != .None || base == nil do return 0, false
 	defer if !ok do syscalls.syscall_mfree_userspace([]u64{actualBase})
@@ -62,10 +63,19 @@ PeRunError :: enum {
 	ImportNotFound,
 	ImportGrantFailed,
 	ExportNotFound,
+	SpawnFailed,
 }
 
-pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
-	if entryRva == 0 do return .NoEntryPoint
+pe_run :: proc(
+	bc: ^Bytecode,
+	entryRva: u32,
+	cpu: u32,
+	weight: u64,
+) -> (
+	handle: int = -1,
+	err: PeRunError,
+) {
+	if entryRva == 0 do return handle, .NoEntryPoint
 
 	authorityPtr: rawptr
 	for region in bc.image.regions {
@@ -74,23 +84,25 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 			break
 		}
 	}
-	if authorityPtr == nil do return .DomainCreateFailed
+	if authorityPtr == nil do return handle, .DomainCreateFailed
 
-	createErr, handle := syscalls.syscall_prot_domain_create_userspace(
+
+	createErr: syscalls.ProtDomainCreateError
+	createErr, handle = syscalls.syscall_prot_domain_create_userspace(
 		authorityPtr,
 		bc.image.regions[:],
 	)
-	if createErr != .None do return .DomainCreateFailed
+	if createErr != .None do return 0, .DomainCreateFailed
+	defer if err != .None do syscalls.syscall_prot_domain_destroy_userspace(handle)
 
-
-	stackPages := PE_STACK_SIZE / shared.PAGE_SIZE
-	mmapRegions := [3]syscalls.MMapRegion {
+	mmapRegions := [4]syscalls.MMapRegion {
 		{pageSize = ._4KB, count = 1, flags = {}},
-		{pageSize = ._4KB, count = stackPages, flags = {.Write, .NX}},
+		{pageSize = ._4KB, count = PE_STACK_SIZE / shared.PAGE_SIZE, flags = {.Write, .NX}},
+		{pageSize = ._4KB, count = 1, flags = {.Write, .NX}},
 		{pageSize = ._4KB, count = 1, flags = {.Write, .NX}},
 	}
 	mmapErr, base := syscalls.syscall_mmap_userspace(mmapRegions[:])
-	if mmapErr != .None || base == nil do return .StackAllocFailed
+	if mmapErr != .None || base == nil do return handle, .StackAllocFailed
 
 	guardAddr := u64(uintptr(base))
 	stackAddr := guardAddr + syscalls.descriptor_offset(mmapRegions[:], 1)
@@ -100,8 +112,8 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 	(^u64)(rawptr(uintptr(tebLogical + 0x30)))^ = tebLogical
 	(^u64)(rawptr(uintptr(tebLogical + 0x60)))^ = pebLogical
 	(^u64)(rawptr(uintptr(pebLogical + 0x10)))^ = bc.base
-
-	memRegions := [3]syscalls.MemRegion {
+	saveAreaAddr := guardAddr + syscalls.descriptor_offset(mmapRegions[:], 3)
+	memRegions := [len(mmapRegions)]syscalls.MemRegion {
 		{
 			phys = guardAddr,
 			logical = guardAddr,
@@ -123,13 +135,21 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 			pageSize = ._4KB,
 			flags = {.User, .Write, .NX},
 		},
+		{
+			phys = saveAreaAddr,
+			logical = saveAreaAddr,
+			size = shared.PAGE_SIZE,
+			pageSize = ._4KB,
+			flags = {.User, .Write, .NX},
+		},
 	}
 	editErr := syscalls.syscall_prot_domain_edit_userspace(handle, memRegions[:], .Add)
-	if editErr != .None do return .StackGrantFailed
+	if editErr != .None do return handle, .StackGrantFailed
+
 
 	for imp in bc.image.imports {
 		dep, found := get(imp.dll)
-		if !found do return .ImportNotFound
+		if !found do return handle, .ImportNotFound
 
 
 		grantRegions := make(
@@ -162,7 +182,7 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 
 		if len(privateRegions) > 0 {
 			privErr, privBase := syscalls.syscall_mmap_userspace(privateRegions[:])
-			if privErr != .None || privBase == nil do return .ImportGrantFailed
+			if privErr != .None || privBase == nil do return handle, .ImportGrantFailed
 
 			idx := 0
 			for region in dep.image.regions {
@@ -178,15 +198,23 @@ pe_run :: proc(bc: ^Bytecode, entryRva: u32, arg0, arg1: u64) -> PeRunError {
 			}
 		}
 		importEditErr := syscalls.syscall_prot_domain_edit_userspace(handle, grantRegions[:], .Add)
-		if importEditErr != .None do return .ImportGrantFailed
+		if importEditErr != .None do return handle, .ImportGrantFailed
 
 
 		for entry in imp.entries {
 			rva, exportFound := dep.image.exports[entry.nameHash]
-			if !exportFound do return .ExportNotFound
+			if !exportFound do return handle, .ExportNotFound
 			slot := (^u64)(rawptr(uintptr(bc.base) + uintptr(entry.thunkRva)))
 			slot^ = dep.base + u64(rva)
 		}
 	}
-	return .None
+
+
+	area := (^userschedule.UserSaveArea)(uintptr(saveAreaAddr))
+	entryRsp := stackAddr + PE_STACK_SIZE - WIN64_SHADOW_SPACE - RETURN_ADDRESS_SIZE
+	userschedule.save_area_init(area, bc.base + u64(entryRva), entryRsp)
+	area.gsBase = tebLogical
+	if syscalls.syscall_grant_spawn_userspace(handle, cpu, area, weight) != .None do return handle, .SpawnFailed
+
+	return handle, .None
 }

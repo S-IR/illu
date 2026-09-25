@@ -68,7 +68,10 @@ buddy_alloc :: proc "contextless" (order: u8) -> u64 {
 @(private)
 buddy_free :: proc "contextless" (addr: u64, order: u8) {
 	page := rawptr_to_page(rawptr(uintptr(addr)))
+	print.kassert(page % (u64(1) << order) == 0, "buddy_free: block misaligned for order")
+	print.kassert(page + (u64(1) << order) <= state.totalPages, "buddy_free: block past end")
 	for i in u64(0) ..< (u64(1) << order) {
+		print.kassert(is_used(&state, page + i), "buddy_free: page already free")
 		kclear(&state, page + i)
 	}
 

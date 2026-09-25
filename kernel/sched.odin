@@ -1,4 +1,6 @@
 package kernel
+import "../lib/userschedule"
+
 import ah "../asm_helpers"
 import "../lib/acpi"
 import "../lib/shared"
@@ -53,7 +55,8 @@ CpuState :: struct #align (16) {
 	wakeEvent:         u32,
 	idleInfo:          CpuIdleInfo,
 	selectedIdleLevel: IdleLevel,
-	info:              ^syscalls.CpuInfo,
+	info:              ^userschedule.CpuInfo,
+	tlbEpoch:          u64,
 }
 #assert(offset_of(CpuState, self) == 0)
 #assert(offset_of(CpuState, kernelStackTop) == 8)
@@ -97,7 +100,7 @@ sched_init :: proc(rsdp: ^acpi.Rsdp) {
 	cpus, aErr = make([]CpuState, totalCores)
 	print.kensure(aErr == nil, "OOM sched_init: cpus")
 
-	CpuInfos = (^syscalls.CpuInfoPage)(uintptr(pmm.alloc_zeroed(cpu_infos_bytes(totalCores))))
+	CpuInfos = (^userschedule.CpuInfoPage)(uintptr(pmm.alloc_zeroed(cpu_infos_bytes(totalCores))))
 	print.kensure(CpuInfos != nil, "sched_init: cpu info alloc failed")
 	CpuInfos.cpuCount = u32(totalCores)
 
@@ -204,7 +207,7 @@ cpu_init :: proc(
 	cpu.self = cpu
 	cpu.apicId = apicId
 	cpu.index = idx
-	cpu.info = &syscalls.cpu_infos(CpuInfos)[idx]
+	cpu.info = &userschedule.cpu_infos(CpuInfos)[idx]
 
 	top := map_cpu_stack(stackBase)
 	cpu.kernelStackTop = top
@@ -259,7 +262,6 @@ cpu_syscall_init :: proc() {
 
 FX_FCW_DEFAULT :: u16(0x037F)
 MXCSR_DEFAULT :: u32(0x1F80)
-MXCSR_SAFE_MASK :: u32(0xFFBF)
 FX_MXCSR_OFFSET :: 24
 
 FxArea :: struct #align (16) {
@@ -270,10 +272,10 @@ FxArea :: struct #align (16) {
 cleanFx: FxArea
 
 
-CpuInfos: ^syscalls.CpuInfoPage
+CpuInfos: ^userschedule.CpuInfoPage
 
 cpu_infos_bytes :: proc(count: int) -> u64 {
-	return u64(size_of(syscalls.CpuInfoPage) + size_of(syscalls.CpuInfo) * count)
+	return u64(size_of(userschedule.CpuInfoPage) + size_of(userschedule.CpuInfo) * count)
 }
 
 cpu_info_map :: proc(pml4: u64) {
@@ -285,7 +287,7 @@ cpu_info_map :: proc(pml4: u64) {
 		pmm.map_page(
 			pml4,
 			u64(uintptr(CpuInfos)) + offset,
-			syscalls.CPU_INFO_ADDR + offset,
+			userschedule.CPU_INFO_ADDR + offset,
 			._4KB,
 			{.Present, .User, .NX},
 		)

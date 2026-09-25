@@ -58,6 +58,7 @@ build_ntdll_immitator :: proc() {
 			"lld-link",
 			"-dll",
 			"-noentry",
+			"-machine:x64",
 			"-def:lib/winmitator/ntdll_immitator/ntdll_alias.def",
 			fmt.tprintf("-out:%s", aliasThrowaway),
 			"-implib:" + aliasLib,

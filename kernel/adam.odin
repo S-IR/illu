@@ -4,6 +4,7 @@ import "../lib/lmem"
 import "../lib/pci"
 import "../lib/shared"
 import "../lib/syscalls"
+import "../lib/userschedule"
 import "core:mem"
 import "pmm"
 import "print"
@@ -137,7 +138,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pcies: [dynamic]pci.Device) {
 		}
 	}
 
-	#assert(size_of(syscalls.UserSaveArea) <= shared.PAGE_SIZE)
+	#assert(size_of(userschedule.UserSaveArea) <= shared.PAGE_SIZE)
 	saveAreaPhys := pmm.alloc_zeroed(shared.PAGE_SIZE)
 	print.kensure(saveAreaPhys != 0, "adam_init: save area alloc failed")
 	saveAreaFlags := lmem.PageFlags{.Present, .User, .Write, .NX}
@@ -155,7 +156,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pcies: [dynamic]pci.Device) {
 		print.kensure(inserted, "adam_init: failed to track save area page")
 	}
 
-	area := (^syscalls.UserSaveArea)(uintptr(saveAreaPhys))
+	area := (^userschedule.UserSaveArea)(uintptr(saveAreaPhys))
 	area^ = {
 		rip    = adamImg.entry,
 		rsp    = stackTop,
@@ -168,7 +169,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pcies: [dynamic]pci.Device) {
 	(^u16)(&area.fx[0])^ = FX_FCW_DEFAULT
 	(^u32)(&area.fx[FX_MXCSR_OFFSET])^ = MXCSR_DEFAULT
 
-	grantErr := grant_spawn(pd, &cpus[0], area, syscalls.SCHED_WEIGHT_TOTAL)
+	grantErr := grant_spawn(pd, &cpus[0], area, userschedule.SCHED_WEIGHT_TOTAL)
 	print.kensure(grantErr == .None, "adam_init: failed to spawn initial grant")
 
 }

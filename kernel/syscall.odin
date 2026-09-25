@@ -4,65 +4,11 @@ import "../lib/lmem"
 import "../lib/shared"
 import "../lib/spinlock"
 import "../lib/syscalls"
+import "../lib/userschedule"
 import "base:intrinsics"
 import "core:mem"
 import "pmm"
 import "print"
-
-
-@(export)
-syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, r1: u64) {
-
-
-	switch syscalls.Syscall(nr) {
-	case .MMap:
-		mmapErr, addr := syscall_mmap(a1, a2)
-		return u64(mmapErr), addr
-	case .MFree:
-		return u64(syscall_mfree(a1, a2)), 0
-	case .MultiplexedMemoryCreate:
-		err, handle := syscall_multiplexed_memory_create(a1, a2)
-		return u64(err), handle
-	case .MultiplexedMemoryRead:
-		return u64(syscall_multiplexed_memory_read(a1, a2, a3, a4, a5)), 0
-	case .MultiplexedMemoryWrite:
-		return u64(syscall_multiplexed_memory_write(a1, a2, a3, a4, a5)), 0
-	case .ProtDomainCreate:
-		err, handle := syscall_prot_domain_create((^byte)(uintptr(a1)), a2, a3)
-		return u64(err), transmute(u64)handle
-	case .ProtDomainEdit:
-		return u64(syscall_prot_domain_edit(transmute(int)a1, a2, a3, a4)), 0
-	case .ProtDomainDestroy:
-		return u64(syscall_prot_domain_destroy(transmute(int)a1)), 0
-
-	case .GrantSpawn:
-		return u64(syscall_grant_spawn(transmute(int)a1, a2, a3, a4)), 0
-	case .GrantEdit:
-		return u64(syscall_grant_edit(transmute(int)a1, a2, a3)), 0
-
-	case .DebugPrint:
-		// Debug-only: prints "dbg: <label>: <value> (0x<value>)" to the
-		// serial log. a1/a2 are a (ptr, len) string read straight out of
-		// adam's identity-mapped memory -- fine for a debug-only path, same
-		// trust model as every other pointer adam hands the kernel. Compiled
-		// out entirely in non -debug builds, and unreachable from userspace
-		// there too (lib/syscalls only emits the caller-side stub under
-		// ODIN_DEBUG).
-		when ODIN_DEBUG {
-			label := string(([^]u8)(uintptr(a1))[:a2])
-			spinlock.lock(&serialPrintLock)
-			defer spinlock.unlock(&serialPrintLock)
-			print.serial_write("dbg: ")
-			print.serial_write(label)
-			print.serial_write(": ")
-			print.serial_write_u64(a3)
-			print.serial_write(" (")
-			print.serial_write_hex(a3)
-			print.serial_writeln(")")
-		}
-	}
-	return max(u64), max(u64)
-}
 
 
 @(export)
@@ -94,6 +40,7 @@ syscall_multiplexed_memory_create :: proc "contextless" (
 
 	domain := cpu.currentGrant.domain
 
+	defer if err == .None do tlb_wait_domain_flushed(domain)
 	kernel_switch_cr3()
 	defer domain_switch_cr3(domain)
 
@@ -298,6 +245,9 @@ syscall_mmap :: proc "contextless" (
 
 	// Everything above is validated: range is free, capacity is reserved.
 	// Nothing below can fail.
+	underlay := memory_underlay_create(u64(allocatedPhys), totalBytes, .AllocatedRAM)
+	for _ in 1 ..< len(regions) do memory_underlay_increment(underlay)
+
 	offset: u64 = 0
 	for r in regions {
 		pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
@@ -318,7 +268,16 @@ syscall_mmap :: proc "contextless" (
 			)
 		}
 
-		resource := resource_init(regionPhys, rBytes, r.pageSize, mapFlags, {}, .AllocatedRAM)
+		resource := MemoryResource {
+			overlay = {
+				phys = regionPhys,
+				logical = regionPhys,
+				size = rBytes,
+				pageSize = r.pageSize,
+				flags = mapFlags,
+			},
+			underlay = underlay,
+		}
 		_, inserted := resource_insert(&domain.resources, resource)
 		assert(inserted, "previous code should have ensured that insert goes on guaranteed")
 
@@ -346,40 +305,37 @@ syscall_mfree :: proc "contextless" (addrsPtr, count: u64) -> (err: syscalls.MFr
 	if allocErr != nil do return .OutOfMemory
 	defer delete(addrs)
 
-	spinlock.rw_write_lock(&domain.lock)
-	defer spinlock.rw_write_unlock(&domain.lock)
-
-	if !user_range_accessible(domain, addrsPtr, addrsBytes, false) do return .InvalidAddress
-	mem.copy(raw_data(addrs), rawptr(uintptr(addrsPtr)), int(addrsBytes))
-
-	// Pass 1: validate everything, mutate nothing.
-	for a, i in addrs {
-		for j in i + 1 ..< len(addrs) {
-			if addrs[j] == a do return .InvalidAddress // duplicate -- second free would spuriously "not found"
-		}
-		if _, found := resource_find_exact(domain.resources[:], a); !found do return .InvalidAddress
-	}
-
-	// Pass 2: nothing above can fail, so this can't fail partway through.
-
-	removed := make([]MemoryResource, len(addrs))
+	removed, removedErr := make([]MemoryResource, len(addrs))
+	if removedErr != nil do return .OutOfMemory
 	defer delete(removed)
 
-	for a, i in addrs {
-		r, _ := resource_remove(&domain.resources, a)
-		removed[i] = r
-		pageBytes := syscalls.mmap_page_size_bytes(r.overlay.pageSize)
-		pageCount := r.overlay.size / pageBytes
-		for j in u64(0) ..< pageCount {
-			pmm.unmap_page(domain.pml4, r.overlay.logical + j * pageBytes)
+	{
+		spinlock.rw_write_lock(&domain.lock)
+		defer spinlock.rw_write_unlock(&domain.lock)
+
+		if !user_range_accessible(domain, addrsPtr, addrsBytes, false) do return .InvalidAddress
+		mem.copy(raw_data(addrs), rawptr(uintptr(addrsPtr)), int(addrsBytes))
+
+		for a, i in addrs {
+			for j in i + 1 ..< len(addrs) {
+				if addrs[j] == a do return .InvalidAddress
+			}
+			if _, found := resource_find_exact(domain.resources[:], a); !found do return .InvalidAddress
+		}
+
+		for a, i in addrs {
+			r, _ := resource_remove(&domain.resources, a)
+			removed[i] = r
+			pageBytes := syscalls.mmap_page_size_bytes(r.overlay.pageSize)
+			pageCount := r.overlay.size / pageBytes
+			for j in u64(0) ..< pageCount {
+				pmm.unmap_page(domain.pml4, r.overlay.logical + j * pageBytes)
+			}
 		}
 	}
 
-	if domain.pcid != 0 do tlb_shootdown(domain.pcid)
-
-	for r in removed {
-		memory_underlay_release(r.underlay)
-	}
+	tlb_wait_domain_flushed(domain)
+	for r in removed do memory_underlay_release(r.underlay)
 	return .None
 }
 
@@ -415,68 +371,39 @@ syscall_prot_domain_create :: proc "contextless" (
 		mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
 	}
 
-	{
-		spinlock.rw_read_lock(&callerDomain.lock)
-		defer spinlock.rw_read_unlock(&callerDomain.lock)
-		for r in regions {
-			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
-			if !found do return .NotOwned, 0
-			if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned, 0
-			if r.flags - owner.overlay.flags != {} do return .NotOwned, 0
-			if resource_ranges_overlap(r.logical, r.size, syscalls.CPU_INFO_ADDR, cpu_infos_bytes(int(CpuInfos.cpuCount))) do return .InvalidRegion, 0
-		}
-	}
-
 	pd, pdIdx, allocErr := protdomain_new(authorityPtr)
 	if allocErr != {} do return .OutOfMemory, 0
-	defer if err != .None do protdomain_destroy(pdIdx)
+	defer if err != .None do protdomain_discard(pdIdx, pd)
 
-	{
-		// pd isn't reachable via any handle yet, so this is uncontended in
-		// practice -- held anyway so every resources mutation goes through
-		// the owning domain's lock the same way, with no special case here.
-		spinlock.rw_write_lock(&pd.lock)
-		defer spinlock.rw_write_unlock(&pd.lock)
-		for r in regions {
-			// Re-fetch the owner instead of trusting the earlier validation
-			// pass: that pass ran under a since-released lock, so the
-			// resource could have been mfree'd by now. Sharing owner.underlay
-			// (rather than minting a fresh handle, like resource_init would)
-			// ties this range's lifetime to the original allocation instead
-			// of creating a second, independent owner of the same physical
-			// pages -- see prot_domain_edit's .Add case, which does the same.
-			spinlock.rw_read_lock(&callerDomain.lock)
-			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
-			ownerMemory: ^MemoryUnderlay
-			if found do ownerMemory = owner.underlay
-			spinlock.rw_read_unlock(&callerDomain.lock)
-			if !found do return .NotOwned, 0
+	domains_write_lock(callerDomain, pd)
+	defer domains_write_unlock(callerDomain, pd)
+	for r in regions {
+		if !mem_region_valid(r) do return .InvalidRegion, 0
+		owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
+		if !found do return .NotOwned, 0
+		if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned, 0
+		if !region_flags_grantable(r.flags, owner.overlay.flags) do return .NotOwned, 0
+		if resource_overlaps(pd.resources[:], r.phys, r.size) do return .InvalidRegion, 0
+		if resource_ranges_overlap(r.logical, r.size, userschedule.CPU_INFO_ADDR, cpu_infos_bytes(int(CpuInfos.cpuCount))) do return .InvalidRegion, 0
 
-			pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
-			pageCount := r.size / pageBytes
-			for i in u64(0) ..< pageCount {
-				pmm.map_page(
-					pd.pml4,
-					r.phys + i * pageBytes,
-					r.logical + i * pageBytes,
-					r.pageSize,
-					r.flags,
-				)
-			}
-			resource := MemoryResource {
-				overlay = {
-					phys = r.phys,
-					logical = r.logical,
-					size = r.size,
-					pageSize = r.pageSize,
-					flags = r.flags,
-				},
-				underlay = ownerMemory,
-			}
-			memory_underlay_increment(ownerMemory)
-			defer if err != .None do memory_underlay_release(ownerMemory)
-
-			if _, ok := resource_insert(&pd.resources, resource); !ok do return .TrackingFailed, 0
+		pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+		for i in u64(0) ..< r.size / pageBytes {
+			pmm.map_page(pd.pml4, r.phys + i * pageBytes, r.logical + i * pageBytes, r.pageSize, r.flags)
+		}
+		resource := MemoryResource {
+			overlay = {
+				phys = r.phys,
+				logical = r.logical,
+				size = r.size,
+				pageSize = r.pageSize,
+				flags = r.flags,
+			},
+			underlay = owner.underlay,
+		}
+		memory_underlay_increment(owner.underlay)
+		if _, inserted := resource_insert(&pd.resources, resource); !inserted {
+			memory_underlay_release(owner.underlay)
+			return .TrackingFailed, 0
 		}
 	}
 	return .None, pdIdx
@@ -502,12 +429,6 @@ syscall_prot_domain_edit :: proc "contextless" (
 
 	callerDomain := cpu.currentGrant.domain
 
-	spinlock.rw_read_lock(&protDomainPool.rwLock)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
-	target, targetErr := protdomain_resolve_target_DOESNT_LOCK(handle, callerDomain)
-	if targetErr == .InvalidHandle do return .InvalidHandle
-	if targetErr == .NoPermission do return .NoPermission
-
 	if count == 0 do return .InvalidRegionCount
 	regionBytes, overflowed := intrinsics.overflow_mul(count, size_of(syscalls.MemRegion))
 	if overflowed do return .InvalidRegionCount
@@ -521,16 +442,26 @@ syscall_prot_domain_edit :: proc "contextless" (
 		mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
 	}
 
-	// Held across both passes below: pass 1's guarantees about target's (and,
-	// for Add, callerDomain's) resources must still hold when pass 2 applies
-	// them, and nothing else may mutate either domain's resources in between.
-	// Collapses to one lock when editing your own domain (target ==
-	// callerDomain), and locks in address order otherwise so two threads
-	// editing the same pair of domains in opposite order can't deadlock.
+	released, releasedErr := make([]^MemoryUnderlay, len(regions))
+	if releasedErr != nil do return .OutOfMemory
+	defer delete(released)
+	releasedCount := 0
+	target: ^ProtectionDomain
+	defer if releasedCount > 0 {
+		tlb_wait_domain_flushed(target)
+		for underlay in released[:releasedCount] do memory_underlay_release(underlay)
+	}
+
+	spinlock.rw_read_lock(&protDomainPool.rwLock)
+	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
+	targetErr: ProtDomainTargetError
+	target, targetErr = protdomain_resolve_target_DOESNT_LOCK(handle, callerDomain)
+	if targetErr == .InvalidHandle do return .InvalidHandle
+	if targetErr == .NoPermission do return .NoPermission
+
 	domains_write_lock(callerDomain, target)
 	defer domains_write_unlock(callerDomain, target)
 
-	// Pass 1: validate everything, mutate nothing.
 	for r, i in regions {
 		for j in i + 1 ..< len(regions) {
 			other := regions[j]
@@ -542,21 +473,26 @@ syscall_prot_domain_edit :: proc "contextless" (
 
 		switch op {
 		case .Add:
+			if !mem_region_valid(r) do return .InvalidRegion
 			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !found do return .NotOwned
 			if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned
-			if r.flags - owner.overlay.flags != {} do return .NotOwned
+			if !region_flags_grantable(r.flags, owner.overlay.flags) do return .NotOwned
 			if resource_overlaps(target.resources[:], r.phys, r.size) do return .InvalidRegion
-			if resource_ranges_overlap(r.logical, r.size, syscalls.CPU_INFO_ADDR, cpu_infos_bytes(int(CpuInfos.cpuCount))) do return .InvalidRegion
+			if resource_ranges_overlap(r.logical, r.size, userschedule.CPU_INFO_ADDR, cpu_infos_bytes(int(CpuInfos.cpuCount))) do return .InvalidRegion
 		case .Delete:
 			if _, found := resource_find_exact(target.resources[:], r.phys); !found do return .NotFound
 		}
 	}
+	if op == .Add && reserve(&target.resources, len(target.resources) + len(regions)) != nil {
+		return .OutOfMemory
+	}
+
 	for r in regions {
 		switch op {
 		case .Add:
 			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
-			if !found do return .NotOwned
+			assert(found)
 
 			pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
 			pageCount := r.size / pageBytes
@@ -568,11 +504,6 @@ syscall_prot_domain_edit :: proc "contextless" (
 					r.pageSize,
 					r.flags,
 				)
-			}
-			defer if err != .None {
-				for i in u64(0) ..< pageCount {
-					pmm.unmap_page(target.pml4, r.logical + i * pageBytes)
-				}
 			}
 
 			resource := MemoryResource {
@@ -586,21 +517,19 @@ syscall_prot_domain_edit :: proc "contextless" (
 				underlay = owner.underlay,
 			}
 			memory_underlay_increment(owner.underlay)
-			defer if err != .None do memory_underlay_release(owner.underlay)
-
-			if _, ok := resource_insert(&target.resources, resource); !ok do return .TrackingFailed
+			_, inserted := resource_insert(&target.resources, resource)
+			assert(inserted)
 
 		case .Delete:
 			removed, found := resource_remove(&target.resources, r.phys)
-			if !found do return .NotFound
+			assert(found)
 			pageBytes := syscalls.mmap_page_size_bytes(removed.overlay.pageSize)
 			pageCount := removed.overlay.size / pageBytes
 			for i in u64(0) ..< pageCount {
 				pmm.unmap_page(target.pml4, removed.overlay.logical + i * pageBytes)
 			}
-			if target.pcid != 0 do tlb_shootdown(target.pcid)
-			memory_underlay_release(removed.underlay)
-
+			released[releasedCount] = removed.underlay
+			releasedCount += 1
 		}
 	}
 
@@ -619,13 +548,57 @@ syscall_prot_domain_destroy :: proc "contextless" (
 	if cpu == nil || cpu.currentGrant.domain == nil {
 		return .InvalidHandle
 	}
-
-	callerDomain := cpu.currentGrant.domain
-	spinlock.rw_read_lock(&protDomainPool.rwLock)
-	pd, targetErr := protdomain_resolve_target_DOESNT_LOCK(handle, callerDomain)
-	spinlock.rw_read_unlock(&protDomainPool.rwLock)
-	if targetErr != .None do return .InvalidHandle
-	if pd == callerDomain do return .InvalidHandle
-	protdomain_destroy(handle)
+	if protdomain_destroy(handle, cpu.currentGrant.domain) != .None do return .InvalidHandle
 	return .None
+}
+
+
+@(export)
+syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, r1: u64) {
+	switch syscalls.Syscall(nr) {
+	case .MMap:
+		mmapErr, addr := syscall_mmap(a1, a2)
+		return u64(mmapErr), addr
+	case .MFree:
+		return u64(syscall_mfree(a1, a2)), 0
+	case .MultiplexedMemoryCreate:
+		err, handle := syscall_multiplexed_memory_create(a1, a2)
+		return u64(err), handle
+	case .MultiplexedMemoryRead:
+		return u64(syscall_multiplexed_memory_read(a1, a2, a3, a4, a5)), 0
+	case .MultiplexedMemoryWrite:
+		return u64(syscall_multiplexed_memory_write(a1, a2, a3, a4, a5)), 0
+	case .ProtDomainCreate:
+		err, handle := syscall_prot_domain_create((^byte)(uintptr(a1)), a2, a3)
+		return u64(err), transmute(u64)handle
+	case .ProtDomainEdit:
+		return u64(syscall_prot_domain_edit(transmute(int)a1, a2, a3, a4)), 0
+	case .ProtDomainDestroy:
+		return u64(syscall_prot_domain_destroy(transmute(int)a1)), 0
+
+	case .GrantSpawn:
+		return u64(syscall_grant_spawn(transmute(int)a1, a2, a3, a4)), 0
+	case .GrantEdit:
+		return u64(syscall_grant_edit(transmute(int)a1, a2, a3)), 0
+
+	case .DebugPrint:
+		cpu := gs_read_cpustate()
+		if cpu == nil || cpu.currentGrant.domain == nil do return max(u64), max(u64)
+		domain := cpu.currentGrant.domain
+		spinlock.rw_read_lock(&domain.lock)
+		defer spinlock.rw_read_unlock(&domain.lock)
+		if !user_range_accessible(domain, a1, a2, false) do return max(u64), max(u64)
+
+		label := string(([^]u8)(uintptr(a1))[:a2])
+		spinlock.lock(&serialPrintLock)
+		defer spinlock.unlock(&serialPrintLock)
+		print.serial_write("dbg: ")
+		print.serial_write(label)
+		print.serial_write(": ")
+		print.serial_write_u64(a3)
+		print.serial_write(" (")
+		print.serial_write_hex(a3)
+		print.serial_writeln(")")
+	}
+	return max(u64), max(u64)
 }

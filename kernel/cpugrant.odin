@@ -3,24 +3,24 @@ import ah "../asm_helpers"
 import "../lib/shared"
 import "../lib/spinlock"
 import "../lib/syscalls"
+import "../lib/userschedule"
 import "base:intrinsics"
 import "core:container/bit_array"
 import "core:mem"
 import "print"
 
-
 GRANT_MAX_CHARGE_TICKS :: u64(1) << 40
 GRANT_REBASE_FLOOR :: u64(1) << 62
 GRANT_SLICE_MS :: 5
 CPU_GRANT_STARTING_CAPACITY :: 128
-USER_RFLAGS_MASK :: u64(0xCD5)
 USER_RFLAGS_FORCED :: u64(0x202)
 
-#assert(syscalls.SCHED_WEIGHT_TOTAL <= u64(1) << 20)
+#assert(userschedule.SCHED_WEIGHT_TOTAL <= u64(1) << 20)
 #assert(
-	GRANT_REBASE_FLOOR + 2 * GRANT_MAX_CHARGE_TICKS * syscalls.SCHED_WEIGHT_TOTAL <= max(u64) / 2,
+	GRANT_REBASE_FLOOR + 2 * GRANT_MAX_CHARGE_TICKS * userschedule.SCHED_WEIGHT_TOTAL <=
+	max(u64) / 2,
 )
-#assert(size_of(syscalls.UserSaveArea) <= shared.PAGE_SIZE)
+#assert(size_of(userschedule.UserSaveArea) <= shared.PAGE_SIZE)
 
 GrantSleepState :: bit_field u64 {
 	idleLevel: IdleLevel | 8,
@@ -30,7 +30,7 @@ GrantSleepState :: bit_field u64 {
 #assert(size_of(GrantSleepState) == size_of(u64))
 
 CpuGrant :: struct {
-	saveArea:    ^syscalls.UserSaveArea,
+	saveArea:    ^userschedule.UserSaveArea,
 	weight:      u64,
 	domain:      ^ProtectionDomain,
 	virtualTime: u64,
@@ -44,7 +44,10 @@ when !ODIN_TEST {
 	@(default_calling_convention = "c")
 	foreign _ {
 		gs_read_cpustate :: proc() -> ^CpuState ---
-		run_resume :: proc(targetPml4: u64, area: ^syscalls.UserSaveArea) -> ! ---
+		run_resume :: proc(targetCr3: u64, area: ^userschedule.UserSaveArea) -> ! ---
+		user_save_area_store :: proc(area: ^userschedule.UserSaveArea, frame: ^InterruptFrame, fx: ^[512]u8) ---
+		user_access_begin :: proc() ---
+		user_access_end :: proc() ---
 		run_abort :: proc() -> ! ---
 		cpu_idle_loop :: proc() -> ! ---
 	}
@@ -53,7 +56,17 @@ when !ODIN_TEST {
 	testCpu: ^CpuState
 
 	gs_read_cpustate :: proc "contextless" () -> ^CpuState {return testCpu}
-	run_resume :: proc "contextless" (targetPml4: u64, area: ^syscalls.UserSaveArea) -> ! {for {}}
+	run_resume :: proc "contextless" (
+		targetCr3: u64,
+		area: ^userschedule.UserSaveArea,
+	) -> ! {for {}}
+	user_save_area_store :: proc "contextless" (
+		area: ^userschedule.UserSaveArea,
+		frame: ^InterruptFrame,
+		fx: ^[512]u8,
+	) {}
+	user_access_begin :: proc "contextless" () {}
+	user_access_end :: proc "contextless" () {}
 	run_abort :: proc "contextless" () -> ! {for {}}
 	cpu_idle_loop :: proc "contextless" () -> ! {for {}}
 }
@@ -75,7 +88,7 @@ grant_insert_index_DOESNT_LOCK :: proc(cpu: ^CpuState, grant: CpuGrant) -> int {
 grant_insert_DOESNT_LOCK :: proc(cpu: ^CpuState, grant: CpuGrant) -> mem.Allocator_Error {
 	assert(grant.domain != nil)
 	assert(grant.saveArea != nil)
-	assert(grant.weight > 0 && grant.weight <= syscalls.SCHED_WEIGHT_TOTAL)
+	assert(grant.weight > 0 && grant.weight <= userschedule.SCHED_WEIGHT_TOTAL)
 	_ = inject_at(&cpu.grants, grant_insert_index_DOESNT_LOCK(cpu, grant), grant) or_return
 	return .None
 }
@@ -111,7 +124,7 @@ grant_kill_DOESNT_LOCK :: proc(cpu: ^CpuState, domain: ^ProtectionDomain) {
 	assert(grant.weight > 0)
 
 	domain.weightFree += grant.weight
-	assert(domain.weightFree <= syscalls.SCHED_WEIGHT_TOTAL)
+	assert(domain.weightFree <= userschedule.SCHED_WEIGHT_TOTAL)
 	unset := bit_array.unset(&domain.grantCpus, cpu.index)
 	assert(unset)
 	if !grant.sleepState.asleep do runnable_weight_sub_DOESNT_LOCK(cpu, grant.weight)
@@ -133,20 +146,20 @@ grant_wake_cpu :: proc(cpu: ^CpuState) {
 grant_spawn :: proc(
 	domain: ^ProtectionDomain,
 	cpu: ^CpuState,
-	saveArea: ^syscalls.UserSaveArea,
+	saveArea: ^userschedule.UserSaveArea,
 	weight: u64,
 ) -> syscalls.GrantError {
 	assert(domain != nil)
 	assert(cpu != nil)
 
-	if saveArea == nil || uintptr(saveArea) % align_of(syscalls.UserSaveArea) != 0 do return .InvalidSaveArea
+	if saveArea == nil || uintptr(saveArea) % align_of(userschedule.UserSaveArea) != 0 do return .InvalidSaveArea
 
 	spinlock.rw_write_lock(&domain.lock)
 	defer spinlock.rw_write_unlock(&domain.lock)
 
 	if bit_array.get(&domain.grantCpus, cpu.index) do return .AlreadyOnCpu
 	if weight == 0 || weight > domain.weightFree do return .InsufficientWeight
-	if !user_range_accessible(domain, u64(uintptr(saveArea)), size_of(syscalls.UserSaveArea), true) do return .InvalidSaveArea
+	if !user_range_accessible(domain, u64(uintptr(saveArea)), size_of(userschedule.UserSaveArea), true) do return .InvalidSaveArea
 
 	{
 		spinlock.lock(&cpu.grantLock)
@@ -159,7 +172,7 @@ grant_spawn :: proc(
 			saveArea = saveArea,
 			weight = weight,
 			domain = domain,
-			virtualTime = cpu.floorVirtualTime + charge * syscalls.SCHED_WEIGHT_TOTAL / weight,
+			virtualTime = cpu.floorVirtualTime + charge * userschedule.SCHED_WEIGHT_TOTAL / weight,
 			sleepState = {idleLevel = cpu_deepest_idle_level(cpu)},
 		}
 		if grant_insert_DOESNT_LOCK(cpu, grant) != nil do return .OutOfMemory
@@ -193,10 +206,10 @@ grant_edit :: proc(domain: ^ProtectionDomain, cpu: ^CpuState, weight: u64) -> sy
 	grant, _ := grant_find_DOESNT_LOCK(cpu, domain)
 	assert(grant != nil)
 	assert(grant.weight > 0)
-	if weight > syscalls.SCHED_WEIGHT_TOTAL || weight > grant.weight + domain.weightFree do return .InsufficientWeight
+	if weight > userschedule.SCHED_WEIGHT_TOTAL || weight > grant.weight + domain.weightFree do return .InsufficientWeight
 
 	domain.weightFree = domain.weightFree + grant.weight - weight
-	assert(domain.weightFree <= syscalls.SCHED_WEIGHT_TOTAL)
+	assert(domain.weightFree <= userschedule.SCHED_WEIGHT_TOTAL)
 	if !grant.sleepState.asleep {
 		runnable_weight_add_DOESNT_LOCK(cpu, weight)
 		runnable_weight_sub_DOESNT_LOCK(cpu, grant.weight)
@@ -217,7 +230,7 @@ grant_kill_all :: proc(domain: ^ProtectionDomain) {
 			grant_kill_DOESNT_LOCK(&cpu, domain)
 			spinlock.unlock(&cpu.grantLock)
 		}
-		assert(domain.weightFree == syscalls.SCHED_WEIGHT_TOTAL)
+		assert(domain.weightFree == userschedule.SCHED_WEIGHT_TOTAL)
 		domain.weightFree = 0
 	}
 	for &cpu in cpus {
@@ -265,15 +278,11 @@ cpu_next_grant :: proc "c" () -> bool {
 		cpu.floorVirtualTime = selected.virtualTime
 		cpu.currentGrant = selected
 		cpu.grantStartTsc = ah.rdtsc_asm()
+		intrinsics.atomic_add(&cpu.tlbEpoch, 1)
 	}
 
-	area: syscalls.UserSaveArea
-	if !grant_read_save_area(selected, &area) {
-		grant_exit_current(cpu)
-		return true
-	}
 	lapic_set_deadline(tscTicksPerMs * GRANT_SLICE_MS)
-	run_resume(selected.domain.pml4, &area)
+	run_resume(selected.domain.pml4 | u64(selected.domain.pcid), selected.saveArea)
 }
 
 when ODIN_ARCH == .amd64 {
@@ -322,7 +331,9 @@ grant_rebase_virtual_times_DOESNT_LOCK :: proc(cpu: ^CpuState) {
 
 grant_account_current_DOESNT_LOCK :: proc(cpu: ^CpuState) -> CpuGrant {
 	assert(cpu.currentGrant.domain != nil)
-	assert(cpu.currentGrant.weight > 0 && cpu.currentGrant.weight <= syscalls.SCHED_WEIGHT_TOTAL)
+	assert(
+		cpu.currentGrant.weight > 0 && cpu.currentGrant.weight <= userschedule.SCHED_WEIGHT_TOTAL,
+	)
 	assert(cpu.currentGrant.virtualTime >= cpu.floorVirtualTime)
 
 	now := ah.rdtsc_asm()
@@ -334,10 +345,11 @@ grant_account_current_DOESNT_LOCK :: proc(cpu: ^CpuState) -> CpuGrant {
 	assert(cpu.floorVirtualTime < GRANT_REBASE_FLOOR)
 	assert(
 		cpu.currentGrant.virtualTime - cpu.floorVirtualTime <=
-		2 * GRANT_MAX_CHARGE_TICKS * syscalls.SCHED_WEIGHT_TOTAL,
+		2 * GRANT_MAX_CHARGE_TICKS * userschedule.SCHED_WEIGHT_TOTAL,
 	)
 
-	cpu.currentGrant.virtualTime += elapsed * syscalls.SCHED_WEIGHT_TOTAL / cpu.currentGrant.weight
+	cpu.currentGrant.virtualTime +=
+		elapsed * userschedule.SCHED_WEIGHT_TOTAL / cpu.currentGrant.weight
 	cpu.grantStartTsc = now
 	return cpu.currentGrant
 }
@@ -402,48 +414,25 @@ grant_preempt :: proc(cpu: ^CpuState, frame: ^InterruptFrame) -> ! {
 	assert(grant.domain != nil)
 	assert(grant.saveArea != nil)
 
-	if intrinsics.atomic_load(&grant.weight) == 0 {
-		grant_stop_current(cpu)
-		run_abort()
+	if intrinsics.atomic_load(&grant.weight) != 0 {
+		domain_switch_cr3(grant.domain)
+		user_save_area_store(grant.saveArea, frame, &cpu.userFx)
+		kernel_switch_cr3()
 	}
-
-	domain := grant.domain
-	saved := false
-	{
-		spinlock.rw_read_lock(&domain.lock)
-		defer spinlock.rw_read_unlock(&domain.lock)
-		if user_range_accessible(domain, u64(uintptr(grant.saveArea)), size_of(syscalls.UserSaveArea), true) {
-			area := grant.saveArea
-			area.fx = cpu.userFx
-			area.rax, area.rbx, area.rcx, area.rdx = frame.rax, frame.rbx, frame.rcx, frame.rdx
-			area.rsi, area.rdi, area.rbp = frame.rsi, frame.rdi, frame.rbp
-			area.r8, area.r9, area.r10, area.r11 = frame.r8, frame.r9, frame.r10, frame.r11
-			area.r12, area.r13, area.r14, area.r15 = frame.r12, frame.r13, frame.r14, frame.r15
-			area.rip, area.rsp, area.rflags = frame.rip, frame.rsp, frame.rflags
-			saved = true
-		}
-	}
-
-	if saved {
-		grant_stop_current(cpu)
-	} else {
-		grant_exit_current(cpu)
-	}
+	grant_stop_current(cpu)
 	run_abort()
 }
 
-grant_read_save_area :: proc(grant: CpuGrant, out: ^syscalls.UserSaveArea) -> bool {
-	assert(grant.domain != nil)
-	assert(grant.saveArea != nil)
-	domain := grant.domain
-
-	spinlock.rw_read_lock(&domain.lock)
-	defer spinlock.rw_read_unlock(&domain.lock)
-	if !user_range_accessible(domain, u64(uintptr(grant.saveArea)), size_of(syscalls.UserSaveArea), false) do return false
-
-	out^ = grant.saveArea^
-	out.rflags = (out.rflags & USER_RFLAGS_MASK) | USER_RFLAGS_FORCED
-	mxcsr := (^u32)(&out.fx[FX_MXCSR_OFFSET])
-	mxcsr^ &= MXCSR_SAFE_MASK
-	return true
+user_access_faulted :: proc "contextless" (frame: ^InterruptFrame) -> bool {
+	VECTOR_INVALID_OPCODE :: 6
+	VECTOR_GENERAL_PROTECTION :: 13
+	VECTOR_PAGE_FAULT :: 14
+	switch frame.interruptNumber {
+	case VECTOR_INVALID_OPCODE, VECTOR_GENERAL_PROTECTION, VECTOR_PAGE_FAULT:
+	case:
+		return false
+	}
+	begin := u64(uintptr(rawptr(user_access_begin)))
+	end := u64(uintptr(rawptr(user_access_end)))
+	return frame.rip >= begin && frame.rip < end
 }

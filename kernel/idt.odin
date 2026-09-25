@@ -160,6 +160,14 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		}
 		return
 	}
+	if !userMode && user_access_faulted(frame) {
+		kernel_switch_cr3()
+		print.serial_write("domain fault: save area ")
+		print.serial_write(exceptionNames[frame.interruptNumber])
+		print.serial_writeln(", grant dropped")
+		grant_exit_current(gs_read_cpustate())
+		run_abort()
+	}
 	if userMode {
 		name := exceptionNames[frame.interruptNumber]
 		print.serial_write("domain fault: ")
@@ -264,10 +272,6 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 	case VECTOR_APIC_LINT1:
 		print.serial_writeln("lapic: lint1 fired")
 	case VECTOR_APIC_IPI:
-		if pending := intrinsics.atomic_load(&tlbShootdown.pcid); pending != 0 {
-			ah.invpcid_asm(1, u64(pending))
-			intrinsics.atomic_add(&tlbShootdown.acked, 1)
-		}
 	case:
 		print.serial_write("lapic: unhandled irq=")
 		print.serial_write_hex(u64(v))

@@ -226,43 +226,41 @@ rtl8822be_init :: proc(device: ^pci.Device) -> (DriverResult, u64) {
 		}
 		if dmemSize > 0x3FFFF || imemSize > 0x3FFFF || ememSize > 0x3FFFF do return .Failed, 7
 
-		when ODIN_DEBUG {
-			syscalls.syscall_debug_print_userspace(
-				"firmware blob length",
-				u64(len(RTL8822B_FIRMWARE)),
-			)
-			syscalls.syscall_debug_print_userspace(
-				"firmware mem_usage byte",
-				u64(RTL8822B_FIRMWARE[0x18]),
-			)
-			syscalls.syscall_debug_print_userspace(
-				"firmware dmem_addr (raw, w/ valid bit)",
-				u64(le32(RTL8822B_FIRMWARE[0x20:0x24])),
-			)
-			syscalls.syscall_debug_print_userspace("firmware dmemSize", dmemSize)
-			syscalls.syscall_debug_print_userspace(
-				"firmware imem_addr (raw, w/ valid bit)",
-				u64(le32(RTL8822B_FIRMWARE[0x3C:0x40])),
-			)
-			syscalls.syscall_debug_print_userspace("firmware imemSize", imemSize)
-			syscalls.syscall_debug_print_userspace("firmware ememSize", ememSize)
-			// Realtek firmware regions are built so the region's data plus
-			// its trailing checksum word sum to zero (classic internet-style
-			// ones-complement checksum). Verify our own read of the dmem
-			// region bytes actually satisfies that before blaming the DMA
-			// path for a mismatch.
-			dmemSum: u32 = 0
-			for i := u64(0); i < dmemSize; i += 2 {
-				dmemSum +=
-					u32(RTL8822B_FIRMWARE[RTL_FW_HDR_SIZE + i]) |
-					u32(RTL8822B_FIRMWARE[RTL_FW_HDR_SIZE + i + 1]) << 8
-			}
-			for dmemSum > 0xFFFF do dmemSum = (dmemSum & 0xFFFF) + (dmemSum >> 16)
-			syscalls.syscall_debug_print_userspace(
-				"folded 16-bit sum over dmem region (0 if checksum theory holds)",
-				u64(dmemSum),
-			)
+		syscalls.syscall_debug_print_userspace(
+			"firmware blob length",
+			u64(len(RTL8822B_FIRMWARE)),
+		)
+		syscalls.syscall_debug_print_userspace(
+			"firmware mem_usage byte",
+			u64(RTL8822B_FIRMWARE[0x18]),
+		)
+		syscalls.syscall_debug_print_userspace(
+			"firmware dmem_addr (raw, w/ valid bit)",
+			u64(le32(RTL8822B_FIRMWARE[0x20:0x24])),
+		)
+		syscalls.syscall_debug_print_userspace("firmware dmemSize", dmemSize)
+		syscalls.syscall_debug_print_userspace(
+			"firmware imem_addr (raw, w/ valid bit)",
+			u64(le32(RTL8822B_FIRMWARE[0x3C:0x40])),
+		)
+		syscalls.syscall_debug_print_userspace("firmware imemSize", imemSize)
+		syscalls.syscall_debug_print_userspace("firmware ememSize", ememSize)
+		// Realtek firmware regions are built so the region's data plus
+		// its trailing checksum word sum to zero (classic internet-style
+		// ones-complement checksum). Verify our own read of the dmem
+		// region bytes actually satisfies that before blaming the DMA
+		// path for a mismatch.
+		dmemSum: u32 = 0
+		for i := u64(0); i < dmemSize; i += 2 {
+			dmemSum +=
+				u32(RTL8822B_FIRMWARE[RTL_FW_HDR_SIZE + i]) |
+				u32(RTL8822B_FIRMWARE[RTL_FW_HDR_SIZE + i + 1]) << 8
 		}
+		for dmemSum > 0xFFFF do dmemSum = (dmemSum & 0xFFFF) + (dmemSum >> 16)
+		syscalls.syscall_debug_print_userspace(
+			"folded 16-bit sum over dmem region (0 if checksum theory holds)",
+			u64(dmemSum),
+		)
 
 		pages := (u64(len(RTL8822B_FIRMWARE)) + 0xFFF) / 0x1000
 		regions := [1]syscalls.MMapRegion {
@@ -349,14 +347,12 @@ rtl8822be_init :: proc(device: ^pci.Device) -> (DriverResult, u64) {
 			// checksum-status bit once before this segment's chunks, rather
 			// than folding it into the per-chunk transfer control word.
 			rtl_rmw32(base, RTL_DDMA_CTRL, 0, RTL_DDMA_RESET_CHKSUM_STS)
-			when ODIN_DEBUG {
-				syscalls.syscall_debug_print_userspace(
-					"segment index (0=dmem,1=imem,2=emem)",
-					u64(segment),
-				)
-				syscalls.syscall_debug_print_userspace("segment size", size)
-				syscalls.syscall_debug_print_userspace("segment dest OCP addr", u64(dst))
-			}
+			syscalls.syscall_debug_print_userspace(
+				"segment index (0=dmem,1=imem,2=emem)",
+				u64(segment),
+			)
+			syscalls.syscall_debug_print_userspace("segment size", size)
+			syscalls.syscall_debug_print_userspace("segment dest OCP addr", u64(dst))
 			for done: u64 = 0; done < size; {
 				chunk := min(u64(0x1000), size - done)
 				packet := uintptr(dma) + uintptr(pages * 0x1000) + 16 + 48
@@ -381,10 +377,8 @@ rtl8822be_init :: proc(device: ^pci.Device) -> (DriverResult, u64) {
 				checksum: u16 = 0
 				for word in 0 ..< 16 {checksum = checksum ~ ((^u16)(rawptr(packet - 48 + uintptr(word * 2)))^)}
 				(^u16)(rawptr(packet - 20))^ = checksum
-				when ODIN_DEBUG {
-					syscalls.syscall_debug_print_userspace("chunk size", u64(chunk))
-					syscalls.syscall_debug_print_userspace("tx-desc checksum", u64(checksum))
-				}
+				syscalls.syscall_debug_print_userspace("chunk size", u64(chunk))
+				syscalls.syscall_debug_print_userspace("tx-desc checksum", u64(checksum))
 				// rtw_fw_write_data_rsvd_page, run fresh for every chunk: mark
 				// the (reused, pg_addr=0) page valid, switch the beacon to
 				// software control, stop the beacon function so it doesn't
