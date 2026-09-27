@@ -1,7 +1,7 @@
 package adam
 
 import "../lib/pci"
-
+import "fs"
 DriverResult :: enum {
 	Ignored,
 	Initialized,
@@ -11,11 +11,15 @@ DriverResult :: enum {
 
 adam_dispatch_pci_device :: proc(device: ^pci.Device) -> (result: DriverResult, code: u64) {
 	switch device.classCode {
+	case .MASS_STORAGE:
+		if device.subclass == .NVM && device.progIf == pci.PROG_IF_NVME {
+			if !fs.nvme_init(device) do return .Failed, 0
+			return .Initialized, 0
+		}
 	case .NETWORK:
-		switch device.subclass {
+		#partial switch device.subclass {
 		case .WIFI:
-			if device.vendorId == RTL8822BE_VENDOR &&
-			   device.deviceId == RTL8822BE_DEVICE {
+			if device.vendorId == RTL8822BE_VENDOR && device.deviceId == RTL8822BE_DEVICE {
 				return rtl8822be_init(device)
 			}
 		case .ETHERNET:

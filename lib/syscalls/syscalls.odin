@@ -30,9 +30,8 @@ GrantSaveAreaError :: enum u64 {
 Syscall :: enum u64 {
 	MMap = ILLU_SYSCALL_BIT,
 	MFree,
-	MultiplexedMemoryCreate,
-	MultiplexedMemoryRead,
-	MultiplexedMemoryWrite,
+	MediatedCreate,
+	MediatedAccess,
 	ProtDomainCreate,
 	ProtDomainEdit,
 	ProtDomainDestroy,
@@ -56,15 +55,6 @@ MFreeError :: enum u64 {
 	OutOfMemory,
 }
 
-MultiplexedMemoryError :: enum u64 {
-	None,
-	NoPermission,
-	InvalidHandle,
-	InvalidRange,
-	InvalidBuffer,
-	InvalidWidth,
-	OutOfMemory,
-}
 
 ProtDomainCreateError :: enum u64 {
 	None,
@@ -109,6 +99,49 @@ ProtDomainDestroyError :: enum u64 {
 	None,
 	InvalidHandle,
 }
+MediatedFlag :: enum u64 {
+	MediateRead,
+	MediateWrite,
+}
+
+MediatedFlags :: bit_set[MediatedFlag;u64]
+MEDIATED_FLAGS_ALL :: MediatedFlags{.MediateRead, .MediateWrite}
+
+MediatedRule :: struct #packed {
+	phys, size: u64,
+	flags:      MediatedFlags,
+}
+#assert(size_of(MediatedRule) == 24)
+
+MediatedOpKind :: enum u64 {
+	Read,
+	Write,
+}
+
+
+MediatedOp :: struct #packed {
+	phys, buf, size: u64,
+	kind:            MediatedOpKind,
+}
+#assert(size_of(MediatedOp) == 32)
+
+
+MEDIATED_MAX_RULES :: 256
+MEDIATED_MAX_OPS :: 256
+MEDIATED_MAX_BYTES :: u64(64 * 1024)
+
+
+MediatedError :: enum u64 {
+	None,
+	KernelErr,
+	InvalidCount,
+	InvalidRule,
+	InvalidOp,
+	NotOwned,
+	Shared,
+	AlreadyMediated,
+	OutOfMemory,
+}
 
 KERNEL_BUILD :: #config(KERNEL_BUILD, false)
 
@@ -118,9 +151,8 @@ when !ODIN_TEST {
 		foreign _ {
 			syscall_mmap :: proc(regionsPtr: u64, regionCount: u64) -> (err: u64, addr: u64) ---
 			syscall_mfree :: proc(addrsPtr: u64, count: u64) -> (err: u64) ---
-			syscall_multiplexed_memory_create :: proc(phys, size: u64) -> (err: u64, handle: u64) ---
-			syscall_multiplexed_memory_read :: proc(handle, offset, dest, size, width: u64) -> (err: u64) ---
-			syscall_multiplexed_memory_write :: proc(handle, offset, source, size, width: u64) -> (err: u64) ---
+			syscall_mediated_create :: proc(rulesPtr, count: u64) -> (err: u64) ---
+			syscall_mediated_access :: proc(opsPtr, count: u64) -> (err: u64, failedIndex: u64) ---
 			syscall_prot_domain_create :: proc(authorityPtr, regionsPtr, count: u64) -> (err: u64, handle: int) ---
 			syscall_prot_domain_edit :: proc(handle: int, regionsPtr, count, op: u64) -> (err: u64) ---
 			syscall_prot_domain_destroy :: proc(handle: int) -> (err: u64) ---
@@ -181,41 +213,24 @@ when !ODIN_TEST {
 			return MFreeError(syscall_mfree(u64(uintptr(raw_data(addrs))), u64(len(addrs))))
 		}
 
-		syscall_multiplexed_memory_create_userspace :: proc "contextless" (
-			phys, size: u64,
+		syscall_mediated_create_userspace :: proc "contextless" (
+			rules: []MediatedRule,
+		) -> MediatedError {
+			return MediatedError(
+				syscall_mediated_create(u64(uintptr(raw_data(rules))), u64(len(rules))),
+			)
+		}
+
+		syscall_mediated_access_userspace :: proc "contextless" (
+			ops: []MediatedOp,
 		) -> (
-			err: MultiplexedMemoryError,
-			handle: u64,
+			err: MediatedError,
+			failedIndex: int,
 		) {
-			rawErr, rawHandle := syscall_multiplexed_memory_create(phys, size)
-			return MultiplexedMemoryError(rawErr), rawHandle
+			rawErr, rawIndex := syscall_mediated_access(u64(uintptr(raw_data(ops))), u64(len(ops)))
+			return MediatedError(rawErr), int(rawIndex)
 		}
 
-		syscall_multiplexed_memory_read_userspace :: proc "contextless" (
-			handle, offset: u64,
-			dest: rawptr,
-			size, width: u64,
-		) -> MultiplexedMemoryError {
-			return MultiplexedMemoryError(
-				syscall_multiplexed_memory_read(handle, offset, u64(uintptr(dest)), size, width),
-			)
-		}
-
-		syscall_multiplexed_memory_write_userspace :: proc "contextless" (
-			handle, offset: u64,
-			source: rawptr,
-			size, width: u64,
-		) -> MultiplexedMemoryError {
-			return MultiplexedMemoryError(
-				syscall_multiplexed_memory_write(
-					handle,
-					offset,
-					u64(uintptr(source)),
-					size,
-					width,
-				),
-			)
-		}
 
 		syscall_prot_domain_create_userspace :: proc "contextless" (
 			authorityPtr: rawptr,

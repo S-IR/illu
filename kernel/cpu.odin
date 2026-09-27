@@ -75,6 +75,8 @@ cpus_init :: proc(rsdp: ^acpi.Rsdp) {
 	CpuInfos = (^userschedule.CpuInfoPage)(uintptr(pmm.alloc_zeroed(cpu_infos_bytes(cpuCount))))
 	print.kensure(CpuInfos != nil, "cpus_init: cpu info alloc failed")
 	CpuInfos.cpuCount = u32(cpuCount)
+	print.kensure(tscTicksPerMs != 0, "cpus_init: lapic_init must calibrate the tsc first")
+	CpuInfos.tscTicksPerMs = tscTicksPerMs
 
 	istStacksBase = pmm.alloc_zeroed(u64(cpuCount) * IST_STACK_SIZE)
 	print.kensure(istStacksBase != 0, "cpus_init: ist stack allocation failed")

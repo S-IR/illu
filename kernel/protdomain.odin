@@ -11,7 +11,7 @@ import "pmm"
 ProtectionDomain :: struct {
 	pml4:         u64,
 	lock:         spinlock.RWLock,
-	resources:    [dynamic]MemoryResource,
+	resources:    #soa[dynamic]MemoryResource,
 	grantCpus:    bit_array.Bit_Array,
 	authorityPtr: ^byte,
 	weightFree:   u64,
@@ -84,8 +84,8 @@ protdomain_new :: proc(
 
 	newPD.authorityPtr = authorityPtr
 
-	newPD.resources = make([dynamic]MemoryResource, 0, MEMORY_RESOURCES_STARTING_CAP) or_return
-	defer if err != {} do delete(newPD.resources)
+	newPD.resources = make(#soa[dynamic]MemoryResource, 0, MEMORY_RESOURCES_STARTING_CAP) or_return
+	defer if err != {} do delete_soa(newPD.resources)
 
 	newPD.pml4 = pmm.alloc_zeroed(shared.PAGE_SIZE)
 	if newPD.pml4 == 0 do return nil, -1, .Out_Of_Memory
@@ -175,7 +175,7 @@ protdomain_free :: proc(pd: ^ProtectionDomain) {
 	pmm.pml4_destroy(pd.pml4)
 	if pd.pcid != 0 do pcid_free(pd.pcid)
 	for resource in pd.resources do memory_underlay_release(resource.underlay)
-	delete(pd.resources)
+	delete_soa(pd.resources)
 	bit_array.destroy(&pd.grantCpus)
 	free(pd)
 }
@@ -272,7 +272,6 @@ kernel_switch_cr3 :: proc "contextless" () {
 	}
 	ah.write_cr3(pmm.kernelPML4 | u64(KERNEL_PCID) | PCID_NOFLUSH_BIT)
 }
-
 syscall_prot_domain_create :: proc "contextless" (
 	authorityPtr: ^byte,
 	regionsPtr, count: u64,
@@ -306,37 +305,36 @@ syscall_prot_domain_create :: proc "contextless" (
 
 	domains_write_lock(callerDomain, pd)
 	defer domains_write_unlock(callerDomain, pd)
-	for r in regions {
-		if !mem_region_valid(r) do return .InvalidRegion, 0
-		if region_covers_kernel(pd.pml4, r) do return .InvalidRegion, 0
-		owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
-		if !found do return .NotOwned, 0
-		if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned, 0
-		if !region_flags_grantable(r.flags, owner.overlay.flags) do return .NotOwned, 0
-		if resource_overlaps(pd.resources[:], r.phys, r.size) do return .InvalidRegion, 0
 
-		pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
-		for i in u64(0) ..< r.size / pageBytes {
-			pmm.map_page(pd.pml4, r.phys + i * pageBytes, r.logical + i * pageBytes, r.pageSize, r.flags)
+	for r, i in regions {
+		if !mem_region_valid(r) || !region_mappable(pd.pml4, r) do return .InvalidRegion, 0
+		for other in regions[i + 1:] {
+			if resource_ranges_overlap(r.phys, r.size, other.phys, other.size) do return .InvalidRegion, 0
+			if resource_ranges_overlap(r.logical, r.size, other.logical, other.size) do return .InvalidRegion, 0
 		}
-		resource := MemoryResource {
-			overlay = {
-				phys = r.phys,
-				logical = r.logical,
-				size = r.size,
-				pageSize = r.pageSize,
-				flags = r.flags,
-			},
-			underlay = owner.underlay,
-		}
+		ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
+		if !owned do return .NotOwned, 0
+		owner := callerDomain.resources[ownerIdx]
+		if r.phys + r.size > owner.phys + owner.size do return .NotOwned, 0
+		if !region_flags_grantable(r.flags, owner.flags) do return .NotOwned, 0
+	}
+	if reserve_soa(&pd.resources, len(regions)) != nil do return .OutOfMemory, 0
+
+	for r in regions {
+		ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
+		assert(owned)
+		owner := callerDomain.resources[ownerIdx]
+		_, inserted := resource_insert(&pd.resources, resource_granted(owner, r))
+		assert(inserted)
 		memory_underlay_increment(owner.underlay)
-		if _, inserted := resource_insert(&pd.resources, resource); !inserted {
-			memory_underlay_release(owner.underlay)
-			return .TrackingFailed, 0
+		pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+		for offset := u64(0); offset < r.size; offset += pageBytes {
+			pmm.map_page(pd.pml4, r.phys + offset, r.logical + offset, r.pageSize, r.flags)
 		}
 	}
 	return .None, pdIdx
 }
+
 
 syscall_prot_domain_edit :: proc "contextless" (
 	handle: int,
@@ -390,67 +388,51 @@ syscall_prot_domain_edit :: proc "contextless" (
 		for j in i + 1 ..< len(regions) {
 			other := regions[j]
 			if r.phys == other.phys do return .InvalidRegion
-			if op == .Add && resource_ranges_overlap(r.phys, r.size, other.phys, other.size) {
-				return .InvalidRegion
+			if op == .Add {
+				if resource_ranges_overlap(r.phys, r.size, other.phys, other.size) do return .InvalidRegion
+				if resource_ranges_overlap(r.logical, r.size, other.logical, other.size) do return .InvalidRegion
 			}
+
 		}
 
 		switch op {
 		case .Add:
 			if !mem_region_valid(r) do return .InvalidRegion
-			if region_covers_kernel(target.pml4, r) do return .InvalidRegion
-			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
+			if !region_mappable(target.pml4, r) do return .InvalidRegion
+			ownerIdx, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !found do return .NotOwned
-			if r.phys + r.size > owner.overlay.phys + owner.overlay.size do return .NotOwned
-			if !region_flags_grantable(r.flags, owner.overlay.flags) do return .NotOwned
+			owner := callerDomain.resources[ownerIdx]
+			if r.phys + r.size > owner.phys + owner.size do return .NotOwned
+			if !region_flags_grantable(r.flags, owner.flags) do return .NotOwned
 			if resource_overlaps(target.resources[:], r.phys, r.size) do return .InvalidRegion
 		case .Delete:
 			if _, found := resource_find_exact(target.resources[:], r.phys); !found do return .NotFound
 		}
 	}
-	if op == .Add && reserve(&target.resources, len(target.resources) + len(regions)) != nil {
+	if op == .Add && reserve_soa(&target.resources, len(target.resources) + len(regions)) != nil {
 		return .OutOfMemory
 	}
 
 	for r in regions {
 		switch op {
 		case .Add:
-			owner, found := resource_find_containing(callerDomain.resources[:], r.phys)
+			ownerIdx, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			assert(found)
-
-			pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
-			pageCount := r.size / pageBytes
-			for i in u64(0) ..< pageCount {
-				pmm.map_page(
-					target.pml4,
-					r.phys + i * pageBytes,
-					r.logical + i * pageBytes,
-					r.pageSize,
-					r.flags,
-				)
-			}
-
-			resource := MemoryResource {
-				overlay = {
-					phys = r.phys,
-					logical = r.logical,
-					size = r.size,
-					pageSize = r.pageSize,
-					flags = r.flags,
-				},
-				underlay = owner.underlay,
-			}
-			memory_underlay_increment(owner.underlay)
-			_, inserted := resource_insert(&target.resources, resource)
+			owner := callerDomain.resources[ownerIdx]
+			_, inserted := resource_insert(&target.resources, resource_granted(owner, r))
 			assert(inserted)
+			memory_underlay_increment(owner.underlay)
+			pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+			for offset := u64(0); offset < r.size; offset += pageBytes {
+				pmm.map_page(target.pml4, r.phys + offset, r.logical + offset, r.pageSize, r.flags)
+			}
 
 		case .Delete:
 			removed, found := resource_remove(&target.resources, r.phys)
 			assert(found)
-			pageBytes := syscalls.mmap_page_size_bytes(removed.overlay.pageSize)
-			pageCount := removed.overlay.size / pageBytes
-			for i in u64(0) ..< pageCount {
-				domain_unmap_page(target, removed.overlay.logical + i * pageBytes)
+			pageBytes := syscalls.mmap_page_size_bytes(removed.pageSize)
+			for offset := u64(0); offset < removed.size; offset += pageBytes {
+				domain_unmap_page(target, removed.logical + offset)
 			}
 			released[releasedCount] = removed.underlay
 			releasedCount += 1

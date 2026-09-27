@@ -12,45 +12,30 @@
 
 SYSCALL_STUB  syscall_mmap,  0
 SYSCALL_STUB  syscall_mfree, 1
-SYSCALL_STUB  syscall_multiplexed_memory_create, 2
-
-.global syscall_multiplexed_memory_read
-syscall_multiplexed_memory_read:
-    # System V arg4 is rcx; syscall arg4 is r10.
-    mov %rcx, %r10
-    movabs $(ILLU_SYSCALL_BIT + 3), %rax
-    syscall
-    ret
-
-.global syscall_multiplexed_memory_write
-syscall_multiplexed_memory_write:
-    # System V arg4 is rcx; syscall arg4 is r10.
-    mov %rcx, %r10
-    movabs $(ILLU_SYSCALL_BIT + 4), %rax
-    syscall
-    ret
-
-SYSCALL_STUB  syscall_prot_domain_create, 5
+SYSCALL_STUB  syscall_mediated_create, 2
+SYSCALL_STUB  syscall_mediated_access, 3
+SYSCALL_STUB  syscall_prot_domain_create, 4
 
 .global syscall_prot_domain_edit
 syscall_prot_domain_edit:
     # System V arg4 is rcx; syscall arg4 is r10.
     mov %rcx, %r10
-    movabs $(ILLU_SYSCALL_BIT + 6), %rax
+    movabs $(ILLU_SYSCALL_BIT + 5), %rax
     syscall
     ret
 
-SYSCALL_STUB  syscall_prot_domain_destroy, 7
+SYSCALL_STUB  syscall_prot_domain_destroy, 6
+
 
 .global syscall_grant_spawn
 syscall_grant_spawn:
     # System V arg4 is rcx; syscall arg4 is r10.
     mov %rcx, %r10
-    movabs $(ILLU_SYSCALL_BIT + 8), %rax
+    movabs $(ILLU_SYSCALL_BIT + 7), %rax
     syscall
     ret
 
-SYSCALL_STUB  syscall_grant_edit, 9
+SYSCALL_STUB  syscall_grant_edit, 8
 
 .global cpu_current_index
 cpu_current_index:

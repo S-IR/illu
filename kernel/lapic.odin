@@ -12,6 +12,7 @@ X2APIC_MSR_LVT_ERROR :: u32(0x837)
 lapic_init :: proc() {
 	print.kensure(cpuid_has_x2apic(), "no x2apic available, required for the os")
 	print.kensure(cpuid_has_tsc_deadline(), "CPU does not support TSC-deadline mode")
+	print.kensure(cpuid_has_invariant_tsc(), "CPU does not have an invariant TSC")
 
 	idt_set_entry(VECTOR_APIC_TIMER, u64(ah.apic_stub_table[0]))
 	idt_set_entry(VECTOR_APIC_ERROR, u64(ah.apic_stub_table[1]))

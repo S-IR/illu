@@ -129,3 +129,11 @@ cpuid_has_rdtscp :: proc() -> bool {
 	ah.cpuid_asm(.EXTENDED_FEATURE_INFO, 0, &r)
 	return (r.edx >> 27) & 1 == 1
 }
+
+cpuid_has_invariant_tsc :: proc() -> bool {
+	r: ah.CPUIDResult
+	ah.cpuid_asm(.EXTENDED_MAX, 0, &r)
+	if r.eax < u32(ah.CPUIDLeaf.ADVANCED_POWER_MANAGEMENT) do return false
+	ah.cpuid_asm(.ADVANCED_POWER_MANAGEMENT, 0, &r)
+	return (r.edx >> 8) & 1 == 1
+}

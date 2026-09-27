@@ -72,9 +72,11 @@ CpuInfo :: struct #align (64) {
 #assert(size_of(CpuInfo) == 64)
 
 CpuInfoPage :: struct {
-	cpuCount: u32,
-	cpus:     [0]CpuInfo,
+	tscTicksPerMs: u64,
+	cpuCount:      u32,
+	cpus:          [0]CpuInfo,
 }
+#assert(offset_of(CpuInfoPage, cpus) == size_of(CpuInfo))
 
 cpu_infos :: proc "contextless" (page: ^CpuInfoPage) -> []CpuInfo {
 	return ([^]CpuInfo)(&page.cpus)[:page.cpuCount]

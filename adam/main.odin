@@ -7,6 +7,7 @@ import "../lib/syscalls"
 import "../lib/userschedule"
 import "base:intrinsics"
 import "base:runtime"
+import "core:slice"
 
 ADAM_WEIGHT :: u64(500_000)
 WORKER_WEIGHT :: u64(100_000)
@@ -40,33 +41,30 @@ adam_entry :: proc "c" (
 
 	switch reason {
 	case .Start:
-		adam_start()
+		adam_start(slice.from_ptr(pciesPtr, int(pciesLen)))
 	case .Fault, .Resume:
 		syscalls.grant_exit()
 	}
 	unreachable()
 }
 
-adam_start :: proc() -> ! {
-	infos := userschedule.cpu_infos(
-		(^userschedule.CpuInfoPage)(uintptr(userschedule.CPU_INFO_ADDR)),
-	)
-	selfCpu := syscalls.cpu_current_index()
-	assert(syscalls.syscall_grant_edit_userspace(max(int), selfCpu, ADAM_WEIGHT) == .None)
+adam_start :: proc(pcies: []pci.Device) -> ! {
+	for &device in pcies {
+		result, code := adam_dispatch_pci_device(&device)
 
-	others := make([dynamic]u32)
-	for &info, idx in infos {
-		if u32(idx) != selfCpu && intrinsics.atomic_load(&info.online) do append(&others, u32(idx))
+		switch result {
+		case .Initialized:
+			syscalls.syscall_debug_print_userspace(
+				"pci driver initialized, class",
+				u64(device.classCode),
+			)
+		case .Failed:
+			syscalls.syscall_debug_print_userspace("pci driver failed", code)
+		case .Ignored, .Unsupported:
+		// syscalls.syscall_debug_print_userspace("pci driver ignored or unsupported", code)
+
+		}
 	}
-	assert(len(others) > 0)
-
-	test_worker_edit_kill(infos, others[0])
-	syscalls.syscall_debug_print_userspace("test passed: worker edit/kill", 0)
-	test_domain_destroy_while_running(infos, others[:])
-	syscalls.syscall_debug_print_userspace("test passed: destroy running domain", 0)
-	test_firstpe(infos, others[0])
-	syscalls.syscall_debug_print_userspace("test passed: firstpe", 0)
-	spawn_printers(others[:])
 	alive_loop()
 }
 
@@ -93,7 +91,10 @@ alive_loop :: proc "c" () -> ! {
 	counter: u64
 	for {
 		if counter & ALIVE_PRINT_MASK == 0 {
-			syscalls.syscall_debug_print_userspace("alive on cpu", u64(syscalls.cpu_current_index()))
+			syscalls.syscall_debug_print_userspace(
+				"alive on cpu",
+				u64(syscalls.cpu_current_index()),
+			)
 		}
 		counter += 1
 	}
@@ -115,7 +116,9 @@ test_worker_edit_kill :: proc(infos: []userschedule.CpuInfo, cpu: u32) {
 	area.rdi = u64(uintptr(counter))
 
 	entry := u64(uintptr(rawptr(syscalls.user_resume)))
-	assert(syscalls.syscall_grant_spawn_userspace(max(int), cpu, area, WORKER_WEIGHT, entry) == .None)
+	assert(
+		syscalls.syscall_grant_spawn_userspace(max(int), cpu, area, WORKER_WEIGHT, entry) == .None,
+	)
 	assert(
 		syscalls.syscall_grant_spawn_userspace(max(int), cpu, area, WORKER_WEIGHT, entry) ==
 		.AlreadyOnCpu,

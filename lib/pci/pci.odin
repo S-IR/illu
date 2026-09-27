@@ -4,13 +4,15 @@ PCI_NO_DEVICE :: u16(0xFFFF)
 PCI_MULTIFUNCTIONAL :: u8(0x80)
 
 Class :: enum u8 {
-	NETWORK = 0x02,
+	MASS_STORAGE = 0x01,
+	NETWORK      = 0x02,
 }
 Subclass :: enum u8 {
 	ETHERNET = 0x00,
+	NVM      = 0x08,
 	WIFI     = 0x80,
 }
-
+PROG_IF_NVME :: u8(0x02)
 Header :: struct #packed {
 	vendorId, deviceId, command, status:              u16,
 	revisionId, progIf:                               u8,
