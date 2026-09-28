@@ -16,6 +16,7 @@ ProtectionDomain :: struct {
 	grantCpus:    bit_array.Bit_Array,
 	authorityPtr: ^byte,
 	weightFree:   u64,
+	tlbGen:       u64,
 	pcid:         u32,
 }
 
@@ -87,6 +88,7 @@ protdomain_new :: proc(authorityPtr: ^byte) -> (pd: ^ProtectionDomain, err: mem.
 	pmm.pml4_share_kernel_half(newPD.pml4, entryRegionOnly = cpuMeltdownVulnerable)
 	cpu_info_map(newPD.pml4)
 	newPD.pcid = pcid_alloc()
+	newPD.tlbGen = tlb_gen_next()
 	return newPD, nil
 }
 
@@ -155,19 +157,59 @@ domains_write_unlock :: proc "contextless" (a, b: ^ProtectionDomain) {
 	spinlock.rw_write_unlock(&first.lock)
 }
 
-tlb_wait_domain_flushed :: proc(domain: ^ProtectionDomain) {
+tlbGenCounter: u64
+
+tlb_gen_next :: proc "contextless" () -> u64 {
+	return intrinsics.atomic_add(&tlbGenCounter, 1) + 1
+}
+
+domain_tlb_invalidate :: proc "contextless" (domain: ^ProtectionDomain) -> u64 {
+	gen := tlb_gen_next()
+	intrinsics.atomic_store(&domain.tlbGen, gen)
+	return gen
+}
+
+tlb_shootdown :: proc(domain: ^ProtectionDomain, gen: u64) {
+	assert(gen != 0)
 	self := gs_read_cpustate()
+	tlb_sync(self)
+	for &cpu in cpus {
+		if &cpu != self && cpu_tlb_stale(&cpu, domain, gen) do send_ipi(cpu_info(&cpu).apicId, VECTOR_APIC_IPI)
+	}
 	for &cpu in cpus {
 		if &cpu == self do continue
-		start := intrinsics.atomic_load(&cpu.tlbEpoch)
-		for intrinsics.atomic_load(&cpu.currentGrant.domain) == domain &&
-		    intrinsics.atomic_load(&cpu.tlbEpoch) == start {
-			intrinsics.atomic_add(&self.tlbEpoch, 1)
+		for cpu_tlb_stale(&cpu, domain, gen) {
+			tlb_sync(self)
 			grant_leave_if_killed(self)
 			intrinsics.cpu_relax()
 		}
 	}
-	ah.write_cr3(ah.read_cr3())
+}
+
+cpu_tlb_stale :: #force_inline proc "contextless" (cpu: ^CpuState, domain: ^ProtectionDomain, gen: u64) -> bool {
+	return intrinsics.atomic_load(&cpu.currentGrant.domain) == domain && intrinsics.atomic_load(&cpu.tlbAckGen) < gen
+}
+
+tlb_sync :: proc "contextless" (cpu: ^CpuState) {
+	domain := cpu.currentGrant.domain
+	if domain == nil do return
+	gen := intrinsics.atomic_load(&domain.tlbGen)
+	if intrinsics.atomic_load(&cpu.tlbAckGen) >= gen do return
+	if cpuMeltdownVulnerable {
+		intrinsics.atomic_store(&cpu.tlbAckGen, gen)
+		return
+	}
+	ah.write_cr3(domain_cr3(cpu, domain))
+}
+
+domain_cr3 :: proc "contextless" (cpu: ^CpuState, domain: ^ProtectionDomain) -> u64 {
+	gen := intrinsics.atomic_load(&domain.tlbGen)
+	intrinsics.atomic_store(&cpu.tlbAckGen, gen)
+	if !cpuHasPCID || domain.pcid == 0 do return domain.pml4
+	cr3 := domain.pml4 | u64(domain.pcid)
+	if cpu.pcidSeenGen[domain.pcid] == gen do return cr3 | PCID_NOFLUSH_BIT
+	cpu.pcidSeenGen[domain.pcid] = gen
+	return cr3
 }
 
 
@@ -204,18 +246,8 @@ pcid_free :: proc(pcid: u32) {
 
 PCID_NOFLUSH_BIT :: u64(1) << 63
 
-domain_switch_cr3 :: proc "contextless" (domain: ^ProtectionDomain) {
-	if !cpuHasPCID || domain.pcid == 0 {
-		ah.write_cr3(domain.pml4)
-		return
-	}
-	ah.write_cr3(domain.pml4 | u64(domain.pcid) | PCID_NOFLUSH_BIT)
-}
-
 @(export, link_name = "kernel_cr3_value")
 kernelCr3Value: u64
-@(export, link_name = "cr3_noflush_bit")
-cr3NoFlushBit: u64
 
 kernel_switch_cr3 :: proc "contextless" () {
 	print.kassert(kernelCr3Value != 0)
@@ -304,8 +336,9 @@ syscall_prot_domain_edit :: proc(
 	released: [syscalls.MAX_REGIONS_PER_CALL]^MemoryUnderlay
 	releasedCount := 0
 	target: ^ProtectionDomain
+	tlbGen: u64
 	defer if releasedCount > 0 {
-		tlb_wait_domain_flushed(target)
+		tlb_shootdown(target, tlbGen)
 		for underlay in released[:releasedCount] do memory_underlay_release(underlay)
 	}
 
@@ -366,6 +399,7 @@ syscall_prot_domain_edit :: proc(
 			resource_unmap(target.pml4, removed)
 			released[releasedCount] = removed.underlay
 			releasedCount += 1
+			if tlbGen == 0 do tlbGen = domain_tlb_invalidate(target)
 		}
 	}
 

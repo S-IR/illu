@@ -91,6 +91,7 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 	context = gKernelCtx
 	cpu := gs_read_cpustate()
 	assert(cpu.currentGrant.domain != nil)
+	defer if cpuMeltdownVulnerable do cpu.userCr3 = domain_cr3(cpu, cpu.currentGrant.domain)
 	defer if intrinsics.atomic_load(&cpu.currentGrant.weight) == 0 do grant_exit()
 
 	switch syscalls.Syscall(nr) {

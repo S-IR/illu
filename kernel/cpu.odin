@@ -31,7 +31,8 @@ CpuState :: struct #align (64) {
 	currentGrant:     CpuGrant,
 	grants:           [dynamic]CpuGrant,
 	floorVirtualTime: u64,
-	tlbEpoch:         u64,
+	tlbAckGen:        u64,
+	pcidSeenGen:      []u64,
 }
 #assert(offset_of(CpuState, self) == 0)
 #assert(offset_of(CpuState, kernelStackTop) == 8)
@@ -84,8 +85,7 @@ cpus_init :: proc(apicIds: []u32) {
 		cpu_init(&cpu, apicIds[idx])
 	}
 
-	cr3NoFlushBit = PCID_NOFLUSH_BIT if cpuHasPCID else 0
-	kernelCr3Value = pmm.kernelPML4 | (u64(KERNEL_PCID) | cr3NoFlushBit if cpuHasPCID else 0)
+	kernelCr3Value = pmm.kernelPML4 | (u64(KERNEL_PCID) | PCID_NOFLUSH_BIT if cpuHasPCID else 0)
 
 	cpu_setup(&cpus[0])
 	for &cpu in cpus[1:] {
@@ -111,6 +111,10 @@ cpu_init :: proc(cpu: ^CpuState, apicId: u32) {
 	aErr: runtime.Allocator_Error
 	cpu.grants, aErr = make([dynamic]CpuGrant, 0, CPU_GRANT_STARTING_CAPACITY)
 	print.kensure(aErr == nil, "OOM cpu_init: grants")
+	if cpuHasPCID {
+		cpu.pcidSeenGen, aErr = make([]u64, PCID_MAX)
+		print.kensure(aErr == nil, "OOM cpu_init: pcid generations")
+	}
 
 	gdt := &gdts[idx]
 	gdt_tss_fill(gdt)

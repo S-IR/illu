@@ -274,11 +274,11 @@ grant_loop :: proc "c" () -> ! {
 			ordered_remove(&cpu.grants, idx)
 			cpu.floorVirtualTime = grant.virtualTime
 			cpu.currentGrant = grant
-			intrinsics.atomic_add(&cpu.tlbEpoch, 1)
 			spinlock.unlock(&cpu.lock)
+			intrinsics.atomic_thread_fence(.Seq_Cst)
 
 			lapic_set_deadline(tscTicksPerMs * GRANT_SLICE_MS)
-			run_resume(grant.domain.pml4 | u64(grant.domain.pcid), grant.entry, grant.saveArea)
+			run_resume(domain_cr3(cpu, grant.domain), grant.entry, grant.saveArea)
 		}
 		spinlock.unlock(&cpu.lock)
 

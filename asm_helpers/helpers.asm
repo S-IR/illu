@@ -744,8 +744,6 @@ syscall_noncanonical_trampoline:
 syscall_entry_meltdown_safe:
     swapgs
     mov %rbx, %gs:CPU_SYSCALLSCRATCH
-    mov %cr3, %rbx
-    mov %rbx, %gs:CPU_USERCR3
     mov kernel_cr3_value(%rip), %rbx
     mov %rbx, %cr3
     mov %gs:CPU_SYSCALLSCRATCH, %rbx
@@ -776,7 +774,6 @@ syscall_entry_meltdown_safe:
     sar $47, %r10
     jnz syscall_noncanonical_trampoline
     mov %gs:CPU_USERCR3, %r10
-    or cr3_noflush_bit(%rip), %r10
     mov %gs:CPU_USERSYSCALLRSP, %rsp
     mov %r10, %cr3
     SYSRET_SCRUB
