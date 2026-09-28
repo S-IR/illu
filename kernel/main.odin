@@ -23,6 +23,7 @@ kernel_main :: proc "sysv" (bootParams: ^uefi.KernelParams) {
 	cpuid_init_meltdown_check()
 	cpuid_init_speculation_mitigations()
 	cpuid_init_pcid()
+	cpuid_init_xsave()
 
 	gdt_tss_fill(&gdtBeforeSched)
 	gdt_tss_load(&gdtBeforeSched)

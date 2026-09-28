@@ -49,18 +49,17 @@ CpuInfos: ^userschedule.CpuInfoPage
 cpuInfosPhys: u64
 apReady: u32
 
-FxArea :: struct #align (16) {
-	bytes: [512]u8,
+XsaveInitArea :: struct #align (64) {
+	bytes: [576]u8,
 }
 
-@(export, link_name = "kernel_clean_fx")
-cleanFx: FxArea
+@(export, link_name = "kernel_init_xsave")
+initXsave: XsaveInitArea
 
 cpus_init :: proc(apicIds: []u32) {
 	print.kensure(cpuid_has_rdtscp(), "cpus_init: rdtscp unsupported")
 	print.kensure(cpuid_has_fsgsbase(), "cpus_init: fsgsbase unsupported")
-	(^u16)(&cleanFx.bytes[0])^ = userschedule.FX_FCW_DEFAULT
-	(^u32)(&cleanFx.bytes[userschedule.FX_MXCSR_OFFSET])^ = userschedule.MXCSR_DEFAULT
+	(^u32)(&initXsave.bytes[userschedule.XSAVE_MXCSR_OFFSET])^ = userschedule.MXCSR_DEFAULT
 
 	bspId := u32(ah.rdmsr_asm(X2APIC_MSR_APIC_ID))
 	bspIdx, bspFound := slice.linear_search(apicIds, bspId)
@@ -128,6 +127,7 @@ cpu_setup :: proc(cpu: ^CpuState) {
 	cpuid_enable_pcid()
 	cpuid_enable_fsgsbase()
 	cpu_enable_kernel_protections()
+	cpu_enable_xsave()
 	cpu_enable_ssbd()
 	ah.gs_write_base(u64(uintptr(cpu)))
 	ah.wrmsr_asm(IA32_TSC_AUX, u64(cpu_index(cpu)))

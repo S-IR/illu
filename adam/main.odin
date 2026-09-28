@@ -14,13 +14,13 @@ WORKER_WEIGHT :: u64(100_000)
 WORKER_EDITED_WEIGHT :: u64(300_000)
 FIRSTPE_WEIGHT :: u64(200_000)
 WORKER_STACK_PAGES :: 4
-SPIN_COUNTER_OFFSET :: 0x800
+SPIN_COUNTER_OFFSET :: 0xC00
 SETTLE_CYCLES :: u64(50_000_000)
 POLL_CYCLES :: u64(100_000)
 WORKER_PRINT_MASK :: u64(1) << 12 - 1
 ALIVE_PRINT_MASK :: u64(1) << 24 - 1
 PRINTER_PAGES :: 5
-SPINNER_CODE :: [10]u8{0xF0, 0x48, 0xFF, 0x86, 0x00, 0x08, 0x00, 0x00, 0xEB, 0xF6}
+SPINNER_CODE :: [10]u8{0xF0, 0x48, 0xFF, 0x86, 0x00, 0x0C, 0x00, 0x00, 0xEB, 0xF6}
 #assert(SPIN_COUNTER_OFFSET >= size_of(userschedule.UserSaveArea))
 #assert(ADAM_WEIGHT + WORKER_EDITED_WEIGHT <= userschedule.SCHED_WEIGHT_TOTAL)
 
@@ -66,6 +66,7 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 
 		}
 	}
+	when ODIN_DEBUG do run_kernel_tests()
 	alive_loop()
 }
 

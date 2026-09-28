@@ -28,6 +28,7 @@ when !ODIN_TEST {
 		lidt_asm :: proc(desc: ^X86TableDescriptor) ---
 
 		read_cr0 :: proc() -> u64 ---
+		xsetbv_asm :: proc(index: u32, value: u64) ---
 		write_cr0 :: proc(val: u64) ---
 		read_cr2 :: proc() -> u64 ---
 		read_cr3 :: proc() -> u64 ---
@@ -86,6 +87,7 @@ when !ODIN_TEST {
 	lidt_asm :: proc "contextless" (desc: ^X86TableDescriptor) {}
 
 	read_cr0 :: proc "contextless" () -> u64 {return 0}
+	xsetbv_asm :: proc "contextless" (index: u32, value: u64) {}
 	write_cr0 :: proc "contextless" (val: u64) {}
 	read_cr2 :: proc "contextless" () -> u64 {return 0}
 	read_cr3 :: proc "contextless" () -> u64 {return 0}

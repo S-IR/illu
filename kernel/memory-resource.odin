@@ -1,5 +1,6 @@
 package kernel
 import "../lib/lmem"
+import "../lib/shared"
 import "../lib/syscalls"
 import "pmm"
 import "print"
@@ -54,16 +55,24 @@ resource_granted :: proc(owner: MemoryResource, r: syscalls.MemRegion) -> Memory
 region_mappable :: proc "contextless" (pml4: u64, r: syscalls.MemRegion) -> bool {
 	pageBytes := lmem.page_bytes(r.pageSize)
 	for offset := u64(0); offset < r.size; offset += pageBytes {
-		if !pmm.slot_free(pml4, r.logical + offset, r.pageSize) do return false
+		if !pmm.slot_available(pml4, r.logical + offset, r.pageSize) do return false
 	}
 	return true
 }
 
-resource_map :: proc "contextless" (pml4: u64, r: MemoryResource) {
+resource_map :: proc(pml4: u64, r: MemoryResource, detached: ^[dynamic]u64) {
 	pageBytes := lmem.page_bytes(r.pageSize)
 	for offset := u64(0); offset < r.size; offset += pageBytes {
+		claimed := pmm.slot_claim(pml4, r.logical + offset, r.pageSize, detached)
+		print.kassert(claimed)
 		pmm.map_page(pml4, r.phys + offset, r.logical + offset, r.pageSize, r.flags)
 	}
+}
+
+detached_tables_free :: proc(detached: ^[dynamic]u64) {
+	for table in detached do pmm.free_pages(table, shared.PAGE_SIZE)
+	delete(detached^)
+	detached^ = nil
 }
 
 resource_unmap :: proc "contextless" (pml4: u64, r: MemoryResource) {

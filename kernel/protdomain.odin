@@ -268,6 +268,7 @@ syscall_prot_domain_create :: proc(
 	regionsBuf: [syscalls.MAX_REGIONS_PER_CALL]syscalls.MemRegion
 	regions := regionsBuf[:count]
 	if !user_copy_in(callerDomain, regions, regionsPtr) do return .InvalidRegionCount, 0
+	for &r in regions do r.flags += {.Present, .User}
 	{
 		spinlock.rw_read_lock(&callerDomain.lock)
 		defer spinlock.rw_read_unlock(&callerDomain.lock)
@@ -296,6 +297,8 @@ syscall_prot_domain_create :: proc(
 		}
 		if reserve_soa(&pd.resources, len(regions)) != nil do return .OutOfMemory, 0
 
+		detached: [dynamic]u64
+		defer detached_tables_free(&detached)
 		for r in regions {
 			ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
 			assert(owned)
@@ -304,7 +307,7 @@ syscall_prot_domain_create :: proc(
 			_, inserted := resource_insert(&pd.resources, granted)
 			assert(inserted)
 			memory_underlay_increment(owner.underlay)
-			resource_map(pd.pml4, granted)
+			resource_map(pd.pml4, granted, &detached)
 		}
 	}
 
@@ -332,14 +335,17 @@ syscall_prot_domain_edit :: proc(
 	regionsBuf: [syscalls.MAX_REGIONS_PER_CALL]syscalls.MemRegion
 	regions := regionsBuf[:count]
 	if !user_copy_in(callerDomain, regions, regionsPtr) do return .InvalidRegionCount
+	for &r in regions do r.flags += {.Present, .User}
 
 	released: [syscalls.MAX_REGIONS_PER_CALL]^MemoryUnderlay
 	releasedCount := 0
 	target: ^ProtectionDomain
 	tlbGen: u64
-	defer if releasedCount > 0 {
+	detached: [dynamic]u64
+	defer if tlbGen != 0 {
 		tlb_shootdown(target, tlbGen)
 		for underlay in released[:releasedCount] do memory_underlay_release(underlay)
+		detached_tables_free(&detached)
 	}
 
 	spinlock.rw_read_lock(&protDomainPool.rwLock)
@@ -391,7 +397,8 @@ syscall_prot_domain_edit :: proc(
 			_, inserted := resource_insert(&target.resources, granted)
 			assert(inserted)
 			memory_underlay_increment(owner.underlay)
-			resource_map(target.pml4, granted)
+			resource_map(target.pml4, granted, &detached)
+			if len(detached) > 0 && tlbGen == 0 do tlbGen = domain_tlb_invalidate(target)
 
 		case .Delete:
 			removed, found := resource_remove(&target.resources, r.phys)

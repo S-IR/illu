@@ -49,6 +49,13 @@ syscall_mmap :: proc(
 	if allocatedPhys == 0 do return .OutOfMemory, 0
 	defer if err != .None do pmm.free_pages(allocatedPhys, totalBytes)
 
+	tlbGen: u64
+	detached: [dynamic]u64
+	defer if tlbGen != 0 {
+		tlb_shootdown(domain, tlbGen)
+		detached_tables_free(&detached)
+	}
+
 	spinlock.rw_write_lock(&domain.lock)
 	defer spinlock.rw_write_unlock(&domain.lock)
 
@@ -81,8 +88,9 @@ syscall_mmap :: proc(
 		}
 		_, inserted := resource_insert(&domain.resources, resource)
 		assert(inserted)
-		resource_map(domain.pml4, resource)
+		resource_map(domain.pml4, resource, &detached)
 	}
+	if len(detached) > 0 do tlbGen = domain_tlb_invalidate(domain)
 	return .None, allocatedPhys
 }
 

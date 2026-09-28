@@ -126,14 +126,7 @@ pe_run :: proc(
 	(^u64)(rawptr(uintptr(tebLogical + 0x60)))^ = pebLogical
 	(^u64)(rawptr(uintptr(pebLogical + 0x10)))^ = bc.base
 	saveAreaAddr := guardAddr + syscalls.descriptor_offset(mmapRegions[:], 3)
-	memRegions := [len(mmapRegions)]syscalls.MemRegion {
-		{
-			phys = guardAddr,
-			logical = guardAddr,
-			size = shared.PAGE_SIZE,
-			pageSize = ._4KB,
-			flags = {},
-		},
+	memRegions := [len(mmapRegions) - 1]syscalls.MemRegion {
 		{
 			phys = stackAddr,
 			logical = stackAddr,

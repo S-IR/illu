@@ -30,7 +30,6 @@ page_size_usable :: proc "contextless" (size: lmem.PageSize) -> bool {
 
 mem_region_valid :: proc "contextless" (r: syscalls.MemRegion) -> bool {
 	if !page_size_usable(r.pageSize) || r.size == 0 do return false
-	if .Present not_in r.flags || .User not_in r.flags do return false
 	if .PS in r.flags || .Global in r.flags do return false
 	pageBytes := lmem.page_bytes(r.pageSize)
 	if r.phys % pageBytes != 0 || r.logical % pageBytes != 0 || r.size % pageBytes != 0 do return false

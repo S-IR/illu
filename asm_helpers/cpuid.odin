@@ -8,6 +8,7 @@ CPUIDLeaf :: enum u32 {
 	FEATURE_INFO                 = 0x1, // includes x2APIC, SSE, etc.
 	MONITOR_MWAIT                = 0x5,
 	STRUCTURED_EXTENDED_FEATURES = 0x7,
+	XSAVE_STATE                  = 0xD,
 	EXTENDED_MAX                 = 0x8000_0000,
 	EXTENDED_FEATURE_INFO        = 0x8000_0001,
 	ADVANCED_POWER_MANAGEMENT    = 0x8000_0007,

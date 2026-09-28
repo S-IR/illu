@@ -34,6 +34,7 @@ build_kernel :: proc() {
 			"-no-crt",
 			"-build-mode:obj",
 			"-define:KERNEL_BUILD=true",
+			"-define:TEST_NO_MELTDOWN=true" if TEST_NO_MELTDOWN else "-define:TEST_NO_MELTDOWN=false",
 		},
 	)
 

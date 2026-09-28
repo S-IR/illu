@@ -69,7 +69,9 @@ adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
 			resource := resource_init(barStart, barEnd - barStart, pageSize, MMIO_FLAGS, {.Volatile}, .DeviceMMIO)
 			_, inserted := resource_insert(&pd.resources, resource)
 			print.kensure(inserted, "adam_init: failed to track PCI BAR resource")
-			resource_map(pd.pml4, resource)
+			detached: [dynamic]u64
+			resource_map(pd.pml4, resource, &detached)
+			assert(len(detached) == 0)
 		}
 	}
 

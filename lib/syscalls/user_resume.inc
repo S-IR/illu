@@ -1,27 +1,28 @@
-.equ SA_RAX,512
-.equ SA_RBX,520
-.equ SA_RCX,528
-.equ SA_RDX,536
-.equ SA_RSI,544
-.equ SA_RDI,552
-.equ SA_RBP,560
-.equ SA_R8,568
-.equ SA_R9,576
-.equ SA_R10,584
-.equ SA_R11,592
-.equ SA_R12,600
-.equ SA_R13,608
-.equ SA_R14,616
-.equ SA_R15,624
-.equ SA_RIP,632
-.equ SA_RSP,640
-.equ SA_RFLAGS,648
-.equ SA_GSBASE,656
-.equ SA_CONTROL,664
+.equ SA_RAX,0
+.equ SA_RBX,8
+.equ SA_RCX,16
+.equ SA_RDX,24
+.equ SA_RSI,32
+.equ SA_RDI,40
+.equ SA_RBP,48
+.equ SA_R8,56
+.equ SA_R9,64
+.equ SA_R10,72
+.equ SA_R11,80
+.equ SA_R12,88
+.equ SA_R13,96
+.equ SA_R14,104
+.equ SA_R15,112
+.equ SA_RIP,120
+.equ SA_RSP,128
+.equ SA_RFLAGS,136
+.equ SA_GSBASE,144
+.equ SA_CONTROL,152
+.equ SA_XSAVE_MASK,160
+.equ SA_XSAVE,192
 .equ SA_CONTROL_RESTORING,1
+.equ SA_GPR_QWORDS,15
 
-.equ SA_FX_RESERVED,464
-.equ SA_FX_RESERVED_QWORDS,6
 .equ USER_RED_ZONE,128
 
 .equ USER_CS,0x2B
@@ -29,7 +30,9 @@
 .equ RESUME_REASON,2
 
 .macro USER_RESUME_BODY
-    fxrstor (%rsi)
+    mov SA_XSAVE_MASK(%rsi), %eax
+    mov SA_XSAVE_MASK+4(%rsi), %edx
+    xrstor SA_XSAVE(%rsi)
     mov SA_GSBASE(%rsi), %rax
     wrgsbase %rax
     mov SA_RSP(%rsi), %rsp

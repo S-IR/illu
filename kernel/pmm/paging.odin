@@ -117,7 +117,7 @@ map_kernel_image :: proc(dstPML4: u64, bootstrap := false) {
 		if .W in seg.perms do flags += {.Write}
 		if .X in seg.perms do flags -= {.NX}
 		for page := addr_round_down_to_page(seg.base); page < seg.end; page += shared.PAGE_SIZE {
-			print.kensure(slot_free(dstPML4, page, ._4KB), "map_kernel_image: two segments share a page")
+			print.kensure(slot_available(dstPML4, page, ._4KB), "map_kernel_image: two segments share a page")
 			map_page(dstPML4, page, page, ._4KB, flags, bootstrap)
 		}
 	}
@@ -200,17 +200,72 @@ unmap_page :: proc "contextless" (pml4Phys, logical: u64, size: lmem.PageSize) -
 	return true
 }
 
-slot_free :: proc "contextless" (pml4Phys, logical: u64, size: lmem.PageSize) -> bool {
+slot_available :: proc "contextless" (pml4Phys, logical: u64, size: lmem.PageSize) -> bool {
+	slot := slot_entry(pml4Phys, logical, size)
+	if slot == nil do return true
+	flags := transmute(lmem.PageFlags)slot^
+	if .Present not_in flags do return true
+	if .PS in flags || size == ._4KB do return false
+	return table_empty(slot^, table_level(size))
+}
+
+slot_claim :: proc(pml4Phys, logical: u64, size: lmem.PageSize, detached: ^[dynamic]u64) -> bool {
+	if !slot_available(pml4Phys, logical, size) do return false
+	slot := slot_entry(pml4Phys, logical, size)
+	if slot == nil || .Present not_in transmute(lmem.PageFlags)slot^ do return true
+	tables_collect(slot^, table_level(size), detached)
+	slot^ = 0
+	return true
+}
+
+@(private)
+slot_entry :: proc "contextless" (pml4Phys, logical: u64, size: lmem.PageSize) -> ^u64 {
 	table := ([^]u64)(phys_to_ptr(pml4Phys))
 	leafShift := leaf_shift(size)
 	for shift := PT_SHIFT_PML4; shift > leafShift; shift -= 9 {
 		entry := table[(logical >> shift) & PT_INDEX_MASK]
 		flags := transmute(lmem.PageFlags)entry
-		if .Present not_in flags do return true
-		if .PS in flags do return false
+		if .Present not_in flags do return nil
+		if .PS in flags do return &table[(logical >> shift) & PT_INDEX_MASK]
 		table = ([^]u64)(phys_to_ptr(entry & ENTRY_ADDR_MASK))
 	}
-	return .Present not_in transmute(lmem.PageFlags)table[(logical >> leafShift) & PT_INDEX_MASK]
+	return &table[(logical >> leafShift) & PT_INDEX_MASK]
+}
+
+@(private)
+table_level :: proc "contextless" (size: lmem.PageSize) -> int {
+	switch size {
+	case ._4KB:
+		return 0
+	case ._2MB:
+		return 1
+	case ._1GB:
+		return 2
+	}
+	unreachable()
+}
+
+@(private)
+table_empty :: proc "contextless" (entry: u64, level: int) -> bool {
+	print.kassert(level >= 1)
+	table := ([^]u64)(phys_to_ptr(entry & ENTRY_ADDR_MASK))
+	for child in table[:PT_ENTRIES] {
+		flags := transmute(lmem.PageFlags)child
+		if .Present not_in flags do continue
+		if level == 1 || .PS in flags || !table_empty(child, level - 1) do return false
+	}
+	return true
+}
+
+@(private)
+tables_collect :: proc(entry: u64, level: int, out: ^[dynamic]u64) {
+	if level > 1 {
+		table := ([^]u64)(phys_to_ptr(entry & ENTRY_ADDR_MASK))
+		for child in table[:PT_ENTRIES] {
+			if .Present in transmute(lmem.PageFlags)child do tables_collect(child, level - 1, out)
+		}
+	}
+	append(out, entry & ENTRY_ADDR_MASK)
 }
 
 ensure_table :: #force_inline proc "contextless" (

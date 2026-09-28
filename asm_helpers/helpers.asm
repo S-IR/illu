@@ -11,7 +11,7 @@
 .equ FRAME_CS,656
 .equ FRAME_RFLAGS,664
 .equ FRAME_RSP,672
-.equ FRAME_COPY_QWORDS,79
+.equ FRAME_GPRS,512
 
 .equ USER_RFLAGS_FORCED,0x202
 .equ MSR_KERNEL_GS_BASE,0xC0000102
@@ -359,6 +359,15 @@ load_tss_asm:
 .global lidt_asm
 lidt_asm:
     lidt (%rdi)
+    ret
+
+.global xsetbv_asm
+xsetbv_asm:
+    mov %edi, %ecx
+    mov %esi, %eax
+    mov %rsi, %rdx
+    shr $32, %rdx
+    xsetbv
     ret
 
 .global read_cr0
@@ -829,10 +838,12 @@ cpu_halt:
 .global run_resume
 run_resume:
     cli
-    fxrstor kernel_clean_fx(%rip)
-    mov %rdi, %cr3
     mov %rsi, %r8
     mov %rdx, %r9
+    mov kernel_xsave_mask(%rip), %eax
+    mov kernel_xsave_mask+4(%rip), %edx
+    xrstor kernel_init_xsave(%rip)
+    mov %rdi, %cr3
     mov $MSR_KERNEL_GS_BASE, %ecx
     xor %eax, %eax
     xor %edx, %edx
@@ -871,13 +882,10 @@ user_save_area_store:
     jnz 1f
     mov %rdi, %r8
     mov %rsi, %r9
-    mov $FRAME_COPY_QWORDS, %ecx
+    lea FRAME_GPRS(%rsi), %rsi
+    mov $SA_GPR_QWORDS, %ecx
     cld
     rep movsq
-    lea SA_FX_RESERVED(%r8), %rdi
-    mov $SA_FX_RESERVED_QWORDS, %ecx
-    xor %eax, %eax
-    rep stosq
     mov FRAME_RIP(%r9), %rax
     mov %rax, SA_RIP(%r8)
     mov FRAME_RSP(%r9), %rax
@@ -889,6 +897,18 @@ user_save_area_store:
     shl $32, %rdx
     or %rdx, %rax
     mov %rax, SA_GSBASE(%r8)
+    fxrstor (%r9)
+    mov SA_XSAVE_MASK(%r8), %rax
+    and kernel_xsave_mask(%rip), %rax
+    mov %rax, %rdx
+    shr $32, %rdx
+    testb $1, kernel_has_xsavec(%rip)
+    jz 2f
+    xsavec SA_XSAVE(%r8)
+    jmp 3f
+2:
+    xsave SA_XSAVE(%r8)
+3:
     orq $SA_CONTROL_RESTORING, SA_CONTROL(%r8)
 1:
     ret

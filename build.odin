@@ -13,6 +13,7 @@ BUILD_ADAM :: #config(BUILD_ADAM, true)
 
 BUILD_NTDLL_IMMITATOR :: #config(BUILD_NTDLL_IMMITATOR, true)
 BUILD_FIRSTPE :: #config(BUILD_FIRSTPE, ODIN_DEBUG)
+TEST_NO_MELTDOWN :: #config(TEST_NO_MELTDOWN, false)
 
 main :: proc() {
 	os.remove_all(BUILD_DIR)

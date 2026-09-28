@@ -1,5 +1,6 @@
 package kernel
 import ah "../asm_helpers"
+import "../lib/spinlock"
 import "../lib/userschedule"
 import "base:intrinsics"
 import "print"
@@ -142,9 +143,7 @@ InterruptFrame :: struct #packed {
 #assert(offset_of(InterruptFrame, rflags) == 664)
 #assert(offset_of(InterruptFrame, rsp) == 672)
 #assert(offset_of(InterruptFrame, ss) == 680)
-#assert(offset_of(InterruptFrame, rax) == offset_of(userschedule.UserSaveArea, rax))
-#assert(offset_of(InterruptFrame, r15) == offset_of(userschedule.UserSaveArea, r15))
-#assert(userschedule.SAVE_AREA_FX_RESERVED == 464)
+#assert(offset_of(InterruptFrame, r15) - offset_of(InterruptFrame, rax) == offset_of(userschedule.UserSaveArea, r15) - offset_of(userschedule.UserSaveArea, rax))
 
 interrupt_frame_from_user :: #force_inline proc "contextless" (frame: ^InterruptFrame) -> bool {
 	return (frame.cs & 3) == 3
@@ -177,6 +176,7 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		return
 	}
 	if userMode {
+		spinlock.lock(&serialPrintLock)
 		print.serial_write("domain fault: ")
 		print.serial_write(exceptionNames[frame.interruptNumber])
 		print.serial_write(" at rip=")
@@ -188,6 +188,7 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		print.serial_write(" domain.pml4=")
 		print.serial_write_hex(gs_read_cpustate().currentGrant.domain.pml4)
 		print.serial_writeln("")
+		spinlock.unlock(&serialPrintLock)
 		grant_exit()
 	}
 

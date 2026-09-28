@@ -1,5 +1,6 @@
 package kernel
 import ah "../asm_helpers"
+import "../lib/userschedule"
 import "print"
 
 CPUIDECX1Flag :: enum u32 {
@@ -35,7 +36,11 @@ cpuid_init_meltdown_check :: proc() {
 // immunity via IA32_ARCH_CAPABILITIES; anything that doesn't report that at
 // all predates the mechanism and is treated as vulnerable -- fail closed,
 // never assume safety we can't prove.
+TEST_NO_MELTDOWN :: #config(TEST_NO_MELTDOWN, false)
+#assert(!TEST_NO_MELTDOWN || ODIN_DEBUG)
+
 cpuid_meltdown_vulnerable :: proc() -> bool {
+	when TEST_NO_MELTDOWN do return false
 	vendor: ah.CPUIDResult
 	ah.cpuid_asm(.VENDOR_STRING, 0, &vendor)
 
@@ -166,6 +171,52 @@ cpu_enable_kernel_protections :: proc "contextless" () {
 	cpuHasSMAP = cpuid_structured_ebx_bit(SMAP_CPUID_BIT)
 	if cpuHasSMAP do cr4 |= CR4_SMAP_BIT
 	ah.write_cr4(cr4)
+}
+
+XSTATE_X87 :: u64(1) << 0
+XSTATE_SSE :: u64(1) << 1
+XSTATE_AVX :: u64(1) << 2
+XSTATE_AVX512 :: u64(0b111) << 5
+CR4_OSXSAVE_BIT :: u64(1) << 18
+
+@(export, link_name = "kernel_xsave_mask")
+xsaveMask: u64
+@(export, link_name = "kernel_has_xsavec")
+cpuHasXsavec: bool
+
+cpuid_init_xsave :: proc() {
+	XSAVE_CPUID_BIT :: 26
+	AVX_CPUID_BIT :: 28
+	AVX512F_CPUID_BIT :: 16
+	XSAVEC_CPUID_BIT :: 1
+
+	features: ah.CPUIDResult
+	ah.cpuid_asm(.FEATURE_INFO, 0, &features)
+	print.kensure((features.ecx >> XSAVE_CPUID_BIT) & 1 == 1, "cpuid_init_xsave: xsave unsupported")
+
+	supportedRaw: ah.CPUIDResult
+	ah.cpuid_asm(.XSAVE_STATE, 0, &supportedRaw)
+	supported := u64(supportedRaw.eax) | u64(supportedRaw.edx) << 32
+
+	xsaveMask = XSTATE_X87 | XSTATE_SSE
+	hasAVX := (features.ecx >> AVX_CPUID_BIT) & 1 == 1 && supported & XSTATE_AVX != 0
+	if hasAVX do xsaveMask |= XSTATE_AVX
+	if hasAVX && supported & XSTATE_AVX512 == XSTATE_AVX512 && cpuid_structured_ebx_bit(AVX512F_CPUID_BIT) {
+		xsaveMask |= XSTATE_AVX512
+	}
+
+	subleaf1: ah.CPUIDResult
+	ah.cpuid_asm(.XSAVE_STATE, 1, &subleaf1)
+	cpuHasXsavec = (subleaf1.eax >> XSAVEC_CPUID_BIT) & 1 == 1
+}
+
+cpu_enable_xsave :: proc() {
+	print.kassert(xsaveMask & (XSTATE_X87 | XSTATE_SSE) == XSTATE_X87 | XSTATE_SSE)
+	ah.write_cr4(ah.read_cr4() | CR4_OSXSAVE_BIT)
+	ah.xsetbv_asm(0, xsaveMask)
+	sizes: ah.CPUIDResult
+	ah.cpuid_asm(.XSAVE_STATE, 0, &sizes)
+	print.kensure(u64(sizes.ebx) <= userschedule.XSAVE_AREA_BYTES, "cpu_enable_xsave: xsave area larger than the save area")
 }
 
 cpuid_has_1gb_pages :: proc() -> bool {
