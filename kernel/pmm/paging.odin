@@ -170,11 +170,13 @@ map_page :: proc "contextless" (
 	print.kassert(phys % pageBytes == 0 && logical % pageBytes == 0)
 	print.kassert(.PS not_in flags)
 	print.kassert(size != ._1GB || pages1GB)
+	lowerHalf := logical < KERNEL_DIRECT_MAP
+	print.kassert(lowerHalf || .User not_in flags)
 
 	table := ([^]u64)(phys_to_ptr(pml4Phys))
 	leafShift := leaf_shift(size)
 	for shift := PT_SHIFT_PML4; shift > leafShift; shift -= 9 {
-		table = ensure_table(table, (logical >> shift) & PT_INDEX_MASK, .User in flags, .Write in flags, bootstrap)
+		table = ensure_table(table, (logical >> shift) & PT_INDEX_MASK, lowerHalf, lowerHalf || .Write in flags, bootstrap)
 	}
 	idx := (logical >> leafShift) & PT_INDEX_MASK
 	print.kassert(.Present not_in transmute(lmem.PageFlags)table[idx], "map_page: slot already mapped")
