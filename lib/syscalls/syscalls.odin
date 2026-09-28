@@ -14,6 +14,7 @@ MMapRegion :: struct #packed {
 	flags:    lmem.PageFlags,
 }
 ILLU_SYSCALL_BIT :: u64(1) << 63
+MAX_REGIONS_PER_CALL :: 64
 SchedulerEnterReason :: enum u64 {
 	Start,
 	Fault,
@@ -21,17 +22,9 @@ SchedulerEnterReason :: enum u64 {
 }
 
 
-GrantSaveAreaError :: enum u64 {
-	None,
-	Misaligned,
-	NoPermission,
-}
 
 Syscall :: enum u64 {
 	MMap = ILLU_SYSCALL_BIT,
-	MFree,
-	MediatedCreate,
-	MediatedAccess,
 	ProtDomainCreate,
 	ProtDomainEdit,
 	ProtDomainDestroy,
@@ -45,15 +38,9 @@ MMapError :: enum u64 {
 	InvalidPageSize,
 	OutOfMemory,
 	InvalidSize,
-	TrackingFailed,
+	AddressInUse,
 }
 
-MFreeError :: enum u64 {
-	None,
-	InvalidAddress,
-	InvalidSize,
-	OutOfMemory,
-}
 
 
 ProtDomainCreateError :: enum u64 {
@@ -99,50 +86,6 @@ ProtDomainDestroyError :: enum u64 {
 	None,
 	InvalidHandle,
 }
-MediatedFlag :: enum u64 {
-	MediateRead,
-	MediateWrite,
-}
-
-MediatedFlags :: bit_set[MediatedFlag;u64]
-MEDIATED_FLAGS_ALL :: MediatedFlags{.MediateRead, .MediateWrite}
-
-MediatedRule :: struct #packed {
-	phys, size: u64,
-	flags:      MediatedFlags,
-}
-#assert(size_of(MediatedRule) == 24)
-
-MediatedOpKind :: enum u64 {
-	Read,
-	Write,
-}
-
-
-MediatedOp :: struct #packed {
-	phys, buf, size: u64,
-	kind:            MediatedOpKind,
-}
-#assert(size_of(MediatedOp) == 32)
-
-
-MEDIATED_MAX_RULES :: 256
-MEDIATED_MAX_OPS :: 256
-MEDIATED_MAX_BYTES :: u64(64 * 1024)
-
-
-MediatedError :: enum u64 {
-	None,
-	KernelErr,
-	InvalidCount,
-	InvalidRule,
-	InvalidOp,
-	NotOwned,
-	Shared,
-	AlreadyMediated,
-	OutOfMemory,
-}
-
 KERNEL_BUILD :: #config(KERNEL_BUILD, false)
 
 when !ODIN_TEST {
@@ -150,9 +93,6 @@ when !ODIN_TEST {
 		@(default_calling_convention = "sysv")
 		foreign _ {
 			syscall_mmap :: proc(regionsPtr: u64, regionCount: u64) -> (err: u64, addr: u64) ---
-			syscall_mfree :: proc(addrsPtr: u64, count: u64) -> (err: u64) ---
-			syscall_mediated_create :: proc(rulesPtr, count: u64) -> (err: u64) ---
-			syscall_mediated_access :: proc(opsPtr, count: u64) -> (err: u64, failedIndex: u64) ---
 			syscall_prot_domain_create :: proc(authorityPtr, regionsPtr, count: u64) -> (err: u64, handle: int) ---
 			syscall_prot_domain_edit :: proc(handle: int, regionsPtr, count, op: u64) -> (err: u64) ---
 			syscall_prot_domain_destroy :: proc(handle: int) -> (err: u64) ---
@@ -208,29 +148,10 @@ when !ODIN_TEST {
 			return MMapError(rawErr), rawptr(uintptr(rawAddr))
 		}
 
-		syscall_mfree_userspace :: proc "contextless" (addrs: []u64) -> (err: MFreeError) {
-			if len(addrs) == 0 do return .InvalidAddress
-			return MFreeError(syscall_mfree(u64(uintptr(raw_data(addrs))), u64(len(addrs))))
+		mem_free_userspace :: proc "contextless" (phys: u64) -> ProtDomainEditError {
+			regions := [1]MemRegion{{phys = phys}}
+			return syscall_prot_domain_edit_userspace(max(int), regions[:], .Delete)
 		}
-
-		syscall_mediated_create_userspace :: proc "contextless" (
-			rules: []MediatedRule,
-		) -> MediatedError {
-			return MediatedError(
-				syscall_mediated_create(u64(uintptr(raw_data(rules))), u64(len(rules))),
-			)
-		}
-
-		syscall_mediated_access_userspace :: proc "contextless" (
-			ops: []MediatedOp,
-		) -> (
-			err: MediatedError,
-			failedIndex: int,
-		) {
-			rawErr, rawIndex := syscall_mediated_access(u64(uintptr(raw_data(ops))), u64(len(ops)))
-			return MediatedError(rawErr), int(rawIndex)
-		}
-
 
 		syscall_prot_domain_create_userspace :: proc "contextless" (
 			authorityPtr: rawptr,
@@ -277,19 +198,10 @@ when !ODIN_TEST {
 
 descriptor_offset :: proc(regions: []MMapRegion, index: int) -> u64 {
 	offset: u64 = 0
-	for i in 0 ..< index {
-		offset += regions[i].count * mmap_page_size_bytes(regions[i].pageSize)
+	for r, i in regions[:index + 1] {
+		pageBytes := lmem.page_bytes(r.pageSize)
+		offset = (offset + pageBytes - 1) & ~(pageBytes - 1)
+		if i < index do offset += r.count * pageBytes
 	}
 	return offset
-}
-mmap_page_size_bytes :: proc "contextless" (size: lmem.PageSize) -> u64 {
-	switch size {
-	case ._4KB:
-		return 4 * mem.Kilobyte
-	case ._2MB:
-		return 2 * mem.Megabyte
-	case ._1GB:
-		return mem.Gigabyte
-	}
-	return 0
 }

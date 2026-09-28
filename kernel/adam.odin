@@ -10,160 +10,99 @@ import "pmm"
 import "print"
 
 ADAM_STACK_SIZE :: 16 * mem.Kilobyte
-CONFIG_FLAGS :: lmem.PageFlags{.Present, .User, .Write, .PWT, .PCD, .NX}
+MMIO_FLAGS :: lmem.PageFlags{.Present, .User, .Write, .PWT, .PCD, .NX}
+USER_DATA_FLAGS :: lmem.PageFlags{.Present, .User, .Write, .NX}
 
 
-adam_init :: proc(adamImg: elf.ElfImage, pcies: [dynamic]pci.Device) {
-	assert((adamImg.end - adamImg.base) > 0)
-
-	print.serial_write("adam: startineg init \n")
-
+adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
+	assert(adamImg.end > adamImg.base)
+	print.serial_writeln("adam: starting init")
 
 	writablePtrByAdam: ^byte = nil
 	for seg in adamImg.segments {
-		if .W in seg.perms {
-			writablePtrByAdam = (^byte)(uintptr(seg.base))
-		}
+		if .W in seg.perms do writablePtrByAdam = (^byte)(uintptr(seg.base))
 	}
-	print.kensure(
-		writablePtrByAdam != nil,
-		"adam_init: cannot find 1 single writable byte by adam",
-	)
+	print.kensure(writablePtrByAdam != nil, "adam_init: cannot find 1 single writable byte by adam")
 
-	pd, _, dErr := protdomain_new(writablePtrByAdam)
+	pd, dErr := protdomain_new(writablePtrByAdam)
 	print.kensure(dErr == nil, "adam_init: ProtectionDomain alloc failed")
-
+	pcies := pmm.phys_to_slice(pciesPhys)
 
 	for seg in adamImg.segments {
 		flags := lmem.PageFlags{.Present, .User, .NX}
 		if .X in seg.perms do flags -= {.NX}
 		if .W in seg.perms do flags += {.Write}
-
-		phys := pmm.addr_round_down_to_page(seg.base)
-		end := pmm.addr_round_up_to_page(seg.end)
-		for phys < end {
-			pmm.map_page(pd.pml4, phys, phys, ._4KB, flags)
-			resource := resource_init(phys, shared.PAGE_SIZE, ._4KB, flags, {}, .AllocatedRAM)
-			_, inserted := resource_insert(&pd.resources, resource)
-			print.kensure(inserted, "adam_init: failed to track ELF page")
-			phys += shared.PAGE_SIZE
-		}
+		adam_track_pages(pd, pmm.addr_round_down_to_page(seg.base), pmm.addr_round_up_to_page(seg.end), flags, {}, .AllocatedRAM)
 	}
 
 	for device in pcies {
 		configPage := pmm.addr_round_down_to_page(device.configBase)
-		pmm.map_page(pd.pml4, configPage, configPage, ._4KB, CONFIG_FLAGS)
-		resource := resource_init(
-			configPage,
-			shared.PAGE_SIZE,
-			._4KB,
-			CONFIG_FLAGS,
-			{.Volatile, .InterruptSource},
-			.DeviceMMIO,
-		)
-		_, inserted := resource_insert(&pd.resources, resource)
-		print.kensure(inserted, "adam_init: failed to track PCI config page")
+		adam_track_pages(pd, configPage, configPage + shared.PAGE_SIZE, MMIO_FLAGS, {.Volatile, .InterruptSource}, .DeviceMMIO)
 	}
 
-
-	devicesPtr := raw_data(pcies)
-	devicesBytes := u64(len(pcies)) * u64(size_of(pci.Device))
-
-	start := pmm.addr_round_down_to_page(u64(uintptr(devicesPtr)))
-	end := pmm.addr_round_up_to_page(u64(uintptr(devicesPtr)) + devicesBytes)
-
-
-	for addr := start; addr < end; addr += shared.PAGE_SIZE {
-		pmm.map_page(pd.pml4, addr, addr, ._4KB, {.Present, .User, .Write, .NX})
-		resource := resource_init(
-			addr,
-			shared.PAGE_SIZE,
-			._4KB,
-			{.Present, .User, .Write, .NX},
-			{},
-			.ExternalPhysical,
-		)
-		_, inserted := resource_insert(&pd.resources, resource)
-		print.kensure(inserted, "adam_init: failed to track PCI device-list page")
-	}
-
+	devicesStart := u64(uintptr(raw_data(pciesPhys)))
+	devicesEnd := devicesStart + u64(len(pcies)) * size_of(pci.Device)
+	adam_track_pages(pd, pmm.addr_round_down_to_page(devicesStart), pmm.addr_round_up_to_page(devicesEnd), USER_DATA_FLAGS, {}, .ExternalPhysical)
 
 	stackPhys := pmm.alloc_zeroed(ADAM_STACK_SIZE + shared.PAGE_SIZE)
 	print.kensure(stackPhys != 0, "adam_init: stack alloc failed")
-
-
-	pmm.map_page(pd.pml4, stackPhys, stackPhys, ._4KB, {})
-	{
-		resource := resource_init(stackPhys, shared.PAGE_SIZE, ._4KB, {}, {}, .AllocatedRAM)
-		_, inserted := resource_insert(&pd.resources, resource)
-		print.kensure(inserted, "adam_init: failed to track stack guard page")
-	}
-
 	usableStart := stackPhys + shared.PAGE_SIZE
+	adam_track_pages(pd, stackPhys, usableStart, {}, {}, .AllocatedRAM)
+	adam_track_pages(pd, usableStart, usableStart + ADAM_STACK_SIZE, USER_DATA_FLAGS, {}, .AllocatedRAM)
 	stackTop := usableStart + ADAM_STACK_SIZE - 8
 	assert(stackTop % 16 == 8)
-	for p := usableStart; p < stackTop; p += shared.PAGE_SIZE {
-		pmm.map_page(pd.pml4, p, p, ._4KB, {.Present, .User, .Write, .NX})
-		resource := resource_init(
-			p,
-			shared.PAGE_SIZE,
-			._4KB,
-			{.Present, .User, .Write, .NX},
-			{},
-			.AllocatedRAM,
-		)
-		_, inserted := resource_insert(&pd.resources, resource)
-		print.kensure(inserted, "adam_init: failed to track stack page")
-	}
 
 	for pcieDevice in pcies {
 		for bar in pcieDevice.bars {
-			if !bar.isMemory || bar.addr == 0 || bar.size == 0 do continue
+			if !bar.isMemory || bar.size == 0 do continue
+			assert(bar.addr != 0)
 			barStart := pmm.addr_round_down_to_page(bar.addr)
 			barEnd := pmm.addr_round_up_to_page(bar.addr + bar.size)
-			barFlags := lmem.PageFlags{.Present, .User, .Write, .PWT, .PCD, .NX}
-			for page := barStart; page < barEnd; page += shared.PAGE_SIZE {
-				pmm.map_page(pd.pml4, page, page, ._4KB, barFlags)
+			pageSize := lmem.PageSize._4KB
+			for size in ([]lmem.PageSize{._1GB, ._2MB}) {
+				bytes := lmem.page_bytes(size)
+				if page_size_usable(size) && barStart % bytes == 0 && (barEnd - barStart) % bytes == 0 {
+					pageSize = size
+					break
+				}
 			}
-			resource := resource_init(
-				barStart,
-				barEnd - barStart,
-				._4KB,
-				barFlags,
-				{.Volatile},
-				.DeviceMMIO,
-			)
+			resource := resource_init(barStart, barEnd - barStart, pageSize, MMIO_FLAGS, {.Volatile}, .DeviceMMIO)
 			_, inserted := resource_insert(&pd.resources, resource)
 			print.kensure(inserted, "adam_init: failed to track PCI BAR resource")
+			resource_map(pd.pml4, resource)
 		}
 	}
 
 	#assert(size_of(userschedule.UserSaveArea) <= shared.PAGE_SIZE)
 	saveAreaPhys := pmm.alloc_zeroed(shared.PAGE_SIZE)
 	print.kensure(saveAreaPhys != 0, "adam_init: save area alloc failed")
-	saveAreaFlags := lmem.PageFlags{.Present, .User, .Write, .NX}
-	pmm.map_page(pd.pml4, saveAreaPhys, saveAreaPhys, ._4KB, saveAreaFlags)
-	{
-		resource := resource_init(
-			saveAreaPhys,
-			shared.PAGE_SIZE,
-			._4KB,
-			saveAreaFlags,
-			{},
-			.AllocatedRAM,
-		)
-		_, inserted := resource_insert(&pd.resources, resource)
-		print.kensure(inserted, "adam_init: failed to track save area page")
-	}
+	adam_track_pages(pd, saveAreaPhys, saveAreaPhys + shared.PAGE_SIZE, USER_DATA_FLAGS, {}, .AllocatedRAM)
 
-	area := (^userschedule.UserSaveArea)(uintptr(saveAreaPhys))
+	area := (^userschedule.UserSaveArea)(pmm.phys_to_ptr(saveAreaPhys))
 	userschedule.save_area_init(area, adamImg.entry, stackTop)
 	area.rdi = u64(syscalls.SchedulerEnterReason.Start)
-	area.rsi = u64(uintptr(raw_data(pcies)))
-	area.rdx = u64(len(pcies))
+	area.rsi = u64(uintptr(raw_data(pciesPhys)))
+	area.rdx = u64(len(pciesPhys))
 	area.rcx = saveAreaPhys
 
-	grantErr := grant_spawn(pd, &cpus[0], area, adamImg.entry, userschedule.SCHED_WEIGHT_TOTAL)
+	userArea := (^userschedule.UserSaveArea)(uintptr(saveAreaPhys))
+	grantErr := grant_spawn(pd, &cpus[0], userArea, adamImg.entry, userschedule.SCHED_WEIGHT_TOTAL)
 	print.kensure(grantErr == .None, "adam_init: failed to spawn initial grant")
 
+}
+
+adam_track_pages :: proc(
+	pd: ^ProtectionDomain,
+	start, end: u64,
+	flags: lmem.PageFlags,
+	resourceFlags: MemoryResourceFlags,
+	backend: MemorySlotBackend,
+) {
+	assert(start % shared.PAGE_SIZE == 0 && end % shared.PAGE_SIZE == 0 && start <= end)
+	for page := start; page < end; page += shared.PAGE_SIZE {
+		pmm.map_page(pd.pml4, page, page, ._4KB, flags)
+		resource := resource_init(page, shared.PAGE_SIZE, ._4KB, flags, resourceFlags, backend)
+		_, inserted := resource_insert(&pd.resources, resource)
+		print.kensure(inserted, "adam_init: page tracked twice")
+	}
 }

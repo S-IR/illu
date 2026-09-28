@@ -3,7 +3,6 @@ import "../shared"
 import "../spinlock"
 import "base:intrinsics"
 import "base:runtime"
-import "core:mem"
 
 HEAP_MAGIC :: u64(0x484541505F424C4B)
 HEAP_FREE_MAGIC :: u64(0x465245455F424C4B)
@@ -73,12 +72,7 @@ insert_free_block :: proc(block: ^HeapBlock) {
 }
 new_heap_page :: proc() -> ^HeapBlock {
 	addr := backend_alloc_pages(1)
-	assert(addr != 0)
-	assert(addr != max(u64))
-
-	if addr == 0 || addr == max(u64) {
-		return nil
-	}
+	if addr == 0 do return nil
 
 	block := (^HeapBlock)(uintptr(addr))
 	assert(uintptr(addr) % uintptr(shared.PAGE_SIZE) == 0, "heap: unaligned heap page")
@@ -237,9 +231,7 @@ large_alloc :: proc(size: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error
 
 	addr := backend_alloc_pages(pages)
 
-	if addr == 0 || addr == max(u64) {
-		return nil, .Out_Of_Memory
-	}
+	if addr == 0 do return nil, .Out_Of_Memory
 
 	p := rawptr(uintptr(addr))
 

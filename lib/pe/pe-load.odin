@@ -23,7 +23,7 @@ pe_load_into_memory :: proc(
 	mmapRegions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = imagePages, flags = {.Write}}}
 	mmapErr, base := syscalls.syscall_mmap_userspace(mmapRegions[:])
 	if mmapErr != .None || base == nil do return 0, false
-	defer if !ok do syscalls.syscall_mfree_userspace([]u64{actualBase})
+	defer if !ok do syscalls.mem_free_userspace(actualBase)
 
 	actualBase = u64(uintptr(base))
 	delta := actualBase - image.imageBase
@@ -103,7 +103,7 @@ pe_run :: proc(
 	resumeEntry := ntdll.base + u64(resumeRva)
 
 	parentCopies := make([dynamic]u64, context.temp_allocator)
-	defer if len(parentCopies) > 0 do syscalls.syscall_mfree_userspace(parentCopies[:])
+	defer for copyBase in parentCopies do syscalls.mem_free_userspace(copyBase)
 
 	mmapRegions := [4]syscalls.MMapRegion {
 		{pageSize = ._4KB, count = 1, flags = {}},

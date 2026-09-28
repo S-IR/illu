@@ -5,6 +5,7 @@ import "../../lib/spinlock"
 import "../../uefi"
 import "../print"
 import "core:mem"
+import "core:slice"
 PMM :: struct #all_or_none {
 	bitmap:     []u64,
 	totalPages: u64,
@@ -17,15 +18,17 @@ when ODIN_TEST {
 	state: PMM
 
 }
-// buddyInitialized: bool
-trampolinePhys: u64 = 0x8000
+TRAMPOLINE_PHYS :: u64(0x8000)
 
 men_init :: proc(
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize: u64,
 	memoryMapDescSize: u64,
 	kernelImg: elf.ElfImage,
-	adamImg: ^elf.ElfImage,
+	adamImg: elf.ElfImage,
+	reserved: [][]byte,
+	globalKernel: bool,
+	has1GBPages: bool,
 ) {
 
 	assert(memoryMapDescSize != 0, "mem_init: zero descriptor size")
@@ -33,35 +36,29 @@ men_init :: proc(
 
 	entryCount := memoryMapSize / memoryMapDescSize
 
-
-	is_good_ram :: #force_inline proc(t: uefi.EFI_MEMORY_TYPE) -> bool {
-		return(
-			t != .ReservedMemoryType &&
-			t != .MemoryMappedIO &&
-			t != .MemoryMappedIOPortSpace &&
-			t != .UnusableMemory \
-		)
-	}
 	totalPages: u64 = 0
-	topPhys: u64 = 0
 	haveConventional := false
+	trampolineUsable := false
 	for i in 0 ..< entryCount {
 		desc := mmap_desc(memoryMap, memoryMapDescSize, i)
 		end := desc.PhysicalStart + desc.NumberOfPages * shared.PAGE_SIZE
-		if end > topPhys do topPhys = end
 		if desc.Type == .ConventionalMemory do haveConventional = true
+		if TRAMPOLINE_PHYS >= desc.PhysicalStart && TRAMPOLINE_PHYS < end {
+			#partial switch desc.Type {
+			case .ConventionalMemory, .BootServicesCode, .BootServicesData, .LoaderCode, .LoaderData:
+				trampolineUsable = true
+			}
+		}
 		if !is_good_ram(desc.Type) do continue
 		if end / shared.PAGE_SIZE > totalPages do totalPages = end / shared.PAGE_SIZE
 	}
 	print.kensure(haveConventional && totalPages != 0, "no conventional memory found")
+	print.kensure(trampolineUsable, "pmm: trampoline page is not free ram")
 
 	bitmapAddr: u64 = 0
 	bitmapDesc: ^uefi.EFI_MEMORY_DESCRIPTOR
-	bitmap_pages_needed :: proc(total: u64) -> u64 {return(
-			(total / 8 + shared.PAGE_SIZE - 1) /
-			shared.PAGE_SIZE \
-		)}
-	bitmapPagesNeeded := bitmap_pages_needed(totalPages)
+	bitmapWords := (totalPages + 63) / 64
+	bitmapPagesNeeded := pages_needed(bitmapWords * size_of(u64))
 
 	for i in u64(0) ..< entryCount {
 		desc := mmap_desc(memoryMap, memoryMapDescSize, i)
@@ -78,18 +75,9 @@ men_init :: proc(
 	print.kensure(bitmapDesc != nil, "no region large enough for pmm bitmap")
 	assert(bitmapAddr % shared.PAGE_SIZE == 0, "pmm bitmap not page-aligned")
 
-	bitmapWords := (totalPages + 63) / 64
 	state.bitmap = mem.slice_ptr(cast(^u64)uintptr(bitmapAddr), int(bitmapWords))
 	state.totalPages = totalPages
-
-	memset_u64 :: proc "c" (dest: rawptr, c: u8, n: u64) -> rawptr {
-		d := ([^]u8)(dest)
-		for i in 0 ..< n do d[i] = c
-		return dest
-	}
-
-	memset_u64(raw_data(state.bitmap), 0xFF, (totalPages + 7) / 8)
-
+	slice.fill(state.bitmap, max(u64))
 
 	bitmapPageStart := bitmapAddr / shared.PAGE_SIZE
 	for pg in bitmapPageStart + bitmapPagesNeeded ..< bitmapPageStart + bitmapDesc.NumberOfPages {
@@ -103,36 +91,17 @@ men_init :: proc(
 		if !isConventional && !isReclaimable do continue
 		if isConventional && desc.PhysicalStart == bitmapAddr do continue
 
-		pageStart := max(desc.PhysicalStart / shared.PAGE_SIZE, u64(1))
-		for pg in pageStart ..< pageStart + desc.NumberOfPages {
+		pageStart := desc.PhysicalStart / shared.PAGE_SIZE
+		for pg in max(pageStart, 1) ..< pageStart + desc.NumberOfPages {
 			kclear(&state, pg)
 		}
 	}
 
 
-	for seg in kernelImg.segments {
-		segmentStart := seg.base / shared.PAGE_SIZE
-		segmentEnd := pages_needed(seg.end)
-		for pg in segmentStart ..< segmentEnd {
-			kset(&state, pg)
-		}
+	for img in ([]elf.ElfImage{kernelImg, adamImg}) {
+		for pg in img.base / shared.PAGE_SIZE ..< pages_needed(img.end) do kset(&state, pg)
 	}
-	kernelStart := kernelImg.base / shared.PAGE_SIZE
-	kernelEnd := pages_needed(kernelImg.end)
-	for pg in kernelStart ..< kernelEnd do kset(&state, pg)
-
-	adamStart := adamImg.base / shared.PAGE_SIZE
-	adamEnd := pages_needed(adamImg.end)
-	for pg in adamStart ..< adamEnd {
-		kset(&state, pg)
-	}
-
-	TRAMPOLINE_LOW_LIMIT: u64 : shared.PAGE_SIZE
-	TRAMPOLINE_HIGH_LIMIT: u64 : mem.Megabyte
-
-	kset(&state, trampolinePhys / shared.PAGE_SIZE)
-	print.kensure(trampolinePhys != 0, "pmm: no free page below 1mb for trampoline")
-
+	kset(&state, TRAMPOLINE_PHYS / shared.PAGE_SIZE)
 
 	mmapBase := u64(uintptr(rawptr(memoryMap)))
 	mmapStart := mmapBase / shared.PAGE_SIZE
@@ -141,44 +110,23 @@ men_init :: proc(
 		kset(&state, pg)
 	}
 
+	for r in reserved {
+		base := u64(uintptr(raw_data(r)))
+		for pg in base / shared.PAGE_SIZE ..< pages_needed(base + u64(len(r))) {
+			kset(&state, pg)
+		}
+	}
+
 	buddyMetaStart := u64(uintptr(&freeLists[0])) / shared.PAGE_SIZE
 	buddyMetaEnd := pages_needed(u64(uintptr(&freeLists[0])) + size_of(freeLists))
 	for pg in buddyMetaStart ..< buddyMetaEnd {
 		kset(&state, pg)
 	}
-	paging_init(kernelImg, memoryMap, memoryMapSize, memoryMapDescSize)
+	paging_init(kernelImg, memoryMap, memoryMapSize, memoryMapDescSize, globalKernel, has1GBPages)
 	buddy_init()
 
 
 	buddy_release_range(mmapStart, mmapEnd)
-
-	oldAdamBase := adamImg.base
-	oldAdamEnd := adamImg.end
-	adamSize := oldAdamEnd - oldAdamBase
-	newAdamBase := palloc_zeroed(pages_needed(adamSize) * shared.PAGE_SIZE)
-	print.kensure(newAdamBase != 0, "pmm: failed adam reallocation")
-	mem.copy(rawptr(uintptr(newAdamBase)), rawptr(uintptr(adamImg.base)), int(adamSize))
-
-	delta := newAdamBase - adamImg.base
-	for seg in adamImg.segments {
-		if .W not_in seg.perms do continue
-		newSegBase := seg.base + delta
-		for addr := newSegBase; addr + 8 <= seg.end + delta; addr += 8 {
-			value := (^u64)(uintptr(addr))^
-			if value >= oldAdamBase && value < oldAdamEnd {
-				(^u64)(uintptr(addr))^ = value + delta
-			}
-		}
-	}
-	adamImg.entry += delta
-	adamImg.base = newAdamBase
-	adamImg.end = newAdamBase + adamSize
-
-	for &seg in adamImg.segments {
-		seg.base += delta
-		seg.end += delta
-	}
-	buddy_release_range(adamStart, adamEnd)
 
 	print.serial_writeln("pmm: loaded")
 
@@ -197,22 +145,8 @@ is_used :: #force_inline proc "contextless" (p: ^PMM, i: u64) -> bool {
 	return p.bitmap[i / 64] >> (i % 64) & 1 != 0
 }
 
-when ODIN_TEST {
-	@(thread_local)
-	buddyMapBase: u64
-	page_to_rawptr :: #force_inline proc "contextless" (page: u64) -> rawptr {
-		return rawptr(uintptr(buddyMapBase + page * shared.PAGE_SIZE))
-	}
-	rawptr_to_page :: #force_inline proc "contextless" (ptr: rawptr) -> u64 {
-		return (u64(uintptr(ptr)) - buddyMapBase) / shared.PAGE_SIZE
-	}
-} else {
-	page_to_rawptr :: #force_inline proc "contextless" (page: u64) -> rawptr {
-		return rawptr(uintptr(page * shared.PAGE_SIZE))
-	}
-	rawptr_to_page :: #force_inline proc "contextless" (ptr: rawptr) -> u64 {
-		return u64(uintptr(ptr)) / shared.PAGE_SIZE
-	}
+page_to_rawptr :: #force_inline proc "contextless" (page: u64) -> rawptr {
+	return phys_to_ptr(page * shared.PAGE_SIZE)
 }
 pages_needed :: proc "contextless" (bytes: u64) -> u64 {
 	return (bytes + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
@@ -244,9 +178,9 @@ palloc :: proc "contextless" (sizeInBytes: u64) -> u64 {
 @(private)
 palloc_zeroed :: proc "contextless" (bytes: u64) -> u64 {
 	addr := palloc(bytes)
-	if addr == 0 || addr == max(u64) do return max(u64)
+	if addr == 0 do return 0
 	print.kassert(addr % shared.PAGE_SIZE == 0, "palloc_zeroed: unaligned allocation")
-	mem.zero(rawptr(uintptr(addr)), int(bytes))
+	mem.zero(phys_to_ptr(addr), int(bytes))
 	return addr
 }
 
@@ -275,6 +209,15 @@ alloc_zeroed :: proc "contextless" (bytes: u64) -> u64 {
 	print.kassert(bytes != 0, "alloc_zeroed: zero-size allocation")
 	return palloc_zeroed(bytes)
 }
+is_good_ram :: #force_inline proc "contextless" (t: uefi.EFI_MEMORY_TYPE) -> bool {
+	return(
+		t != .ReservedMemoryType &&
+		t != .MemoryMappedIO &&
+		t != .MemoryMappedIOPortSpace &&
+		t != .UnusableMemory \
+	)
+}
+
 mmap_desc :: #force_inline proc(
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapDescSize: u64,
@@ -283,13 +226,4 @@ mmap_desc :: #force_inline proc(
 	return (^uefi.EFI_MEMORY_DESCRIPTOR)(
 		uintptr(rawptr(memoryMap)) + uintptr(i * memoryMapDescSize),
 	)
-}
-early_alloc_page :: proc() -> u64 {
-	for i in u64(0) ..< state.totalPages {
-		if !is_used(&state, i) {
-			kset(&state, i)
-			return i * shared.PAGE_SIZE
-		}
-	}
-	return 0 // no free page left
 }

@@ -3,6 +3,8 @@
 .equ CPU_SELF,0
 .equ CPU_KERNELSTACKTOP,8
 .equ CPU_USERSYSCALLRSP,16
+.equ CPU_USERCR3,24
+.equ CPU_SYSCALLSCRATCH,32
 
 .equ FRAME_FX_SIZE,512
 .equ FRAME_RIP,648
@@ -69,6 +71,7 @@ trampoline_start:
     mov %ax, %ds
     lgdtl (0x8000 + gdt_desc - trampoline_start)
     mov %cr0, %eax
+    and $0x9FFFFFFF, %eax  // clear CD | NW left set by INIT
     or $1, %eax
     mov %eax, %cr0
     ljmpl $0x08, $(0x8000 + protected - trampoline_start)
@@ -88,7 +91,7 @@ protected:
     or $0x900, %eax        // LME | NXE
     wrmsr
     mov %cr0, %eax
-    or $0x80000000, %eax
+    or $0x80010020, %eax   // PG | WP | NE
     mov %eax, %cr0
 ljmpl $0x18, $(0x8000 + long_mode - trampoline_start)
 .code64
@@ -306,6 +309,9 @@ interrupt_dispatch:
     testb $3, FRAME_CS(%rsp)
     jz 1f
     swapgs
+    testb $1, kernel_cpu_has_smap(%rip)
+    jz 1f
+    clac
 1:
     fxsave (%rsp)
     mov %rsp, %rdi
@@ -314,7 +320,7 @@ interrupt_dispatch:
 
     testb $3, FRAME_CS(%rsp)
     jz 2f
-    testb $1, kernel_cpu_has_md_clear(%rip)
+    testb $1, kernel_cpu_needs_verw(%rip)
     jz 4f
     call verw_mitigate_asm
 4:
@@ -353,6 +359,16 @@ load_tss_asm:
 .global lidt_asm
 lidt_asm:
     lidt (%rdi)
+    ret
+
+.global read_cr0
+read_cr0:
+    mov %cr0, %rax
+    ret
+
+.global write_cr0
+write_cr0:
+    mov %rdi, %cr0
     ret
 
 .global read_cr2
@@ -639,11 +655,6 @@ outb:
     outb   %al, %dx
     ret
 
-.global cpu_pause
-cpu_pause:
-    pause
-    ret
-
 
 
 .global read_rbp
@@ -664,6 +675,30 @@ gs_write_base:
 gs_read_cpustate:
     movq %gs:CPU_SELF, %rax
     ret
+
+.macro SYSRET_SCRUB
+    xor %edi, %edi
+    xor %esi, %esi
+    xor %r8d, %r8d
+    xor %r9d, %r9d
+    xor %r10d, %r10d
+    pxor %xmm0, %xmm0
+    pxor %xmm1, %xmm1
+    pxor %xmm2, %xmm2
+    pxor %xmm3, %xmm3
+    pxor %xmm4, %xmm4
+    pxor %xmm5, %xmm5
+    pxor %xmm6, %xmm6
+    pxor %xmm7, %xmm7
+    pxor %xmm8, %xmm8
+    pxor %xmm9, %xmm9
+    pxor %xmm10, %xmm10
+    pxor %xmm11, %xmm11
+    pxor %xmm12, %xmm12
+    pxor %xmm13, %xmm13
+    pxor %xmm14, %xmm14
+    pxor %xmm15, %xmm15
+.endm
 
 .global syscall_entry
 syscall_entry:
@@ -687,7 +722,7 @@ syscall_entry:
     call syscall_dispatch
     add $16, %rsp
 
-    testb $1, kernel_cpu_has_md_clear(%rip)
+    testb $1, kernel_cpu_needs_verw(%rip)
     jz 1f
     call verw_mitigate_asm
 1:
@@ -696,6 +731,7 @@ syscall_entry:
     mov %rcx, %r10
     sar $47, %r10
     jnz syscall_noncanonical_trampoline
+    SYSRET_SCRUB
     mov %gs:CPU_USERSYSCALLRSP, %rsp
     swapgs
     sysretq
@@ -707,22 +743,17 @@ syscall_noncanonical_trampoline:
 .global syscall_entry_meltdown_safe
 syscall_entry_meltdown_safe:
     swapgs
-    push %rbx
+    mov %rbx, %gs:CPU_SYSCALLSCRATCH
     mov %cr3, %rbx
-    push %rbx
-    mov kernelPML4(%rip), %rbx
+    mov %rbx, %gs:CPU_USERCR3
+    mov kernel_cr3_value(%rip), %rbx
     mov %rbx, %cr3
-
-    mov %rsp, %rbx
-    add $16, %rsp
-
+    mov %gs:CPU_SYSCALLSCRATCH, %rbx
     mov %rsp, %gs:CPU_USERSYSCALLRSP
     mov %gs:CPU_KERNELSTACKTOP, %rsp
 
     push %rcx
     push %r11
-    push 0(%rbx)
-    push 8(%rbx)
     sub $8, %rsp
     push %r9
 
@@ -735,19 +766,20 @@ syscall_entry_meltdown_safe:
     call syscall_dispatch
     add $16, %rsp
 
-    testb $1, kernel_cpu_has_md_clear(%rip)
+    testb $1, kernel_cpu_needs_verw(%rip)
     jz 1f
     call verw_mitigate_asm
 1:
-    pop %rbx
-    pop %r10
     pop %r11
     pop %rcx
-    mov %rcx, %r9
-    sar $47, %r9
+    mov %rcx, %r10
+    sar $47, %r10
     jnz syscall_noncanonical_trampoline
+    mov %gs:CPU_USERCR3, %r10
+    or cr3_noflush_bit(%rip), %r10
     mov %gs:CPU_USERSYSCALLRSP, %rsp
     mov %r10, %cr3
+    SYSRET_SCRUB
     swapgs
     sysretq
 
@@ -790,7 +822,7 @@ run_resume:
     xor %eax, %eax
     xor %edx, %edx
     wrmsr
-    testb $1, kernel_cpu_has_md_clear(%rip)
+    testb $1, kernel_cpu_needs_verw(%rip)
     jz 1f
     call verw_mitigate_asm
 1:
@@ -816,9 +848,6 @@ run_resume:
     xor %r15d, %r15d
     swapgs
     iretq
-
-.global user_access_begin
-user_access_begin:
 
 .global user_save_area_store
 user_save_area_store:
@@ -849,57 +878,6 @@ user_save_area_store:
 1:
     ret
 
-.global user_access_end
-user_access_end:
-
-.global mmio_read_u8
-mmio_read_u8:
-    movzbl (%rdi), %eax
-    ret
-
-.global mmio_read_u16
-mmio_read_u16:
-    movzwl (%rdi), %eax
-    ret
-
-.global mmio_read_u32
-mmio_read_u32:
-    movl (%rdi), %eax
-    ret
-
-.global mmio_write_u8
-mmio_write_u8:
-    movb %sil, (%rdi)
-    ret
-
-.global mmio_write_u16
-mmio_write_u16:
-    movw %si, (%rdi)
-    ret
-
-.global mmio_write_u32
-mmio_write_u32:
-    movl %esi, (%rdi)
-    ret
-
-.global lock_asm
-.type lock_asm, @function
-lock_asm:
-.Lspinlock:
-    movl $1, %eax
-    xchgl %eax, (%rdi)
-    testl %eax, %eax
-    jz .Lspinlock_acquired
-    pause
-    jmp .Lspinlock
-.Lspinlock_acquired:
-    ret
-
-.global unlock_asm
-.type unlock_asm, @function
-unlock_asm:
-    movl $0, (%rdi)
-    ret
 
 .global run_abort
 run_abort:

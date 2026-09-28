@@ -40,8 +40,6 @@ GDTEntryNames :: enum u8 {
 #assert((u16(GDTEntryNames.UserData) << 3 | 3) == 0x23)
 #assert((u16(GDTEntryNames.UserCOde64) << 3 | 3) == 0x2B)
 
-@(private)
-gdtEntries: [GDTEntryNames]u64
 
 TSS :: struct #packed {
 	_:         u32,
@@ -58,11 +56,8 @@ GDT :: struct {
 	desc:    ah.X86TableDescriptor,
 }
 
-@(link_name = "_kernel_stack_top")
-_kernel_stack_top: u8
 
 gdt_tss_fill :: proc "contextless" (g: ^GDT) {
-	// everything in gdt_tss_init EXCEPT the three asm calls at the end
 	make_flat_descriptor :: proc "contextless" (access: GdtAccess, flags: GdtFlags) -> u64 {
 		e: GdtEntry
 		e.limitLow = 0xFFFF

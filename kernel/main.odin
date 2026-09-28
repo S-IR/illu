@@ -8,21 +8,14 @@ import "core:mem"
 import "pmm"
 import "print"
 
-QEMU_TEST :: true
-KERNEL_STACK_SIZE :: 64 * mem.Kilobyte
-
-IA32_FS_BASE :: 0xC0000100
-BOOT_TLS_SIZE :: 4096
-
-tempArena: mem.Arena
-gBootTls: [BOOT_TLS_SIZE]u8
-
 gdtBeforeSched: GDT
-gBootTlsEnd: u64
+
 @(export)
-kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
+kernel_main :: proc "sysv" (bootParams: ^uefi.KernelParams) {
 	context = runtime.default_context()
 	context.assertion_failure_proc = print.kassert_failure_handler
+	context.random_generator = {}
+	params := bootParams^
 
 	print.serial_init_asm()
 	print.serial_writeln("illu kernel alive!")
@@ -41,22 +34,17 @@ kernel_main :: proc "sysv" (params: ^uefi.KernelParams) {
 		memoryMapSize = params.memoryMapSize,
 		memoryMapDescSize = params.memoryMapDescSize,
 		kernelImg = params.kernelImg,
-		adamImg = &params.adamImg,
+		adamImg = params.adamImg,
+		reserved = {mem.slice_to_bytes(params.apicIds), mem.slice_to_bytes(params.pciDevices)},
+		globalKernel = !cpuMeltdownVulnerable,
+		has1GBPages = cpuid_has_1gb_pages(),
 	)
 
 	context.allocator = alloc.heap_allocator()
-	gBootTlsEnd = u64(uintptr(&gBootTls)) + len(gBootTls)
-	ah.wrmsr_asm(IA32_FS_BASE, gBootTlsEnd)
-
-	tempBuf := make([]u8, 64 * mem.Kilobyte)
-	print.kassert(raw_data(tempBuf) != nil, "temp arena alloc failed")
-	mem.arena_init(&tempArena, tempBuf)
 	gKernelCtx = context
 
-	cpus_init(params.rsdp)
-
-	pcies := find_pci_devices(params.rsdp)
-	adam_init(params.adamImg, pcies)
+	cpus_init(pmm.phys_to_slice(params.apicIds))
+	adam_init(params.adamImg, params.pciDevices)
 
 	grant_loop()
 }

@@ -11,31 +11,28 @@
 .endm
 
 SYSCALL_STUB  syscall_mmap,  0
-SYSCALL_STUB  syscall_mfree, 1
-SYSCALL_STUB  syscall_mediated_create, 2
-SYSCALL_STUB  syscall_mediated_access, 3
-SYSCALL_STUB  syscall_prot_domain_create, 4
+SYSCALL_STUB  syscall_prot_domain_create, 1
 
 .global syscall_prot_domain_edit
 syscall_prot_domain_edit:
     # System V arg4 is rcx; syscall arg4 is r10.
     mov %rcx, %r10
-    movabs $(ILLU_SYSCALL_BIT + 5), %rax
+    movabs $(ILLU_SYSCALL_BIT + 2), %rax
     syscall
     ret
 
-SYSCALL_STUB  syscall_prot_domain_destroy, 6
+SYSCALL_STUB  syscall_prot_domain_destroy, 3
 
 
 .global syscall_grant_spawn
 syscall_grant_spawn:
     # System V arg4 is rcx; syscall arg4 is r10.
     mov %rcx, %r10
-    movabs $(ILLU_SYSCALL_BIT + 7), %rax
+    movabs $(ILLU_SYSCALL_BIT + 4), %rax
     syscall
     ret
 
-SYSCALL_STUB  syscall_grant_edit, 8
+SYSCALL_STUB  syscall_grant_edit, 5
 
 .global cpu_current_index
 cpu_current_index:

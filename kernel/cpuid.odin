@@ -3,7 +3,6 @@ import ah "../asm_helpers"
 import "print"
 
 CPUIDECX1Flag :: enum u32 {
-	SSE3         = 0,
 	X2APIC       = 21,
 	TSC_DEADLINE = 24,
 	// ... many more
@@ -19,17 +18,6 @@ cpuid_has_tsc_deadline :: proc() -> bool {
 	r: ah.CPUIDResult
 	ah.cpuid_asm(.FEATURE_INFO, 0, &r)
 	return .TSC_DEADLINE in transmute(CPUID_ECX1)r.ecx
-}
-cpuid_has_sse3 :: proc() -> bool {
-	r: ah.CPUIDResult
-	ah.cpuid_asm(.FEATURE_INFO, 0, &r)
-	return .SSE3 in transmute(CPUID_ECX1)r.ecx
-}
-
-cpuid_has_1gb_pages :: proc() -> bool {
-	r: ah.CPUIDResult
-	ah.cpuid_asm(.EXTENDED_FEATURE_INFO, 0, &r)
-	return (r.edx >> 26) & 1 == 1
 }
 
 IA32_ARCH_CAPABILITIES_MSR :: u32(0x10A)
@@ -68,11 +56,25 @@ cpuid_meltdown_vulnerable :: proc() -> bool {
 
 MD_CLEAR_CPUID_BIT :: u32(10)
 SSBD_CPUID_BIT :: u32(31)
+RTM_CPUID_BIT :: u32(11)
 IA32_SPEC_CTRL_MSR :: u32(0x48)
 SSBD_SPEC_CTRL_BIT :: u64(2)
 
-@(export, link_name = "kernel_cpu_has_md_clear")
-cpuHasMdClear: bool
+ArchCapability :: enum u64 {
+	RDCL_NO      = 0,
+	MDS_NO       = 5,
+	TAA_NO       = 8,
+	SBDR_SSDP_NO = 13,
+	FBSDP_NO     = 14,
+	PSDP_NO      = 15,
+	RFDS_NO      = 27,
+	RFDS_CLEAR   = 28,
+}
+ArchCapabilities :: bit_set[ArchCapability;u64]
+
+@(export, link_name = "kernel_cpu_needs_verw")
+cpuNeedsVerw: bool
+cpuHasSSBD: bool
 
 cpuid_init_speculation_mitigations :: proc() {
 	vendor: ah.CPUIDResult
@@ -81,14 +83,27 @@ cpuid_init_speculation_mitigations :: proc() {
 
 	extFeatures: ah.CPUIDResult
 	ah.cpuid_asm(.STRUCTURED_EXTENDED_FEATURES, 0, &extFeatures)
+	cpuHasSSBD = (extFeatures.edx >> SSBD_CPUID_BIT) & 1 == 1
 
-	cpuHasMdClear = (extFeatures.edx >> MD_CLEAR_CPUID_BIT) & 1 == 1
+	hasMdClear := (extFeatures.edx >> MD_CLEAR_CPUID_BIT) & 1 == 1
+	if !hasMdClear do return
+	cpuNeedsVerw = true
 
-	hasSSBD := (extFeatures.edx >> SSBD_CPUID_BIT) & 1 == 1
-	if hasSSBD {
-		current := ah.rdmsr_asm(IA32_SPEC_CTRL_MSR)
-		ah.wrmsr_asm(IA32_SPEC_CTRL_MSR, current | (u64(1) << SSBD_SPEC_CTRL_BIT))
-	}
+	hasArchCapabilities := (extFeatures.edx >> ARCH_CAPABILITIES_CPUID_BIT) & 1 == 1
+	if !hasArchCapabilities do return
+	caps := transmute(ArchCapabilities)ah.rdmsr_asm(IA32_ARCH_CAPABILITIES_MSR)
+	hasRTM := (extFeatures.ebx >> RTM_CPUID_BIT) & 1 == 1
+
+	mdsSafe := .MDS_NO in caps
+	taaSafe := !hasRTM || .TAA_NO in caps
+	mmioStaleSafe := ArchCapabilities{.SBDR_SSDP_NO, .FBSDP_NO, .PSDP_NO} <= caps
+	rfdsSafe := .RFDS_NO in caps || .RFDS_CLEAR not_in caps
+	cpuNeedsVerw = !(mdsSafe && taaSafe && mmioStaleSafe && rfdsSafe)
+}
+
+cpu_enable_ssbd :: proc "contextless" () {
+	if !cpuHasSSBD do return
+	ah.wrmsr_asm(IA32_SPEC_CTRL_MSR, ah.rdmsr_asm(IA32_SPEC_CTRL_MSR) | (u64(1) << SSBD_SPEC_CTRL_BIT))
 }
 
 cpuHasPCID: bool
@@ -122,6 +137,41 @@ cpuid_has_fsgsbase :: proc() -> bool {
 
 cpuid_enable_fsgsbase :: proc "contextless" () {
 	ah.write_cr4(ah.read_cr4() | CR4_FSGSBASE_BIT)
+}
+
+CR0_NE :: u64(1) << 5
+CR0_WP :: u64(1) << 16
+CR4_PGE_BIT :: u64(1) << 7
+CR4_SMEP_BIT :: u64(1) << 20
+CR4_SMAP_BIT :: u64(1) << 21
+
+@(export, link_name = "kernel_cpu_has_smap")
+cpuHasSMAP: bool
+
+cpuid_structured_ebx_bit :: proc "contextless" (bit: u32) -> bool {
+	vendor: ah.CPUIDResult
+	ah.cpuid_asm(.VENDOR_STRING, 0, &vendor)
+	if vendor.eax < u32(ah.CPUIDLeaf.STRUCTURED_EXTENDED_FEATURES) do return false
+	r: ah.CPUIDResult
+	ah.cpuid_asm(.STRUCTURED_EXTENDED_FEATURES, 0, &r)
+	return (r.ebx >> bit) & 1 == 1
+}
+
+cpu_enable_kernel_protections :: proc "contextless" () {
+	SMEP_CPUID_BIT :: 7
+	SMAP_CPUID_BIT :: 20
+	ah.write_cr0(ah.read_cr0() | CR0_WP | CR0_NE)
+	cr4 := ah.read_cr4() | CR4_PGE_BIT
+	if cpuid_structured_ebx_bit(SMEP_CPUID_BIT) do cr4 |= CR4_SMEP_BIT
+	cpuHasSMAP = cpuid_structured_ebx_bit(SMAP_CPUID_BIT)
+	if cpuHasSMAP do cr4 |= CR4_SMAP_BIT
+	ah.write_cr4(cr4)
+}
+
+cpuid_has_1gb_pages :: proc() -> bool {
+	r: ah.CPUIDResult
+	ah.cpuid_asm(.EXTENDED_FEATURE_INFO, 0, &r)
+	return (r.edx >> 26) & 1 == 1
 }
 
 cpuid_has_rdtscp :: proc() -> bool {

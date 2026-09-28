@@ -49,11 +49,13 @@
 package uefi
 import "../lib/acpi"
 import "../lib/elf"
+import "../lib/pci"
 import "../lib/shared"
 import "core:slice"
 KernelParams :: struct #all_or_none {
 	fb:                 shared.FrameBuffer,
-	rsdp:               ^acpi.Rsdp,
+	apicIds:            []u32,
+	pciDevices:         []pci.Device,
 	memoryMap:          [^]EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize:      u64,
 	memoryMapDescSize:  u64,
@@ -61,22 +63,24 @@ KernelParams :: struct #all_or_none {
 }
 
 
-guid_equal :: proc "contextless" (a, b: ^EFI_GUID) -> bool {
-	if a.Data1 != b.Data1 || a.Data2 != b.Data2 || a.Data3 != b.Data3 do return false
-	for i in 0 ..< 8 {
-		if a.Data4[i] != b.Data4[i] do return false
-	}
-	return true
-}
-
 // Print an error to the firmware console and hang. Only usable before
 // ExitBootServices (ConOut is a boot service).
 @(private)
-boot_fail :: proc "contextless" (st: ^EFI_SYSTEM_TABLE, msg: ^u16) {
+boot_fail :: proc "contextless" (st: ^EFI_SYSTEM_TABLE, msg: ^u16) -> ! {
 	if st.ConOut != nil && st.ConOut.OutputString != nil {
 		st.ConOut.OutputString(st.ConOut, msg)
 	}
 	for {}
+}
+
+@(private)
+alloc_loader_pages :: proc "contextless" (st: ^EFI_SYSTEM_TABLE, bytes: u64) -> rawptr {
+	addr: EFI_PHYSICAL_ADDRESS
+	pages := (bytes + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
+	if st.BootServices.AllocatePages(.AllocateAnyPages, .LoaderData, pages, &addr) != .SUCCESS || addr == 0 {
+		boot_fail(st, &errHandoff[0])
+	}
+	return rawptr(uintptr(addr))
 }
 
 @(export)
@@ -119,78 +123,62 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 	}
 
 	kernelName := [?]u16{'k', 'e', 'r', 'n', 'e', 'l', '.', 'e', 'l', 'f', 0}
-	// fsDaemonName := [?]u16{'f', 's', '_', 'd', 'a', 'e', 'm', 'o', 'n', '.', 'e', 'l', 'f', 0}
-	// before ExitBootServices, so ConOut still works
-
-
-	kernelImg, kernelOk := load_elf(
-		root,
-		&kernelName[0],
-		systemTable,
-		shared.KERNEL_PHYSICAL_MEM_LOCATION,
-	)
+	kernelImg, kernelOk := load_elf(root, &kernelName[0], systemTable, atLinkAddress = true)
 	if !kernelOk do boot_fail(systemTable, &errKernel[0])
 
 	adamName := [?]u16{'a', 'd', 'a', 'm', '.', 'e', 'l', 'f', 0}
-	adamImg, adamOk := load_elf(root, &adamName[0], systemTable, -1)
+	adamImg, adamOk := load_elf(root, &adamName[0], systemTable, atLinkAddress = false)
 	if !adamOk do boot_fail(systemTable, &errAdam[0])
-
 
 	rsdp: ^acpi.Rsdp = nil
 	configTable := slice.from_ptr(
 		systemTable.ConfigurationTable,
 		int(systemTable.NumberOfTableEntries),
 	)
-	// before ExitBootServices, so ConOut still works
-
-
-	for &t in configTable {
-		if guid_equal(&t.VendorGuid, &ACPI2_GUID) {
+	for t in configTable {
+		if t.VendorGuid == ACPI2_GUID {
 			rsdp = (^acpi.Rsdp)(t.VendorTable)
 			break
 		}
-		if guid_equal(&t.VendorGuid, &ACPI1_GUID) && rsdp == nil {
+		if t.VendorGuid == ACPI1_GUID && rsdp == nil {
 			rsdp = (^acpi.Rsdp)(t.VendorTable)
 		}
 	}
 	if rsdp == nil do boot_fail(systemTable, &errRsdp[0])
 
-	mmapSize, mapKey, descSize: u64 = 0, 0, 0
-	descVer: u32 = 0
+	apicIdCount := acpi.collect_apic_ids(rsdp, nil)
+	if apicIdCount == 0 do boot_fail(systemTable, &errHandoff[0])
+	apicIds := slice.from_ptr(
+		(^u32)(alloc_loader_pages(systemTable, u64(apicIdCount * size_of(u32)))),
+		apicIdCount,
+	)
+	apicIds = apicIds[:acpi.collect_apic_ids(rsdp, apicIds)]
+	if len(apicIds) == 0 do boot_fail(systemTable, &errHandoff[0])
+
+	pciDeviceCount := pci.enumerate(rsdp, nil)
+	pciDevices: []pci.Device
+	if pciDeviceCount > 0 {
+		pciDevices = slice.from_ptr(
+			(^pci.Device)(alloc_loader_pages(systemTable, u64(pciDeviceCount * size_of(pci.Device)))),
+			pciDeviceCount,
+		)
+		if pci.enumerate(rsdp, pciDevices) != pciDeviceCount do boot_fail(systemTable, &errHandoff[0])
+	}
+
+	MMAP_SLACK_DESCRIPTORS :: 16
+	mmapSize, mapKey, descSize: u64
+	descVer: u32
 	systemTable.BootServices.GetMemoryMap(&mmapSize, nil, &mapKey, &descSize, &descVer)
-	mmapSize += descSize
+	if descSize < size_of(EFI_MEMORY_DESCRIPTOR) do boot_fail(systemTable, &errMmap[0])
+	mmapCapacity := mmapSize + MMAP_SLACK_DESCRIPTORS * descSize
+	mmap := (^EFI_MEMORY_DESCRIPTOR)(alloc_loader_pages(systemTable, mmapCapacity))
 
-	mmapStartPtr: rawptr
-	if systemTable.BootServices.AllocatePool(.LoaderData, mmapSize, &mmapStartPtr) != .SUCCESS ||
-	   mmapStartPtr == nil {
-		boot_fail(systemTable, &errMmap[0])
-	}
-
-	if systemTable.BootServices.GetMemoryMap(
-		   &mmapSize,
-		   cast(^EFI_MEMORY_DESCRIPTOR)mmapStartPtr,
-		   &mapKey,
-		   &descSize,
-		   &descVer,
-	   ) !=
-	   .SUCCESS {
-		boot_fail(systemTable, &errMmap[0])
-	}
-
-	for systemTable.BootServices.ExitBootServices(imageHandle, mapKey) != .SUCCESS {
-		mmapSize += descSize
-		if systemTable.BootServices.GetMemoryMap(
-			   &mmapSize,
-			   cast(^EFI_MEMORY_DESCRIPTOR)mmapStartPtr,
-			   &mapKey,
-			   &descSize,
-			   &descVer,
-		   ) !=
-		   .SUCCESS {
-			//failure
-			{}
-			// boot_fail(systemTable, &errMmap[0])
+	for {
+		mmapSize = mmapCapacity
+		if systemTable.BootServices.GetMemoryMap(&mmapSize, mmap, &mapKey, &descSize, &descVer) != .SUCCESS {
+			boot_fail(systemTable, &errMmap[0])
 		}
+		if systemTable.BootServices.ExitBootServices(imageHandle, mapKey) == .SUCCESS do break
 	}
 
 
@@ -201,18 +189,15 @@ efi_main :: proc "win64" (imageHandle: EFI_HANDLE, systemTable: ^EFI_SYSTEM_TABL
 			height = u64(gop.Mode.Info.VerticalResolution),
 			stride = u64(gop.Mode.Info.PixelsPerScanLine),
 		},
-		rsdp = rsdp,
-		memoryMap = cast([^]EFI_MEMORY_DESCRIPTOR)mmapStartPtr,
-		memoryMapSize = u64(mmapSize),
-		memoryMapDescSize = u64(descSize),
+		apicIds = apicIds,
+		pciDevices = pciDevices,
+		memoryMap = mmap,
+		memoryMapSize = mmapSize,
+		memoryMapDescSize = descSize,
 		kernelImg = kernelImg,
 		adamImg = adamImg,
 	}
-	KernelEntry :: #type proc "sysv" (params: ^KernelParams)
-
-
+	KernelEntry :: #type proc "sysv" (params: ^KernelParams) -> !
 	kernelMain := cast(KernelEntry)rawptr(uintptr(kernelImg.entry))
 	kernelMain(&params)
-	for {}
-	return .SUCCESS
 }

@@ -1,32 +1,44 @@
 package kernel
 import "../lib/lmem"
-import "../lib/shared"
+import "../lib/spinlock"
 import "../lib/syscalls"
 import "../lib/userschedule"
 import "base:intrinsics"
+import "core:mem"
 import "pmm"
+
+user_copy_in :: proc "contextless" (domain: ^ProtectionDomain, dst: []$T, src: u64) -> bool {
+	bytes := u64(len(dst) * size_of(T))
+	spinlock.rw_read_lock(&domain.lock)
+	defer spinlock.rw_read_unlock(&domain.lock)
+	if !user_range_accessible(domain, src, bytes, false) do return false
+	mem.copy(raw_data(dst), pmm.phys_to_ptr(src), int(bytes))
+	return true
+}
 
 USER_ADDR_END :: u64(1) << 47
 
+page_size_usable :: proc "contextless" (size: lmem.PageSize) -> bool {
+	switch size {
+	case ._4KB, ._2MB:
+		return true
+	case ._1GB:
+		return pmm.pages1GB
+	}
+	return false
+}
+
 mem_region_valid :: proc "contextless" (r: syscalls.MemRegion) -> bool {
-	if r.pageSize != ._4KB || r.size == 0 do return false
-	pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
+	if !page_size_usable(r.pageSize) || r.size == 0 do return false
+	if .Present not_in r.flags || .User not_in r.flags do return false
+	if .PS in r.flags || .Global in r.flags do return false
+	pageBytes := lmem.page_bytes(r.pageSize)
 	if r.phys % pageBytes != 0 || r.logical % pageBytes != 0 || r.size % pageBytes != 0 do return false
 	_, physOverflow := intrinsics.overflow_add(r.phys, r.size)
 	logicalEnd, logicalOverflow := intrinsics.overflow_add(r.logical, r.size)
 	if physOverflow || logicalOverflow || logicalEnd > USER_ADDR_END do return false
 	cpuInfoBytes := cpu_infos_bytes(int(CpuInfos.cpuCount))
 	return !resource_ranges_overlap(r.logical, r.size, userschedule.CPU_INFO_ADDR, cpuInfoBytes)
-}
-
-region_covers_kernel :: proc "contextless" (pml4: u64, r: syscalls.MemRegion) -> bool {
-	for offset := u64(0); offset < r.size; offset += shared.PAGE_SIZE {
-		leaf := pmm.leaf_entry(pml4, r.logical + offset)
-		flags := transmute(lmem.PageFlags)leaf
-		if .Present not_in flags || .User in flags do continue
-		if leaf & pmm.ENTRY_ADDR_MASK != r.phys + offset do return true
-	}
-	return false
 }
 
 
@@ -84,6 +96,7 @@ user_range_accessible :: proc "contextless" (
 		if idx < 0 || idx >= len(domain.resources) do return false
 		resource := domain.resources[idx]
 		if covered < resource.phys || covered >= resource.phys + resource.size do return false
+		if .Present not_in resource.flags || .Volatile in resource.resourceFlags do return false
 		if write && .Write not_in resource.flags do return false
 		covered = resource.phys + resource.size
 		idx += 1

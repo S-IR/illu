@@ -25,7 +25,7 @@ init_state :: proc() -> (testState: TEST_State) {
 	basePtr := uintptr(raw_data(backingRaw))
 
 	aligned := (basePtr + uintptr(shared.PAGE_SIZE - 1)) & ~uintptr(shared.PAGE_SIZE - 1)
-	buddyMapBase = u64(aligned)
+	directMapBase = u64(aligned)
 
 	bitmapMem := make([]u64, TEST_BITMAP_WORDS)
 
@@ -63,7 +63,7 @@ buddy_next :: proc(s: TEST_State) -> []modelcheck.Transition(TEST_State) {
 		for order in u8(0) ..< TEST_NUM_ORDERS {
 			restore(s)
 			addr := buddy_alloc(order)
-			if addr == max(u64) do continue
+			if addr == 0 do continue
 			ns := snapshot(s.outAddr, s.outOrder)
 			ns.outAddr[slot] = addr
 			ns.outOrder[slot] = order
@@ -104,7 +104,7 @@ inv :: proc(s: TEST_State) -> (ok: bool, msg: string) {
 
 	for i in 0 ..< 4 {
 		if s.outAddr[i] == max(u64) do continue
-		page := (s.outAddr[i] - buddyMapBase) / shared.PAGE_SIZE
+		page := s.outAddr[i] / shared.PAGE_SIZE
 
 		count := u64(1) << s.outOrder[i]
 		for p in page ..< page + count {
@@ -144,14 +144,14 @@ restore :: proc(s: TEST_State) {
 	local := s
 	freeLists = local.freeLists
 	copy(state.bitmap, local.bitmap[:])
-	mem.copy(rawptr(uintptr(buddyMapBase)), &local.pool, TEST_POOL_BYTES)
+	mem.copy(rawptr(uintptr(directMapBase)), &local.pool, TEST_POOL_BYTES)
 }
 
 snapshot :: proc(outAddr: [4]u64, outOrder: [4]u8) -> TEST_State {
 	ns: TEST_State
 	ns.freeLists = freeLists
 	copy(ns.bitmap[:], state.bitmap)
-	mem.copy(&ns.pool, rawptr(uintptr(buddyMapBase)), TEST_POOL_BYTES)
+	mem.copy(&ns.pool, rawptr(uintptr(directMapBase)), TEST_POOL_BYTES)
 	ns.outAddr = outAddr
 	ns.outOrder = outOrder
 	return ns

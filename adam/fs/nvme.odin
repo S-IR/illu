@@ -55,7 +55,7 @@ nvme_init :: proc(device: ^pci.Device) -> (ok: bool) {
 	defer if !ok {
 		nvme_disable(regs, cap)
 		free(n)
-		assert(syscalls.syscall_mfree_userspace([]u64{pages}) == .None)
+		assert(syscalls.mem_free_userspace(pages) == .None)
 	}
 
 	n.regs = regs
@@ -180,7 +180,7 @@ nvme_queue_pair_create :: proc(n: ^Nvme) -> (info: nvme.QueueInfo, ok: bool) {
 	qid := u16(n.nextQid)
 
 	pages := dma_pages(2) or_return
-	defer if !ok do assert(syscalls.syscall_mfree_userspace([]u64{pages}) == .None)
+	defer if !ok do assert(syscalls.mem_free_userspace(pages) == .None)
 	sq := pages
 	cq := pages + shared.PAGE_SIZE
 	sizeAndId := u32(qid) | (n.queueDepth - 1) << 16

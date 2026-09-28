@@ -7,6 +7,7 @@ import "../lib/userschedule"
 import "base:intrinsics"
 import "core:container/bit_array"
 import "core:mem"
+import "pmm"
 import "print"
 
 GRANT_SLICE_MS :: 5
@@ -27,12 +28,13 @@ GrantSleepState :: bit_field u64 {
 #assert(size_of(GrantSleepState) == size_of(u64))
 
 CpuGrant :: struct {
-	saveArea:    ^userschedule.UserSaveArea,
-	entry:       u64,
-	weight:      u64,
-	domain:      ^ProtectionDomain,
-	virtualTime: u64,
-	sleepState:  GrantSleepState,
+	saveArea:         ^userschedule.UserSaveArea,
+	saveAreaUnderlay: ^MemoryUnderlay,
+	entry:            u64,
+	weight:           u64,
+	domain:           ^ProtectionDomain,
+	virtualTime:      u64,
+	sleepState:       GrantSleepState,
 }
 
 when !ODIN_TEST {
@@ -42,8 +44,6 @@ when !ODIN_TEST {
 		run_resume :: proc(targetCr3: u64, entry: u64, area: ^userschedule.UserSaveArea) -> ! ---
 		run_abort :: proc() -> ! ---
 		user_save_area_store :: proc(area: ^userschedule.UserSaveArea, frame: ^InterruptFrame) ---
-		user_access_begin :: proc() ---
-		user_access_end :: proc() ---
 		cpu_cli :: proc() ---
 		cpu_monitor :: proc(address: rawptr) ---
 		cpu_mwait :: proc(hint: u32) ---
@@ -57,8 +57,6 @@ when !ODIN_TEST {
 	run_resume :: proc "contextless" (targetCr3: u64, entry: u64, area: ^userschedule.UserSaveArea) -> ! {for {}}
 	run_abort :: proc "contextless" () -> ! {for {}}
 	user_save_area_store :: proc "contextless" (area: ^userschedule.UserSaveArea, frame: ^InterruptFrame) {}
-	user_access_begin :: proc "contextless" () {}
-	user_access_end :: proc "contextless" () {}
 	cpu_cli :: proc "contextless" () {}
 	cpu_monitor :: proc "contextless" (address: rawptr) {}
 	cpu_mwait :: proc "contextless" (hint: u32) {}
@@ -112,6 +110,7 @@ grant_kill_locked :: proc(cpu: ^CpuState, domain: ^ProtectionDomain) {
 		cpu_kick(cpu)
 	} else {
 		ordered_remove(&cpu.grants, mem.ptr_sub(grant, &cpu.grants[0]))
+		memory_underlay_release(killed.saveAreaUnderlay)
 	}
 
 	domain.weightFree += killed.weight
@@ -143,7 +142,13 @@ grant_spawn :: proc(
 
 	if bit_array.get(&domain.grantCpus, cpu_index(cpu)) do return .AlreadyOnCpu
 	if weight == 0 || weight > domain.weightFree do return .InsufficientWeight
-	if !user_range_accessible(domain, u64(uintptr(saveArea)), size_of(userschedule.UserSaveArea), true) do return .InvalidSaveArea
+	saveAreaAddr := u64(uintptr(saveArea))
+	if !user_range_accessible(domain, saveAreaAddr, size_of(userschedule.UserSaveArea), true) do return .InvalidSaveArea
+	ownerIdx, owned := resource_find_containing(domain.resources[:], saveAreaAddr)
+	assert(owned)
+	ownerEnd := domain.resources.phys[ownerIdx] + domain.resources.size[ownerIdx]
+	if saveAreaAddr + size_of(userschedule.UserSaveArea) > ownerEnd do return .InvalidSaveArea
+	saveAreaUnderlay := domain.resources.underlay[ownerIdx]
 
 	info := cpu_info(cpu)
 	if !intrinsics.atomic_load(&info.online) do return .InvalidCpu
@@ -154,6 +159,7 @@ grant_spawn :: proc(
 
 		grant := CpuGrant {
 			saveArea = saveArea,
+			saveAreaUnderlay = saveAreaUnderlay,
 			entry = entry,
 			weight = weight,
 			domain = domain,
@@ -164,6 +170,7 @@ grant_spawn :: proc(
 		intrinsics.atomic_store(&info.runnableWeight, info.runnableWeight + weight)
 	}
 
+	memory_underlay_increment(saveAreaUnderlay)
 	domain.weightFree -= weight
 	set := bit_array.set(&domain.grantCpus, cpu_index(cpu))
 	assert(set)
@@ -230,9 +237,16 @@ grant_kill_all :: proc(domain: ^ProtectionDomain) {
 grant_leave_if_killed :: proc(cpu: ^CpuState) {
 	if cpu.currentGrant.domain == nil || intrinsics.atomic_load(&cpu.currentGrant.weight) != 0 do return
 	kernel_switch_cr3()
+	grant_drop_current(cpu)
+}
+
+grant_drop_current :: proc(cpu: ^CpuState) {
 	spinlock.lock(&cpu.lock)
-	defer spinlock.unlock(&cpu.lock)
+	dropped := cpu.currentGrant
 	cpu.currentGrant = {}
+	spinlock.unlock(&cpu.lock)
+	assert(dropped.weight == 0)
+	if dropped.saveAreaUnderlay != nil do memory_underlay_release(dropped.saveAreaUnderlay)
 }
 
 @(export)
@@ -285,19 +299,23 @@ grant_preempt :: proc(cpu: ^CpuState, frame: ^InterruptFrame) -> ! {
 	assert(!grant.sleepState.asleep)
 
 	if intrinsics.atomic_load(&grant.weight) != 0 {
-		domain_switch_cr3(grant.domain)
-		user_save_area_store(grant.saveArea, frame)
-		kernel_switch_cr3()
+		saveArea := (^userschedule.UserSaveArea)(pmm.phys_to_ptr(u64(uintptr(grant.saveArea))))
+		user_save_area_store(saveArea, frame)
 	}
+	kernel_switch_cr3()
 
+	released: ^MemoryUnderlay
 	spinlock.lock(&cpu.lock)
 	if grant.weight != 0 {
 		grant.virtualTime += grant_charge(grant.weight)
 		err := grant_enqueue(cpu, grant^)
 		print.kensure(err == nil, "grant_preempt: requeue failed")
+	} else {
+		released = grant.saveAreaUnderlay
 	}
 	cpu.currentGrant = {}
 	spinlock.unlock(&cpu.lock)
+	if released != nil do memory_underlay_release(released)
 	run_abort()
 }
 
@@ -312,17 +330,14 @@ grant_exit :: proc() -> ! {
 		spinlock.unlock(&cpu.lock)
 		spinlock.rw_write_unlock(&domain.lock)
 	}
-	spinlock.lock(&cpu.lock)
-	cpu.currentGrant = {}
-	spinlock.unlock(&cpu.lock)
+	grant_drop_current(cpu)
 	run_abort()
 }
 
-syscall_grant_spawn :: proc "contextless" (
+syscall_grant_spawn :: proc(
 	handle: int,
 	cpuIdx, saveAreaPtr, weight, entry: u64,
 ) -> syscalls.GrantError {
-	context = gKernelCtx
 	spinlock.rw_read_lock(&protDomainPool.rwLock)
 	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
 
@@ -331,8 +346,7 @@ syscall_grant_spawn :: proc "contextless" (
 	return grant_spawn(target, targetCpu, saveArea, entry, weight)
 }
 
-syscall_grant_edit :: proc "contextless" (handle: int, cpuIdx, weight: u64) -> syscalls.GrantError {
-	context = gKernelCtx
+syscall_grant_edit :: proc(handle: int, cpuIdx, weight: u64) -> syscalls.GrantError {
 	spinlock.rw_read_lock(&protDomainPool.rwLock)
 	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
 

@@ -13,7 +13,20 @@ PageFlag :: enum u64 {
 	PWT     = 3,
 	PCD     = 4,
 	PS      = 7,
+	Global  = 8,
 	NX      = 63,
 }
 PageFlags :: bit_set[PageFlag;u64]
 #assert(size_of(PageFlags) == size_of(u64))
+
+page_bytes :: proc "contextless" (size: PageSize) -> u64 {
+	switch size {
+	case ._4KB:
+		return 1 << 12
+	case ._2MB:
+		return 1 << 21
+	case ._1GB:
+		return 1 << 30
+	}
+	unreachable()
+}

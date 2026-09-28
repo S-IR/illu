@@ -139,18 +139,3 @@ RelaType :: enum u32 {
 rela_type :: proc "contextless" (rInfo: Xword) -> RelaType {
 	return RelaType(u32(rInfo & 0xFFFF_FFFF))
 }
-
-parse_elf :: proc(data: []u8) -> (image: ElfImage, ok: bool) {
-	assert(false) // TODO: elf loading not implemented
-	return image, false
-}
-
-elf_load_into_memory :: proc(image: ^ElfImage, data: []u8) -> (actualBase: u64, ok: bool) {
-	assert(false) // TODO: elf loading not implemented
-	return 0, false
-}
-
-elf_run :: proc(image: ^ElfImage, base: u64, arg0, arg1: u64) -> bool {
-	assert(false) // TODO: elf loading not implemented
-	return false
-}

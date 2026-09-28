@@ -18,24 +18,8 @@ EFI_HANDLE :: rawptr
 
 // UEFI 2.10 Appendix D https://uefi.org/specifications
 
-// UEFI 2.10 §12.4.7 https://uefi.org/specifications
-EFI_BLACK :: 0x00
-EFI_BLUE :: 0x01
-EFI_GREEN :: 0x02
-EFI_CYAN :: 0x03
-EFI_RED :: 0x04
-EFI_YELLOW :: 0x0E
-EFI_WHITE :: 0x0F
-
 // UEFI 2.10 §13.5 https://uefi.org/specifications
 EFI_FILE_MODE_READ :: 0x0000000000000001
-
-EFI_FILE_INFO_ID :: EFI_GUID {
-	0x09576e92,
-	0x6d3f,
-	0x11d2,
-	{0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b},
-}
 
 // UEFI 2.10 §7.2 https://uefi.org/specifications
 EFI_PHYSICAL_ADDRESS :: UINT64
@@ -356,41 +340,12 @@ EFI_SYSTEM_TABLE :: struct {
 	ConfigurationTable:   ^EFI_CONFIGURATION_TABLE, // Clean named pointer reference!
 }
 
-// UEFI 2.10 §13.5.17 https://uefi.org/specifications
-EFI_FILE_INFO :: struct {
-	Size:             UINT64,
-	FileSize:         UINT64,
-	PhysicalSize:     UINT64,
-	CreateTime:       [16]u8,
-	LastAccessTime:   [16]u8,
-	ModificationTime: [16]u8,
-	Attribute:        UINT64,
-}
 EFI_DEVICE_PATH_PROTOCOL :: struct {
 	Type:    u8,
 	SubType: u8,
 	Length:  [2]u8,
 }
 
-EFI_DEVICE_PATH_UTILITIES_PROTOCOL_GUID := EFI_GUID {
-	0x379be50f,
-	0x4d8d,
-	0x4855,
-	{0x86, 0x69, 0x1a, 0x14, 0x66, 0x24, 0x98, 0x65},
-}
-
-EFI_DEVICE_PATH_UTILITIES_PROTOCOL :: struct {
-	CreateDeviceNode: proc "c" (
-		NodeType: u8,
-		NodeSubType: u8,
-		NodeLength: u16,
-	) -> ^EFI_DEVICE_PATH_PROTOCOL,
-	AppendNode:       proc "c" (
-		DevicePath: ^EFI_DEVICE_PATH_PROTOCOL,
-		DeviceNode: ^EFI_DEVICE_PATH_PROTOCOL,
-	) -> ^EFI_DEVICE_PATH_PROTOCOL,
-	// Other fields omitted
-}
 GOP_GUID := EFI_GUID{0x9042a9de, 0x23dc, 0x4a38, {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}}
 FS_GUID := EFI_GUID{0x964e5b22, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}}
 LIP_GUID := EFI_GUID{0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}}
@@ -452,7 +407,6 @@ errFs := [?]u16 {
 	0,
 }
 
-errOOM := [?]u16{'o', 'u', 't', ' ', 'o', 'f', ' ', 'm', 'e', 'm', 'o', 'r', 'y', '\r', '\n', 0}
 errKernel := [?]u16 {
 	'k',
 	'e',
@@ -497,32 +451,6 @@ errAdam := [?]u16 {
 	'\n',
 	0,
 }
-errDaemon := [?]u16 {
-	'f',
-	's',
-	'_',
-	'd',
-	'a',
-	'e',
-	'm',
-	'o',
-	'n',
-	' ',
-	'l',
-	'o',
-	'a',
-	'd',
-	' ',
-	'f',
-	'a',
-	'i',
-	'l',
-	'e',
-	'd',
-	'\r',
-	'\n',
-	0,
-}
 errMmap := [?]u16 {
 	'G',
 	'e',
@@ -548,6 +476,7 @@ errMmap := [?]u16 {
 	0,
 }
 errRsdp := [?]u16{'n', 'o', ' ', 'A', 'C', 'P', 'I', ' ', 'R', 'S', 'D', 'P', '\r', '\n', 0}
+errHandoff := [?]u16{'h', 'a', 'n', 'd', 'o', 'f', 'f', ' ', 'f', 'a', 'i', 'l', 'e', 'd', '\r', '\n', 0}
 // @(export, link_name = "_fltused")
 // _fltused: i32 = 1
 

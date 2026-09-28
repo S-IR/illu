@@ -8,6 +8,7 @@ import "base:intrinsics"
 import "core:container/bit_array"
 import "core:mem"
 import "pmm"
+import "print"
 ProtectionDomain :: struct {
 	pml4:         u64,
 	lock:         spinlock.RWLock,
@@ -24,7 +25,6 @@ protDomainPool := struct {
 	freeSlots: [dynamic]int,
 }{}
 
-PROT_DOMAIN_ARRAY_START_CAP :: 64
 MEMORY_RESOURCES_STARTING_CAP :: 16
 
 ProtDomainTargetError :: enum {
@@ -42,17 +42,14 @@ protdomain_resolve_target_DOESNT_LOCK :: proc(
 	target: ^ProtectionDomain,
 	err: ProtDomainTargetError,
 ) {
-	if caller == nil do return nil, .NoPermission
+	assert(caller != nil)
 
-	if handle == max(int) {
-		target = caller
-	} else {
-		if handle < 0 || handle >= len(protDomainPool.prots) do return nil, .InvalidHandle
-		target = protDomainPool.prots[handle]
-		if target == nil do return nil, .InvalidHandle
-	}
+	if handle == max(int) do return caller, .None
+	if handle < 0 || handle >= len(protDomainPool.prots) do return nil, .InvalidHandle
+	target = protDomainPool.prots[handle]
+	if target == nil do return nil, .InvalidHandle
+	assert(target.authorityPtr != nil)
 
-	if target.authorityPtr == nil do return nil, .NoPermission
 	spinlock.rw_read_lock(&caller.lock)
 	defer spinlock.rw_read_unlock(&caller.lock)
 	if !user_range_accessible(
@@ -67,75 +64,46 @@ protdomain_resolve_target_DOESNT_LOCK :: proc(
 	return target, .None
 }
 
-protdomain_new :: proc(
-	authorityPtr: ^byte,
-) -> (
-	pd: ^ProtectionDomain,
-	idx: int = -1,
-	err: mem.Allocator_Error,
-) {
+protdomain_new :: proc(authorityPtr: ^byte) -> (pd: ^ProtectionDomain, err: mem.Allocator_Error) {
 	assert(len(cpus) > 0)
 	assert(authorityPtr != nil)
 
-	newPD, allocErr := new(ProtectionDomain)
-	if allocErr != {} do return nil, -1, allocErr
-	assert(newPD != nil)
-	defer if err != {} do free(newPD)
+	newPD := new(ProtectionDomain) or_return
+	defer if err != nil do free(newPD)
 
 	newPD.authorityPtr = authorityPtr
 
 	newPD.resources = make(#soa[dynamic]MemoryResource, 0, MEMORY_RESOURCES_STARTING_CAP) or_return
-	defer if err != {} do delete_soa(newPD.resources)
+	defer if err != nil do delete_soa(newPD.resources)
 
 	newPD.pml4 = pmm.alloc_zeroed(shared.PAGE_SIZE)
-	if newPD.pml4 == 0 do return nil, -1, .Out_Of_Memory
-	defer if err != {} do pmm.pml4_destroy(newPD.pml4)
+	if newPD.pml4 == 0 do return nil, .Out_Of_Memory
+	defer if err != nil do pmm.pml4_destroy(newPD.pml4)
 
 	newPD.weightFree = userschedule.SCHED_WEIGHT_TOTAL
-	if !bit_array.init(&newPD.grantCpus, len(cpus)) do return nil, -1, .Out_Of_Memory
-	defer if err != {} do bit_array.destroy(&newPD.grantCpus)
+	if !bit_array.init(&newPD.grantCpus, len(cpus)) do return nil, .Out_Of_Memory
 
-	if cpuMeltdownVulnerable {
-		pmm.pml4_map_kernel_image(newPD.pml4)
-	} else {
-		pmm.pml4_deep_copy(newPD.pml4, pmm.kernelPML4, true)
-	}
+	pmm.map_kernel_image(newPD.pml4)
+	pmm.pml4_share_kernel_half(newPD.pml4, entryRegionOnly = cpuMeltdownVulnerable)
 	cpu_info_map(newPD.pml4)
+	newPD.pcid = pcid_alloc()
+	return newPD, nil
+}
 
-	if cpuHasPCID {
-		newPD.pcid = pcid_alloc()
-		assert(newPD.pcid != 0)
-		defer if err != {} do pcid_free(newPD.pcid)
-	}
-
+protdomain_publish :: proc(pd: ^ProtectionDomain) -> (idx: int, err: mem.Allocator_Error) {
+	assert(pd != nil)
 	spinlock.rw_write_lock(&protDomainPool.rwLock)
 	defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
-
-	if protDomainPool.prots == nil {
-		assert(protDomainPool.freeSlots == nil || len(protDomainPool.freeSlots) == 0)
-		protDomainPool.prots = make(
-			[dynamic]^ProtectionDomain,
-			0,
-			PROT_DOMAIN_ARRAY_START_CAP,
-		) or_return
-	}
 
 	if len(protDomainPool.freeSlots) > 0 {
 		idx = pop(&protDomainPool.freeSlots)
 		assert(idx >= 0 && idx < len(protDomainPool.prots))
 		assert(protDomainPool.prots[idx] == nil)
-	} else {
-		idx = len(protDomainPool.prots)
-		append(&protDomainPool.prots, (^ProtectionDomain)(nil)) or_return
+		protDomainPool.prots[idx] = pd
+		return idx, nil
 	}
-
-	assert(idx >= 0 && idx < len(protDomainPool.prots))
-	assert(protDomainPool.prots[idx] == nil)
-	protDomainPool.prots[idx] = newPD
-	pd = newPD
-	newPD = nil
-
-	return pd, idx, {}
+	append(&protDomainPool.prots, pd) or_return
+	return len(protDomainPool.prots) - 1, nil
 }
 
 protdomain_destroy :: proc(idx: int, caller: ^ProtectionDomain) -> ProtDomainTargetError {
@@ -145,27 +113,12 @@ protdomain_destroy :: proc(idx: int, caller: ^ProtectionDomain) -> ProtDomainTar
 		defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
 		pd = protdomain_resolve_target_DOESNT_LOCK(idx, caller) or_return
 		if pd == caller do return .NoPermission
-		protdomain_unlink_DOESNT_LOCK(idx)
+		assert(protDomainPool.prots[idx] == pd)
+		protDomainPool.prots[idx] = nil
+		append(&protDomainPool.freeSlots, idx)
 	}
 	protdomain_free(pd)
 	return .None
-}
-
-protdomain_discard :: proc(idx: int, pd: ^ProtectionDomain) {
-	{
-		spinlock.rw_write_lock(&protDomainPool.rwLock)
-		defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
-		if protDomainPool.prots[idx] != pd do return
-		protdomain_unlink_DOESNT_LOCK(idx)
-	}
-	protdomain_free(pd)
-}
-
-protdomain_unlink_DOESNT_LOCK :: proc(idx: int) {
-	assert(idx >= 0 && idx < len(protDomainPool.prots))
-	assert(protDomainPool.prots[idx] != nil)
-	protDomainPool.prots[idx] = nil
-	if _, appendErr := append(&protDomainPool.freeSlots, idx); appendErr != nil do return
 }
 
 protdomain_free :: proc(pd: ^ProtectionDomain) {
@@ -217,12 +170,6 @@ tlb_wait_domain_flushed :: proc(domain: ^ProtectionDomain) {
 	ah.write_cr3(ah.read_cr3())
 }
 
-domain_unmap_page :: proc(domain: ^ProtectionDomain, logical: u64) {
-	pmm.unmap_page(domain.pml4, logical)
-	if cpuMeltdownVulnerable || logical >= pmm.identity_map_end() do return
-	pmm.map_page(domain.pml4, logical, logical, ._4KB, {.Present, .Write, .NX})
-}
-
 
 KERNEL_PCID :: u32(1)
 PCID_MAX :: u32(4096)
@@ -265,84 +212,82 @@ domain_switch_cr3 :: proc "contextless" (domain: ^ProtectionDomain) {
 	ah.write_cr3(domain.pml4 | u64(domain.pcid) | PCID_NOFLUSH_BIT)
 }
 
+@(export, link_name = "kernel_cr3_value")
+kernelCr3Value: u64
+@(export, link_name = "cr3_noflush_bit")
+cr3NoFlushBit: u64
+
 kernel_switch_cr3 :: proc "contextless" () {
-	if !cpuHasPCID {
-		ah.write_cr3(pmm.kernelPML4)
-		return
-	}
-	ah.write_cr3(pmm.kernelPML4 | u64(KERNEL_PCID) | PCID_NOFLUSH_BIT)
+	print.kassert(kernelCr3Value != 0)
+	ah.write_cr3(kernelCr3Value)
 }
-syscall_prot_domain_create :: proc "contextless" (
+syscall_prot_domain_create :: proc(
 	authorityPtr: ^byte,
 	regionsPtr, count: u64,
 ) -> (
 	err: syscalls.ProtDomainCreateError,
 	handle: int,
 ) {
-	context = gKernelCtx
 	callerDomain := gs_read_cpustate().currentGrant.domain
 	assert(callerDomain != nil)
 	if authorityPtr == nil do return .NoPermission, 0
 
-	if count == 0 do return .InvalidRegionCount, 0
-	regionBytes, overflowed := intrinsics.overflow_mul(count, size_of(syscalls.MemRegion))
-	if overflowed do return .InvalidRegionCount, 0
-
-	regions, regionsAllocErr := make([]syscalls.MemRegion, int(count))
-	if regionsAllocErr != nil do return .OutOfMemory, 0
-	defer delete(regions)
+	if count == 0 || count > syscalls.MAX_REGIONS_PER_CALL do return .InvalidRegionCount, 0
+	regionsBuf: [syscalls.MAX_REGIONS_PER_CALL]syscalls.MemRegion
+	regions := regionsBuf[:count]
+	if !user_copy_in(callerDomain, regions, regionsPtr) do return .InvalidRegionCount, 0
 	{
 		spinlock.rw_read_lock(&callerDomain.lock)
 		defer spinlock.rw_read_unlock(&callerDomain.lock)
 		if !user_range_accessible(callerDomain, u64(uintptr(authorityPtr)), 1, true) do return .NoPermission, 0
-		if !user_range_accessible(callerDomain, regionsPtr, regionBytes, false) do return .InvalidRegionCount, 0
-		mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
 	}
 
-	pd, pdIdx, allocErr := protdomain_new(authorityPtr)
-	if allocErr != {} do return .OutOfMemory, 0
-	defer if err != .None do protdomain_discard(pdIdx, pd)
+	pd, allocErr := protdomain_new(authorityPtr)
+	if allocErr != nil do return .OutOfMemory, 0
+	defer if err != .None do protdomain_free(pd)
 
-	domains_write_lock(callerDomain, pd)
-	defer domains_write_unlock(callerDomain, pd)
+	{
+		domains_write_lock(callerDomain, pd)
+		defer domains_write_unlock(callerDomain, pd)
 
-	for r, i in regions {
-		if !mem_region_valid(r) || !region_mappable(pd.pml4, r) do return .InvalidRegion, 0
-		for other in regions[i + 1:] {
-			if resource_ranges_overlap(r.phys, r.size, other.phys, other.size) do return .InvalidRegion, 0
-			if resource_ranges_overlap(r.logical, r.size, other.logical, other.size) do return .InvalidRegion, 0
+		for r, i in regions {
+			if !mem_region_valid(r) || !region_mappable(pd.pml4, r) do return .InvalidRegion, 0
+			for other in regions[i + 1:] {
+				if resource_ranges_overlap(r.phys, r.size, other.phys, other.size) do return .InvalidRegion, 0
+				if resource_ranges_overlap(r.logical, r.size, other.logical, other.size) do return .InvalidRegion, 0
+			}
+			ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
+			if !owned do return .NotOwned, 0
+			owner := callerDomain.resources[ownerIdx]
+			if r.phys + r.size > owner.phys + owner.size do return .NotOwned, 0
+			if !region_flags_grantable(r.flags, owner.flags) do return .NotOwned, 0
 		}
-		ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
-		if !owned do return .NotOwned, 0
-		owner := callerDomain.resources[ownerIdx]
-		if r.phys + r.size > owner.phys + owner.size do return .NotOwned, 0
-		if !region_flags_grantable(r.flags, owner.flags) do return .NotOwned, 0
-	}
-	if reserve_soa(&pd.resources, len(regions)) != nil do return .OutOfMemory, 0
+		if reserve_soa(&pd.resources, len(regions)) != nil do return .OutOfMemory, 0
 
-	for r in regions {
-		ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
-		assert(owned)
-		owner := callerDomain.resources[ownerIdx]
-		_, inserted := resource_insert(&pd.resources, resource_granted(owner, r))
-		assert(inserted)
-		memory_underlay_increment(owner.underlay)
-		pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
-		for offset := u64(0); offset < r.size; offset += pageBytes {
-			pmm.map_page(pd.pml4, r.phys + offset, r.logical + offset, r.pageSize, r.flags)
+		for r in regions {
+			ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
+			assert(owned)
+			owner := callerDomain.resources[ownerIdx]
+			granted := resource_granted(owner, r)
+			_, inserted := resource_insert(&pd.resources, granted)
+			assert(inserted)
+			memory_underlay_increment(owner.underlay)
+			resource_map(pd.pml4, granted)
 		}
 	}
+
+	pdIdx, publishErr := protdomain_publish(pd)
+	if publishErr != nil do return .OutOfMemory, 0
 	return .None, pdIdx
 }
 
 
-syscall_prot_domain_edit :: proc "contextless" (
+syscall_prot_domain_edit :: proc(
 	handle: int,
 	regionsPtr, count, opRaw: u64,
 ) -> (
 	err: syscalls.ProtDomainEditError,
 ) {
-	context = gKernelCtx
 	callerDomain := gs_read_cpustate().currentGrant.domain
 	assert(callerDomain != nil)
 
@@ -351,22 +296,12 @@ syscall_prot_domain_edit :: proc "contextless" (
 	}
 	op := syscalls.MemRegionOp(opRaw)
 
-	if count == 0 do return .InvalidRegionCount
-	regionBytes, overflowed := intrinsics.overflow_mul(count, size_of(syscalls.MemRegion))
-	if overflowed do return .InvalidRegionCount
-	regions, allocErr := make([]syscalls.MemRegion, int(count))
-	if allocErr != nil do return .OutOfMemory
-	defer delete(regions)
-	{
-		spinlock.rw_read_lock(&callerDomain.lock)
-		defer spinlock.rw_read_unlock(&callerDomain.lock)
-		if !user_range_accessible(callerDomain, regionsPtr, regionBytes, false) do return .InvalidRegionCount
-		mem.copy(raw_data(regions), rawptr(uintptr(regionsPtr)), int(regionBytes))
-	}
+	if count == 0 || count > syscalls.MAX_REGIONS_PER_CALL do return .InvalidRegionCount
+	regionsBuf: [syscalls.MAX_REGIONS_PER_CALL]syscalls.MemRegion
+	regions := regionsBuf[:count]
+	if !user_copy_in(callerDomain, regions, regionsPtr) do return .InvalidRegionCount
 
-	released, releasedErr := make([]^MemoryUnderlay, len(regions))
-	if releasedErr != nil do return .OutOfMemory
-	defer delete(released)
+	released: [syscalls.MAX_REGIONS_PER_CALL]^MemoryUnderlay
 	releasedCount := 0
 	target: ^ProtectionDomain
 	defer if releasedCount > 0 {
@@ -419,21 +354,16 @@ syscall_prot_domain_edit :: proc "contextless" (
 			ownerIdx, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			assert(found)
 			owner := callerDomain.resources[ownerIdx]
-			_, inserted := resource_insert(&target.resources, resource_granted(owner, r))
+			granted := resource_granted(owner, r)
+			_, inserted := resource_insert(&target.resources, granted)
 			assert(inserted)
 			memory_underlay_increment(owner.underlay)
-			pageBytes := syscalls.mmap_page_size_bytes(r.pageSize)
-			for offset := u64(0); offset < r.size; offset += pageBytes {
-				pmm.map_page(target.pml4, r.phys + offset, r.logical + offset, r.pageSize, r.flags)
-			}
+			resource_map(target.pml4, granted)
 
 		case .Delete:
 			removed, found := resource_remove(&target.resources, r.phys)
 			assert(found)
-			pageBytes := syscalls.mmap_page_size_bytes(removed.pageSize)
-			for offset := u64(0); offset < removed.size; offset += pageBytes {
-				domain_unmap_page(target, removed.logical + offset)
-			}
+			resource_unmap(target.pml4, removed)
 			released[releasedCount] = removed.underlay
 			releasedCount += 1
 		}
@@ -443,12 +373,11 @@ syscall_prot_domain_edit :: proc "contextless" (
 }
 
 
-syscall_prot_domain_destroy :: proc "contextless" (
+syscall_prot_domain_destroy :: proc(
 	handle: int,
 ) -> (
 	err: syscalls.ProtDomainDestroyError,
 ) {
-	context = gKernelCtx
 	caller := gs_read_cpustate().currentGrant.domain
 	assert(caller != nil)
 	if protdomain_destroy(handle, caller) != .None do return .InvalidHandle

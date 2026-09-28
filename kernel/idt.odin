@@ -154,9 +154,7 @@ interrupt_frame_from_user :: #force_inline proc "contextless" (frame: ^Interrupt
 @(export)
 exception_handler :: proc "c" (frame: ^InterruptFrame) {
 	userMode := interrupt_frame_from_user(frame)
-	if userMode {
-		kernel_switch_cr3()
-	}
+	if userMode && cpuMeltdownVulnerable do kernel_switch_cr3()
 
 	context = gKernelCtx
 	if frame.interruptNumber == VECTOR_APIC_TIMER {
@@ -170,15 +168,9 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		if userMode {
 			cpu := gs_read_cpustate()
 			if intrinsics.atomic_load(&cpu.currentGrant.weight) == 0 do grant_exit()
-			domain_switch_cr3(cpu.currentGrant.domain)
+			if cpuMeltdownVulnerable do domain_switch_cr3(cpu.currentGrant.domain)
 		}
 		return
-	}
-	if !userMode && user_access_faulted(frame) {
-		print.serial_write("domain fault: save area ")
-		print.serial_write(exceptionNames[frame.interruptNumber])
-		print.serial_writeln(", grant dropped")
-		grant_exit()
 	}
 	if userMode {
 		print.serial_write("domain fault: ")
@@ -288,11 +280,3 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 	lapic_send_eoi()
 }
 
-user_access_faulted :: proc "contextless" (frame: ^InterruptFrame) -> bool {
-	VECTOR_GENERAL_PROTECTION :: 13
-	VECTOR_PAGE_FAULT :: 14
-	if frame.interruptNumber != VECTOR_GENERAL_PROTECTION && frame.interruptNumber != VECTOR_PAGE_FAULT do return false
-	begin := u64(uintptr(rawptr(user_access_begin)))
-	end := u64(uintptr(rawptr(user_access_end)))
-	return frame.rip >= begin && frame.rip < end
-}

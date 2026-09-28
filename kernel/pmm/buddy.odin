@@ -1,4 +1,5 @@
 package pmm
+import "../../lib/shared"
 import "../print"
 PMM_BUDDY_MAX_ORDER :: 19 //1gb
 FreeBlock :: struct {
@@ -35,7 +36,6 @@ buddy_init :: proc() {
 
 	}
 }
-//max u64 is invalid
 @(private)
 buddy_alloc :: proc "contextless" (order: u8) -> u64 {
 	found := order
@@ -43,7 +43,7 @@ buddy_alloc :: proc "contextless" (order: u8) -> u64 {
 		if freeLists[found].next != &freeLists[found] do break
 		found += 1
 	}
-	if found >= u8(PMM_BUDDY_MAX_ORDER) do return max(u64)
+	if found >= u8(PMM_BUDDY_MAX_ORDER) do return 0
 
 	blk := freeLists[found].next
 
@@ -52,7 +52,7 @@ buddy_alloc :: proc "contextless" (order: u8) -> u64 {
 
 	list_remove(blk)
 
-	page := rawptr_to_page(blk)
+	page := ptr_to_phys(blk) / shared.PAGE_SIZE
 
 	for found > order {
 		found -= 1
@@ -62,12 +62,12 @@ buddy_alloc :: proc "contextless" (order: u8) -> u64 {
 	for i in u64(0) ..< (u64(1) << order) {
 		kset(&state, page + i)
 	}
-	return u64(uintptr(page_to_rawptr(page)))
+	return page * shared.PAGE_SIZE
 
 }
 @(private)
 buddy_free :: proc "contextless" (addr: u64, order: u8) {
-	page := rawptr_to_page(rawptr(uintptr(addr)))
+	page := addr / shared.PAGE_SIZE
 	print.kassert(page % (u64(1) << order) == 0, "buddy_free: block misaligned for order")
 	print.kassert(page + (u64(1) << order) <= state.totalPages, "buddy_free: block past end")
 	for i in u64(0) ..< (u64(1) << order) {

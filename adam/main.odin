@@ -34,10 +34,6 @@ adam_entry :: proc "c" (
 	pciesLen: u64,
 	saveArea: ^userschedule.UserSaveArea,
 ) -> ! {
-	context = runtime.default_context()
-	context.allocator = alloc.heap_allocator()
-	context.temp_allocator = alloc.heap_allocator()
-	context.assertion_failure_proc = adam_assertion_failure_handler
 
 	switch reason {
 	case .Start:
@@ -48,7 +44,12 @@ adam_entry :: proc "c" (
 	unreachable()
 }
 
-adam_start :: proc(pcies: []pci.Device) -> ! {
+adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
+	context = runtime.default_context()
+	context.allocator = alloc.heap_allocator()
+	context.temp_allocator = alloc.heap_allocator()
+	context.assertion_failure_proc = adam_assertion_failure_handler
+
 	for &device in pcies {
 		result, code := adam_dispatch_pci_device(&device)
 
@@ -139,7 +140,7 @@ test_worker_edit_kill :: proc(infos: []userschedule.CpuInfo, cpu: u32) {
 	assert(intrinsics.atomic_load(&infos[cpu].runnableWeight) == baseline)
 	assert_counter_frozen(counter)
 
-	assert(syscalls.syscall_mfree_userspace([]u64{u64(uintptr(base))}) == .None)
+	assert(syscalls.mem_free_userspace(u64(uintptr(base))) == .None)
 }
 
 test_domain_destroy_while_running :: proc(infos: []userschedule.CpuInfo, cpus: []u32) {
@@ -187,7 +188,8 @@ test_domain_destroy_while_running :: proc(infos: []userschedule.CpuInfo, cpus: [
 	for counter in counters do assert_counter_frozen(counter)
 	assert(syscalls.syscall_grant_edit_userspace(handle, cpus[0], weight) == .InvalidHandle)
 
-	assert(syscalls.syscall_mfree_userspace([]u64{code, areas}) == .None)
+	assert(syscalls.mem_free_userspace(code) == .None)
+	assert(syscalls.mem_free_userspace(areas) == .None)
 }
 
 test_firstpe :: proc(infos: []userschedule.CpuInfo, cpu: u32) {

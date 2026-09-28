@@ -11,18 +11,20 @@ KERNEL_BUILD :: #config(KERNEL_BUILD, false)
 // expose the same address/count interface; only the implementation differs.
 backend_alloc_pages :: proc(count: u64) -> u64 {
 	if count == 0 || count > max(u64) / u64(shared.PAGE_SIZE) {
-		return max(u64)
+		return 0
 	}
 
 	when KERNEL_BUILD {
-		return pmm.alloc_pages(count * u64(shared.PAGE_SIZE))
+		phys := pmm.alloc_pages(count * u64(shared.PAGE_SIZE))
+		if phys == 0 do return 0
+		return u64(uintptr(pmm.phys_to_ptr(phys)))
 	} else {
 		regions := [1]syscalls.MMapRegion {
 			{pageSize = lmem.PageSize._4KB, count = count, flags = {.Present, .Write}},
 		}
 		err, addr := syscalls.syscall_mmap_userspace(regions[:])
 		if err != .None || addr == nil {
-			return max(u64)
+			return 0
 		}
 		return u64(uintptr(addr))
 	}
@@ -34,8 +36,8 @@ backend_free_pages :: proc(addr, count: u64) {
 	}
 
 	when KERNEL_BUILD {
-		pmm.free_pages(addr, count * u64(shared.PAGE_SIZE))
+		pmm.free_pages(pmm.ptr_to_phys(rawptr(uintptr(addr))), count * u64(shared.PAGE_SIZE))
 	} else {
-		_ = syscalls.syscall_mfree_userspace([]u64{addr})
+		_ = syscalls.mem_free_userspace(addr)
 	}
 }

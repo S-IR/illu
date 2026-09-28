@@ -1,9 +1,8 @@
 package kernel
 import "../lib/lmem"
-import "../lib/shared"
 import "../lib/syscalls"
-import "core:mem"
 import "pmm"
+import "print"
 
 
 MemoryResourceFlag :: enum {
@@ -18,7 +17,6 @@ MemoryResource :: struct {
 	logical:       u64,
 	size:          u64,
 	flags:         lmem.PageFlags,
-	rules:         []syscalls.MediatedRule,
 	pageSize:      lmem.PageSize,
 	resourceFlags: MemoryResourceFlags,
 	underlay:      ^MemoryUnderlay,
@@ -54,14 +52,26 @@ resource_granted :: proc(owner: MemoryResource, r: syscalls.MemRegion) -> Memory
 }
 
 region_mappable :: proc "contextless" (pml4: u64, r: syscalls.MemRegion) -> bool {
-	for offset := u64(0); offset < r.size; offset += shared.PAGE_SIZE {
-		leaf := pmm.leaf_entry(pml4, r.logical + offset)
-		flags := transmute(lmem.PageFlags)leaf
-		if .Present not_in flags do continue
-		if .User in flags do return false
-		if leaf & pmm.ENTRY_ADDR_MASK != r.phys + offset do return false
+	pageBytes := lmem.page_bytes(r.pageSize)
+	for offset := u64(0); offset < r.size; offset += pageBytes {
+		if !pmm.slot_free(pml4, r.logical + offset, r.pageSize) do return false
 	}
 	return true
+}
+
+resource_map :: proc "contextless" (pml4: u64, r: MemoryResource) {
+	pageBytes := lmem.page_bytes(r.pageSize)
+	for offset := u64(0); offset < r.size; offset += pageBytes {
+		pmm.map_page(pml4, r.phys + offset, r.logical + offset, r.pageSize, r.flags)
+	}
+}
+
+resource_unmap :: proc "contextless" (pml4: u64, r: MemoryResource) {
+	pageBytes := lmem.page_bytes(r.pageSize)
+	for offset := u64(0); offset < r.size; offset += pageBytes {
+		unmapped := pmm.unmap_page(pml4, r.logical + offset, r.pageSize)
+		print.kassert(unmapped)
+	}
 }
 
 region_flags_grantable :: proc "contextless" (want, have: lmem.PageFlags) -> bool {

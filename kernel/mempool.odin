@@ -20,7 +20,6 @@ memoryUnderlaysLock: spinlock.Spinlock
 memory_underlay_create :: proc(phys, size: u64, backend: MemorySlotBackend) -> ^MemoryUnderlay {
 	obj, err := new(MemoryUnderlay)
 	print.kensure(err == nil, "memory_underlay_create: allocation failure")
-	if err != {} do return nil
 	obj^ = MemoryUnderlay {
 		phys    = phys,
 		size    = size,

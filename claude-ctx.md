@@ -1,11 +1,30 @@
 # claude session context (2026-09-27)
 
-## STOPPED HERE (end of 2026-09-27)
-we were in the middle of writing kernel/mediated.odin (user typing it by hand from the chat print: syscall_mediated_create with single write-lock scope, syscall_mediated_access, helpers, resource_release freeing rules when underlay dies).
-TOMORROW:
-1. finish kernel/mediated.odin + remaining stage 1 bits (user_range_accessible mediated check, create/edit apply via domain_map_resource, dispatch cases, syscall.odin soa leftovers, adam test_mediated). then build.
-2. underlay fixes: per-underlay lock / atomic refs instead of global memoryUnderlaysLock; memory_underlay_release returns freed bool; resource_release.
-3. sweep whole codebase for 4KB-only assumptions (mem_region_valid, mmap syscall.odin:205, domain_map_resource, region_mappable steps by PAGE_SIZE, unmap loops, adam.odin, pmm) - 2MB/1GB pages must work.
+## STOPPED HERE (end of 2026-09-28)
+workflow: user hand-types code printed in chat, one small step per reply, review each paste for drift.
+
+done 2026-09-28 (typed by user, uncommitted):
+- SortedRules :: distinct []MediatedRule on MemoryResource.rules + MemoryUnderlay.rules (underlay owns alloc, delete in memory_underlay_release).
+- syscall_mediated_create: one write lock, check rulesPtr then copy, sort copy, validate, owner/refs==1 check, set rules, domain_pml4_remap_mediated (4KB only, in-place PTE overwrite), kernel_pml4_map_mediated_mmio for .DeviceMMIO, tlb_wait after unlock on success.
+- helpers: rules_first_ending_after (slice.binary_search_by), mediated_overlap(flags set), mediated_covered, mediated_page_pml_flags (protdomain-resources.odin), domain_pml4_map_resource (used by prot_domain_create/edit Add -> fixes "Add maps raw" bug), mediated_op_valid (op must be fully covered by rules, volatile = 1/2/4/8 aligned).
+- user_range_accessible: plain proc, rejects any mediated byte.
+- kernelPML4Lock in pmm/paging.odin; kernel_pml4_unmap_mediated_mmio called from memory_underlay_release.
+- small leftovers to verify: region_covers_kernel still dead in protdomain-resources.odin:22; edit .Add unused pageBytes line (check removed).
+
+NEXT:
+1. fix BUG A below (mmio alias) before writing access body.
+2. syscall_mediated_access body: copy ops in (MEDIATED_MAX_OPS), validate all (failedIndex), total bytes <= MEDIATED_MAX_BYTES, copy write-bufs into kernel staging under domain cr3, switch to kernelPML4 for the actual access (needed: non-meltdown path runs on domain cr3 where MediateRead pages are unmapped and MediateWrite pages are RO+User -> supervisor write faults), volatile = single sized mov, ram = memcpy, switch back, copy read results out.
+3. dispatch already wired (syscall.odin:180). then adam test_mediated, build.
+4. then: per-underlay lock/atomics, 4KB-only sweep, stage 2 field rules...
+
+## BUGS (need real fixes, not "works on most hardware")
+BUG A (introduced by us): kernel_pml4_map_mediated_mmio overwrites the kernel identity PTE (WB when the MMIO page sits in a hole below totalPages) with UC + local invlpg only. other cpus may keep a stale WB tlb entry -> mediated_access there does cached MMIO. no kernel-mapping shootdown exists.
+  real fix: never touch identity entries. map MMIO rule pages at a kernel-only alias MMIO_ALIAS_BASE + phys in an otherwise unused PML4 slot of kernelPML4. alias entries are never present before map, and x86 never caches not-present translations (SDM vol3 4.10.2.3), so no flush needed on map. on unmap, stale alias entries still point to the same phys with UC; harmless (access validates live rules first; remap is identical). mediated_access uses alias addr for .DeviceMMIO, phys for RAM, under kernelPML4 cr3.
+BUG B (pre-existing): paging_init identity-maps every page in [1, totalPages) WB RW, including holes/MMIO below top of RAM. relying on UEFI types is not safe (user rejected: ACPI tables can live in ReservedMemoryType on real firmware; BARs may sit in Reserved descriptors).
+  real fix (no firmware trust): identity map only descriptors of real RAM types, AND make every non-RAM kernel access map its exact pages explicitly: acpi lib maps each table page read-only NX when it touches it (rsdp, xsdt/rsdt, each header then full length), ECAM already explicit (pci.odin:30), trampoline explicit, MMIO via BUG A alias. then nothing depends on the descriptor type of ACPI/MMIO memory. needs a check of every kernel phys deref before paging_init change: acpi, uefi params, framebuffer (unverified if used).
+BUG C (question, unverified intent): PAGE_RW used for the kernel identity map includes .User. check whether pml4_deep_copy(..., true) strips it for domains and whether kernelPML4 should have it at all.
+BUG D: kernel_pml4_unmap_mediated_mmio uses local invlpg only; fine only with BUG A alias design (stale alias = same phys, UC).
+
 resource_model_test.odin: user will delete it (api unstable, tests later).
 
 SINGLE ADDRESS SPACE OPERATING SYSTEM. user applies code by hand; claude prints steps in chat, never edits project files unless literally told.

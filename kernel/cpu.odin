@@ -1,31 +1,32 @@
 package kernel
 
 import ah "../asm_helpers"
-import "../lib/acpi"
 import "../lib/shared"
 import "../lib/spinlock"
 import "../lib/userschedule"
 import "base:intrinsics"
 import "base:runtime"
 import "core:mem"
+import "core:slice"
 import "pmm"
 import "print"
 
 KERNEL_STACK_PER_CPU_SIZE :: 16 * mem.Kilobyte
-KERNEL_STACK_STRIDE :: KERNEL_STACK_PER_CPU_SIZE + shared.PAGE_SIZE
 IST_STACK_SIZE :: 8 * mem.Kilobyte
-#assert(KERNEL_STACK_PER_CPU_SIZE % 16 == 0)
-#assert(IST_STACK_SIZE % 16 == 0)
+#assert(KERNEL_STACK_PER_CPU_SIZE % shared.PAGE_SIZE == 0)
+#assert(IST_STACK_SIZE % shared.PAGE_SIZE == 0)
 
 IA32_TSC_AUX :: u32(0xC0000103)
 IA32_GS_BASE :: u32(0xC0000101)
 IA32_KERNEL_GS_BASE :: u32(0xC0000102)
 X2APIC_MSR_APIC_ID :: u32(0x802)
 
-CpuState :: struct #align (16) {
+CpuState :: struct #align (64) {
 	self:             ^CpuState,
 	kernelStackTop:   u64,
 	userSyscallRsp:   u64,
+	userCr3:          u64,
+	syscallScratch:   u64,
 	lock:             spinlock.Spinlock,
 	currentGrant:     CpuGrant,
 	grants:           [dynamic]CpuGrant,
@@ -35,14 +36,16 @@ CpuState :: struct #align (16) {
 #assert(offset_of(CpuState, self) == 0)
 #assert(offset_of(CpuState, kernelStackTop) == 8)
 #assert(offset_of(CpuState, userSyscallRsp) == 16)
-#assert(align_of(CpuState) == 16)
+#assert(offset_of(CpuState, userCr3) == 24)
+#assert(offset_of(CpuState, syscallScratch) == 32)
+#assert(align_of(CpuState) == 64)
+#assert(size_of(CpuState) % 64 == 0)
 
 gKernelCtx: runtime.Context
 gdts: []GDT
 cpus: []CpuState
 CpuInfos: ^userschedule.CpuInfoPage
-kernelStacksBase: u64
-istStacksBase: u64
+cpuInfosPhys: u64
 apReady: u32
 
 FxArea :: struct #align (16) {
@@ -52,59 +55,49 @@ FxArea :: struct #align (16) {
 @(export, link_name = "kernel_clean_fx")
 cleanFx: FxArea
 
-cpus_init :: proc(rsdp: ^acpi.Rsdp) {
+cpus_init :: proc(apicIds: []u32) {
 	print.kensure(cpuid_has_rdtscp(), "cpus_init: rdtscp unsupported")
 	print.kensure(cpuid_has_fsgsbase(), "cpus_init: fsgsbase unsupported")
 	(^u16)(&cleanFx.bytes[0])^ = userschedule.FX_FCW_DEFAULT
 	(^u32)(&cleanFx.bytes[userschedule.FX_MXCSR_OFFSET])^ = userschedule.MXCSR_DEFAULT
 
 	bspId := u32(ah.rdmsr_asm(X2APIC_MSR_APIC_ID))
-	apIds := make([]u32, acpi.collect_ap_ids(rsdp, bspId, nil))
-	acpi.collect_ap_ids(rsdp, bspId, apIds)
-	cpuCount := len(apIds) + 1
+	bspIdx, bspFound := slice.linear_search(apicIds, bspId)
+	print.kensure(bspFound, "cpus_init: bsp apic id missing from firmware list")
+	slice.swap(apicIds, 0, bspIdx)
+	cpuCount := len(apicIds)
 
-	aErr: runtime.Allocator_Error
-	gdts, aErr = make([]GDT, cpuCount)
-	print.kensure(aErr == nil, "OOM cpus_init: gdts")
-	pmm.gdtRegionBase = u64(uintptr(raw_data(gdts)))
-	pmm.gdtRegionSize = u64(cpuCount) * size_of(GDT)
+	gdtsBytes := pmm.addr_round_up_to_page(u64(cpuCount) * size_of(GDT))
+	gdts = ([^]GDT)(uintptr(pmm.entry_region_alloc(gdtsBytes, guard = false)))[:cpuCount]
+	cpusBytes := pmm.addr_round_up_to_page(u64(cpuCount) * size_of(CpuState))
+	cpus = ([^]CpuState)(uintptr(pmm.entry_region_alloc(cpusBytes, guard = false)))[:cpuCount]
 
-	cpus, aErr = make([]CpuState, cpuCount)
-	print.kensure(aErr == nil, "OOM cpus_init: cpus")
-
-	CpuInfos = (^userschedule.CpuInfoPage)(uintptr(pmm.alloc_zeroed(cpu_infos_bytes(cpuCount))))
-	print.kensure(CpuInfos != nil, "cpus_init: cpu info alloc failed")
+	cpuInfosBytes := pmm.addr_round_up_to_page(cpu_infos_bytes(cpuCount))
+	cpuInfosPhys = pmm.alloc_zeroed(cpuInfosBytes)
+	print.kensure(cpuInfosPhys != 0, "cpus_init: cpu info alloc failed")
+	CpuInfos = (^userschedule.CpuInfoPage)(pmm.phys_to_ptr(cpuInfosPhys))
 	CpuInfos.cpuCount = u32(cpuCount)
 	print.kensure(tscTicksPerMs != 0, "cpus_init: lapic_init must calibrate the tsc first")
 	CpuInfos.tscTicksPerMs = tscTicksPerMs
 
-	istStacksBase = pmm.alloc_zeroed(u64(cpuCount) * IST_STACK_SIZE)
-	print.kensure(istStacksBase != 0, "cpus_init: ist stack allocation failed")
-	pmm.istStacksRegionBase = istStacksBase
-	pmm.istStacksRegionSize = u64(cpuCount) * IST_STACK_SIZE
-
-	kernelStacksBase = pmm.alloc_zeroed(u64(cpuCount) * KERNEL_STACK_STRIDE)
-	print.kensure(kernelStacksBase != 0, "cpus_init: kernel stack allocation failed")
-	pmm.kernelStacksRegionBase = kernelStacksBase
-	pmm.kernelStacksRegionStride = KERNEL_STACK_STRIDE
-	pmm.kernelStacksRegionCount = u64(cpuCount)
-
 	for &cpu, idx in cpus {
-		cpu_init(&cpu, idx == 0 ? bspId : apIds[idx - 1])
+		cpu_init(&cpu, apicIds[idx])
 	}
-	delete(apIds)
+
+	cr3NoFlushBit = PCID_NOFLUSH_BIT if cpuHasPCID else 0
+	kernelCr3Value = pmm.kernelPML4 | (u64(KERNEL_PCID) | cr3NoFlushBit if cpuHasPCID else 0)
 
 	cpu_setup(&cpus[0])
 	for &cpu in cpus[1:] {
 		install_trampoline(
-			rawptr(uintptr(pmm.trampolinePhys)),
+			rawptr(uintptr(pmm.TRAMPOLINE_PHYS)),
 			pmm.kernelPML4,
 			cpu.kernelStackTop,
 			u64(uintptr(rawptr(ap_init))),
 			u64(uintptr(&cpu)),
 		)
 		intrinsics.atomic_store(&apReady, 0)
-		send_init_sipi(cpu_info(&cpu).apicId, pmm.trampolinePhys)
+		send_init_sipi(cpu_info(&cpu).apicId, pmm.TRAMPOLINE_PHYS)
 		for intrinsics.atomic_load(&apReady) == 0 do intrinsics.cpu_relax()
 	}
 }
@@ -112,7 +105,7 @@ cpus_init :: proc(rsdp: ^acpi.Rsdp) {
 cpu_init :: proc(cpu: ^CpuState, apicId: u32) {
 	idx := cpu_index(cpu)
 	cpu.self = cpu
-	cpu.kernelStackTop = map_cpu_stack(kernelStacksBase + u64(idx) * KERNEL_STACK_STRIDE)
+	cpu.kernelStackTop = pmm.entry_region_alloc(KERNEL_STACK_PER_CPU_SIZE, guard = true) + KERNEL_STACK_PER_CPU_SIZE
 	cpu_info(cpu).apicId = apicId
 
 	aErr: runtime.Allocator_Error
@@ -122,7 +115,7 @@ cpu_init :: proc(cpu: ^CpuState, apicId: u32) {
 	gdt := &gdts[idx]
 	gdt_tss_fill(gdt)
 	gdt.tss.rsp[0] = cpu.kernelStackTop
-	gdt.tss.ist[0] = istStacksBase + u64(idx + 1) * IST_STACK_SIZE
+	gdt.tss.ist[0] = pmm.entry_region_alloc(IST_STACK_SIZE, guard = true) + IST_STACK_SIZE
 }
 
 cpu_setup :: proc(cpu: ^CpuState) {
@@ -130,6 +123,8 @@ cpu_setup :: proc(cpu: ^CpuState) {
 	gdt_tss_load(&gdts[cpu_index(cpu)])
 	cpuid_enable_pcid()
 	cpuid_enable_fsgsbase()
+	cpu_enable_kernel_protections()
+	cpu_enable_ssbd()
 	ah.gs_write_base(u64(uintptr(cpu)))
 	ah.wrmsr_asm(IA32_TSC_AUX, u64(cpu_index(cpu)))
 	cpu_syscall_init()
@@ -140,7 +135,6 @@ cpu_setup :: proc(cpu: ^CpuState) {
 }
 
 ap_init :: proc "c" (cpu: ^CpuState) -> ! {
-	ah.wrmsr_asm(IA32_FS_BASE, gBootTlsEnd)
 	context = gKernelCtx
 	cpu_setup(cpu)
 	intrinsics.atomic_store(&apReady, 1)
@@ -153,18 +147,6 @@ cpu_index :: proc "contextless" (cpu: ^CpuState) -> int {
 
 cpu_info :: proc "contextless" (cpu: ^CpuState) -> ^userschedule.CpuInfo {
 	return &userschedule.cpu_infos(CpuInfos)[cpu_index(cpu)]
-}
-
-map_cpu_stack :: proc(base: u64) -> u64 {
-	end := base + KERNEL_STACK_STRIDE
-
-	pmm.map_page(pmm.kernelPML4, base, base, ._4KB, {})
-	for p := base + shared.PAGE_SIZE; p < end; p += shared.PAGE_SIZE {
-		pmm.map_page(pmm.kernelPML4, p, p, ._4KB, {.NX, .Present, .Write})
-	}
-
-	assert(end % 16 == 0)
-	return end
 }
 
 idle_states_init :: proc(info: ^userschedule.CpuInfo) {
@@ -218,7 +200,7 @@ cpu_info_map :: proc(pml4: u64) {
 	for offset := u64(0); offset < bytes; offset += shared.PAGE_SIZE {
 		pmm.map_page(
 			pml4,
-			u64(uintptr(CpuInfos)) + offset,
+			cpuInfosPhys + offset,
 			userschedule.CPU_INFO_ADDR + offset,
 			._4KB,
 			{.Present, .User, .NX},
