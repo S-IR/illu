@@ -2,39 +2,39 @@ package fs
 
 
 import ah "../../asm_helpers"
-import "../../lib/nvme"
 import "../../lib/clock"
+import "../../lib/nvme"
 import "base:intrinsics"
 
 
-admin_run :: proc(n: ^Nvme, cmd: nvme.SQE) -> (dw0: u32, ok: bool) {
+admin_run :: proc(n: ^Nvme, cmd: nvme.Command) -> (result: u32, err: NvmeError) {
 	q := &n.admin
 	assert(q.depth >= 2)
 	assert(q.sqTail < q.depth && q.cqHead < q.depth)
 	assert(q.phase <= 1)
 
 	entry := cmd
-	entry.cdw0.cid = q.nextCid
+	entry.header.commandId = q.nextCid
 	q.nextCid += 1
 	q.sq[q.sqTail] = entry
 	q.sqTail = (q.sqTail + 1) % q.depth
 	ah.mmio_write_u32(doorbell(n.regs, n.cap, 0, false), q.sqTail)
 
 	deadline := clock.deadline_after_ms(ADMIN_TIMEOUT_MS)
-	for (transmute(nvme.CQE_DW3)intrinsics.volatile_load((^u32)(&q.cq[q.cqHead].dw3))).p !=
-	    q.phase {
-		if clock.expired(deadline) do return 0, false
+	for intrinsics.volatile_load(&q.cq[q.cqHead].status).phase != q.phase {
+		if clock.expired(deadline) do return 0, .AdminTimeout
 		intrinsics.cpu_relax()
 	}
-	cqe := q.cq[q.cqHead]
-	assert(cqe.dw3.cid == entry.cdw0.cid)
+	done := q.cq[q.cqHead]
+	assert(done.status.commandId == entry.header.commandId)
+
 	q.cqHead += 1
 	if q.cqHead == q.depth {
 		q.cqHead = 0
 		q.phase ~= 1
 	}
 	ah.mmio_write_u32(doorbell(n.regs, n.cap, 0, true), q.cqHead)
-	return cqe.dw0, nvme.cqe_ok(cqe)
+	return done.result, .None if nvme.completion_ok(done) else .AdminFailed
 }
 
 
@@ -48,12 +48,12 @@ ADMIN_COMMANDS :: enum u8 {
 }
 
 
-IDENTIFY_CNS :: enum u32 {
+IDENTIFY_CNS :: enum u8 {
 	NAMESPACE      = 0x00,
 	CONTROLLER     = 0x01,
 	ACTIVE_NS_LIST = 0x07,
 }
-SET_FEATURES_FID_NUM_QUEUES :: u32(0x07)
+SET_FEATURES_FID_NUM_QUEUES :: u8(0x07)
 ADMIN_TIMEOUT_MS :: u64(1000)
 NUM_QUEUES_REQUEST_MAX :: u32(0xFFFE)
 
@@ -106,8 +106,8 @@ ActiveNamespaceList :: struct #packed {
 
 
 AdminQueue :: struct {
-	sq:      [^]nvme.SQE,
-	cq:      [^]nvme.CQE,
+	sq:      [^]nvme.Command,
+	cq:      [^]nvme.Completion,
 	sqTail:  u32,
 	cqHead:  u32,
 	depth:   u32,

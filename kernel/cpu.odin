@@ -33,6 +33,7 @@ CpuState :: struct #align (64) {
 	floorVirtualTime: u64,
 	tlbAckGen:        u64,
 	pcidSeenGen:      []u64,
+	sliceArmed:       bool,
 }
 #assert(offset_of(CpuState, self) == 0)
 #assert(offset_of(CpuState, kernelStackTop) == 8)

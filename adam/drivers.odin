@@ -13,7 +13,7 @@ adam_dispatch_pci_device :: proc(device: ^pci.Device) -> (result: DriverResult, 
 	switch device.classCode {
 	case .MASS_STORAGE:
 		if device.subclass == .NVM && device.progIf == pci.PROG_IF_NVME {
-			if !fs.nvme_init(device) do return .Failed, 0
+			if fs.nvme_init(device) != nil do return .Failed, 0
 			return .Initialized, 0
 		}
 	case .NETWORK:

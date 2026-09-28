@@ -167,6 +167,7 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		if userMode {
 			cpu := gs_read_cpustate()
 			if intrinsics.atomic_load(&cpu.currentGrant.weight) == 0 do grant_exit()
+			grant_arm_slice_if_contended(cpu)
 			if cpuMeltdownVulnerable {
 				ah.write_cr3(domain_cr3(cpu, cpu.currentGrant.domain))
 			} else {

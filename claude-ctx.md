@@ -1,23 +1,23 @@
-# claude session context (2026-09-27)
+# claude session context
 
-## STOPPED HERE (end of 2026-09-28)
-workflow: user hand-types code printed in chat, one small step per reply, review each paste for drift.
+## STOPPED HERE (night of 2026-09-28)
+goal now: working fs in adam, SECURITY IGNORED (no mediated memory, adam has full nvme access). user wants to see the fs working first, then decide security needs.
+workflow: user hand-types code printed in chat, one small step per reply, review each paste. user sometimes says "you change it" -> then edit directly + `odin check adam -no-entry-point -target:freestanding_amd64_sysv -vet-shadowing`.
+user is new to nvme: explain with diagrams when asked (controller/queues/doorbells/phase already explained).
 
-done 2026-09-28 (typed by user, uncommitted):
-- SortedRules :: distinct []MediatedRule on MemoryResource.rules + MemoryUnderlay.rules (underlay owns alloc, delete in memory_underlay_release).
-- syscall_mediated_create: one write lock, check rulesPtr then copy, sort copy, validate, owner/refs==1 check, set rules, domain_pml4_remap_mediated (4KB only, in-place PTE overwrite), kernel_pml4_map_mediated_mmio for .DeviceMMIO, tlb_wait after unlock on success.
-- helpers: rules_first_ending_after (slice.binary_search_by), mediated_overlap(flags set), mediated_covered, mediated_page_pml_flags (protdomain-resources.odin), domain_pml4_map_resource (used by prot_domain_create/edit Add -> fixes "Add maps raw" bug), mediated_op_valid (op must be fully covered by rules, volatile = 1/2/4/8 aligned).
-- user_range_accessible: plain proc, rejects any mediated byte.
-- kernelPML4Lock in pmm/paging.odin; kernel_pml4_unmap_mediated_mmio called from memory_underlay_release.
-- small leftovers to verify: region_covers_kernel still dead in protdomain-resources.odin:22; edit .Add unused pageBytes line (check removed).
+done + booted in qemu (uncommitted):
+- lib/nvme/nvme.odin: spec names replaced. Command {header: CommandHeader{opcode, commandId}, namespaceId, dataAddr, dataAddr2, args: CommandArgs #raw_union {io, identify, createCq, createSq, deleteQueue, setFeatures}}, Completion {result, sqHead, sqId, status: CompletionStatus{commandId, phase, code, codeType}}, completion_ok, QueueFlags {Contiguous, InterruptsEnable}. NVM_* consts deleted.
+- lib/nvme/io.odin: Queue (using QueueInfo + sqTail/cqHead/inFlight/phase/nextCid), queue_init, queue_submit (release fence + doorbell), queue_poll (acquire fence, one completion), IoOpcode, IoError, queue_io_sync (1 block, polls with IO_TIMEOUT_MS, timeout leaves inFlight=1 => queue dead by assert).
+- adam/fs: NvmeError enum per failure reason + `Error :: union #shared_nil {NvmeError, nvme.IoError}`. nvme_init/nvme_selftest -> Error, admin_run/dma_pages/nvme_disable/nvme_queue_pair_create -> NvmeError.
+- nvme_selftest (ODIN_DEBUG only): new queue pair, write pattern to block 0, read back, compare. PASSES ("nvme: selftest ok").
+- polling only. interrupts (MSI-X) later, after fs works.
 
 NEXT:
-1. fix BUG A below (mmio alias) before writing access body.
-2. syscall_mediated_access body: copy ops in (MEDIATED_MAX_OPS), validate all (failedIndex), total bytes <= MEDIATED_MAX_BYTES, copy write-bufs into kernel staging under domain cr3, switch to kernelPML4 for the actual access (needed: non-meltdown path runs on domain cr3 where MediateRead pages are unmapped and MediateWrite pages are RO+User -> supervisor write faults), volatile = single sized mov, ram = memcpy, switch back, copy read results out.
-3. dispatch already wired (syscall.odin:180). then adam test_mediated, build.
-4. then: per-underlay lock/atomics, 4KB-only sweep, stage 2 field rules...
+1. IFS on-disk layout from fs-design.md: header block (MAGIC_IFS + root ptr), file header [len, fileType], dir entries [name, ptr] + MAGIC_FOR_FOLDER_LINKED_LIST chain. print step by step.
+2. IFS format/mount/read/write over queue_io_sync, test from adam.
+3. later: log sink (drivers.odin drops the Error to `.Failed, 0`), batching (queue_io_sync is 1 block sync), interrupts, then security design.
 
-## BUGS (need real fixes, not "works on most hardware")
+## BUGS (old; user said most are fixed since, ignore unless re-verified)
 BUG A (introduced by us): kernel_pml4_map_mediated_mmio overwrites the kernel identity PTE (WB when the MMIO page sits in a hole below totalPages) with UC + local invlpg only. other cpus may keep a stale WB tlb entry -> mediated_access there does cached MMIO. no kernel-mapping shootdown exists.
   real fix: never touch identity entries. map MMIO rule pages at a kernel-only alias MMIO_ALIAS_BASE + phys in an otherwise unused PML4 slot of kernelPML4. alias entries are never present before map, and x86 never caches not-present translations (SDM vol3 4.10.2.3), so no flush needed on map. on unmap, stale alias entries still point to the same phys with UC; harmless (access validates live rules first; remap is identical). mediated_access uses alias addr for .DeviceMMIO, phys for RAM, under kernelPML4 cr3.
 BUG B (pre-existing): paging_init identity-maps every page in [1, totalPages) WB RW, including holes/MMIO below top of RAM. relying on UEFI types is not safe (user rejected: ACPI tables can live in ReservedMemoryType on real firmware; BARs may sit in Reserved descriptors).

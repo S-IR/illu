@@ -68,8 +68,31 @@ grant_charge :: proc "contextless" (weight: u64) -> u64 {
 }
 
 cpu_kick :: proc "contextless" (cpu: ^CpuState) {
-	if cpu == gs_read_cpustate() do return
-	send_ipi(cpu_info(cpu).apicId, VECTOR_APIC_IPI)
+	if cpu != gs_read_cpustate() {
+		send_ipi(cpu_info(cpu).apicId, VECTOR_APIC_IPI)
+		return
+	}
+	if cpu.currentGrant.domain != nil && !cpu.sliceArmed do grant_arm_slice(cpu)
+}
+
+grant_arm_slice :: proc "contextless" (cpu: ^CpuState) {
+	lapic_set_deadline(tscTicksPerMs * GRANT_SLICE_MS)
+	cpu.sliceArmed = true
+}
+
+grant_waiting_locked :: proc "contextless" (cpu: ^CpuState) -> bool {
+	for grant in cpu.grants {
+		if !grant.sleepState.asleep do return true
+	}
+	return false
+}
+
+grant_arm_slice_if_contended :: proc "contextless" (cpu: ^CpuState) {
+	if cpu.sliceArmed || cpu.currentGrant.domain == nil do return
+	spinlock.lock(&cpu.lock)
+	waiting := grant_waiting_locked(cpu)
+	spinlock.unlock(&cpu.lock)
+	if waiting do grant_arm_slice(cpu)
 }
 
 grant_enqueue :: proc(cpu: ^CpuState, grant: CpuGrant) -> mem.Allocator_Error {
@@ -274,15 +297,22 @@ grant_loop :: proc "c" () -> ! {
 			ordered_remove(&cpu.grants, idx)
 			cpu.floorVirtualTime = grant.virtualTime
 			cpu.currentGrant = grant
+			contended := grant_waiting_locked(cpu)
 			spinlock.unlock(&cpu.lock)
 			intrinsics.atomic_thread_fence(.Seq_Cst)
 
-			lapic_set_deadline(tscTicksPerMs * GRANT_SLICE_MS)
+			if contended {
+				grant_arm_slice(cpu)
+			} else {
+				lapic_disable_deadline()
+				cpu.sliceArmed = false
+			}
 			run_resume(domain_cr3(cpu, grant.domain), grant.entry, grant.saveArea)
 		}
 		spinlock.unlock(&cpu.lock)
 
 		lapic_disable_deadline()
+		cpu.sliceArmed = false
 		if info.idleCount == 0 {
 			cpu_halt()
 		} else {
