@@ -36,6 +36,7 @@ when !ODIN_TEST {
 		write_cr4 :: proc(val: u64) ---
 
 		invlpg_asm :: proc(addr: u64) ---
+		zero_nontemporal :: proc(dst: rawptr, bytes: u64) ---
 		verw_mitigate_asm :: proc() ---
 
 		wrmsr_asm :: proc(msr: u32, value: u64) ---
@@ -94,6 +95,10 @@ when !ODIN_TEST {
 	write_cr4 :: proc "contextless" (val: u64) {}
 
 	invlpg_asm :: proc "contextless" (addr: u64) {}
+	zero_nontemporal :: proc "contextless" (dst: rawptr, bytes: u64) {
+		d := ([^]u8)(dst)
+		for i in 0 ..< bytes do d[i] = 0
+	}
 	verw_mitigate_asm :: proc "contextless" () {}
 
 	wrmsr_asm :: proc "contextless" (msr: u32, value: u64) {}

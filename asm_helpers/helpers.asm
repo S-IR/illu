@@ -402,6 +402,24 @@ invlpg_asm:
     invlpg (%rdi)
     ret
 
+.global zero_nontemporal
+zero_nontemporal:
+    xor %eax, %eax
+1:
+    movnti %rax, (%rdi)
+    movnti %rax, 8(%rdi)
+    movnti %rax, 16(%rdi)
+    movnti %rax, 24(%rdi)
+    movnti %rax, 32(%rdi)
+    movnti %rax, 40(%rdi)
+    movnti %rax, 48(%rdi)
+    movnti %rax, 56(%rdi)
+    add $64, %rdi
+    sub $64, %rsi
+    jnz 1b
+    sfence
+    ret
+
 .global verw_mitigate_asm
 verw_mitigate_asm:
     sub $8, %rsp
