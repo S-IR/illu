@@ -54,7 +54,7 @@ CPU_INFO_ADDR :: u64(0x7FF0_0000_0000)
 MAX_IDLE_STATES :: 7
 
 CpuInfo :: struct #align (64) {
-	runnableWeight: u64,
+	grantedWeight: u64,
 	apicId:         u32,
 	mwaitHints:     [MAX_IDLE_STATES]u32,
 	idleCount:      u8,

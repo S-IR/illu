@@ -34,6 +34,8 @@ syscall_grant_spawn:
 
 SYSCALL_STUB  syscall_grant_edit, 5
 
+SYSCALL_STUB  syscall_wait_on, 6
+
 .global cpu_current_index
 cpu_current_index:
     rdtscp

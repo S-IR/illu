@@ -737,6 +737,12 @@ syscall_entry:
 
     push %rcx
     push %r11
+    push %rbx
+    push %rbp
+    push %r12
+    push %r13
+    push %r14
+    push %r15
     sub $8, %rsp
     push %r9
 
@@ -747,7 +753,7 @@ syscall_entry:
     mov %rdi, %rsi
     mov %rax, %rdi
     call syscall_dispatch
-    add $16, %rsp
+    add $64, %rsp
 
     testb $1, kernel_cpu_needs_verw(%rip)
     jz 1f
@@ -779,6 +785,12 @@ syscall_entry_meltdown_safe:
 
     push %rcx
     push %r11
+    push %rbx
+    push %rbp
+    push %r12
+    push %r13
+    push %r14
+    push %r15
     sub $8, %rsp
     push %r9
 
@@ -789,7 +801,7 @@ syscall_entry_meltdown_safe:
     mov %rdi, %rsi
     mov %rax, %rdi
     call syscall_dispatch
-    add $16, %rsp
+    add $64, %rsp
 
     testb $1, kernel_cpu_needs_verw(%rip)
     jz 1f
@@ -898,19 +910,25 @@ user_save_area_store:
     or %rdx, %rax
     mov %rax, SA_GSBASE(%r8)
     fxrstor (%r9)
-    mov SA_XSAVE_MASK(%r8), %rax
+    mov %r8, %rdi
+    call save_area_xsave
+    orq $SA_CONTROL_RESTORING, SA_CONTROL(%rdi)
+1:
+    ret
+
+.global save_area_xsave
+save_area_xsave:
+    # rdi = save area, preserved
+    mov SA_XSAVE_MASK(%rdi), %rax
     and kernel_xsave_mask(%rip), %rax
     mov %rax, %rdx
     shr $32, %rdx
     testb $1, kernel_has_xsavec(%rip)
-    jz 2f
-    xsavec SA_XSAVE(%r8)
-    jmp 3f
-2:
-    xsave SA_XSAVE(%r8)
-3:
-    orq $SA_CONTROL_RESTORING, SA_CONTROL(%r8)
+    jz 1f
+    xsavec SA_XSAVE(%rdi)
+    ret
 1:
+    xsave SA_XSAVE(%rdi)
     ret
 
 

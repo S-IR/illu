@@ -119,6 +119,9 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 	case .GrantEdit:
 		return u64(syscall_grant_edit(transmute(int)a1, a2, a3)), 0
 
+	case .WaitOn:
+		return u64(syscall_wait_on(a1, a2, a3)), 0
+
 	case .DebugPrint:
 		domain := cpu.currentGrant.domain
 		spinlock.rw_read_lock(&domain.lock)

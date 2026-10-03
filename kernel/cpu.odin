@@ -30,6 +30,7 @@ CpuState :: struct #align (64) {
 	lock:             spinlock.Spinlock,
 	currentGrant:     CpuGrant,
 	grants:           [dynamic]CpuGrant,
+	sleepers:         [dynamic]SleepingGrant,
 	floorVirtualTime: u64,
 	tlbAckGen:        u64,
 	pcidSeenGen:      []u64,
@@ -111,6 +112,8 @@ cpu_init :: proc(cpu: ^CpuState, apicId: u32) {
 	aErr: runtime.Allocator_Error
 	cpu.grants, aErr = make([dynamic]CpuGrant, 0, CPU_GRANT_STARTING_CAPACITY)
 	print.kensure(aErr == nil, "OOM cpu_init: grants")
+	cpu.sleepers, aErr = make([dynamic]SleepingGrant, 0, CPU_GRANT_STARTING_CAPACITY)
+	print.kensure(aErr == nil, "OOM cpu_init: sleepers")
 	if cpuHasPCID {
 		cpu.pcidSeenGen, aErr = make([]u64, PCID_MAX)
 		print.kensure(aErr == nil, "OOM cpu_init: pcid generations")

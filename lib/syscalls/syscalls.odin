@@ -30,6 +30,7 @@ Syscall :: enum u64 {
 	ProtDomainDestroy,
 	GrantSpawn,
 	GrantEdit,
+	WaitOn,
 	DebugPrint = ILLU_SYSCALL_BIT + 1000,
 }
 
@@ -86,6 +87,12 @@ ProtDomainDestroyError :: enum u64 {
 	None,
 	InvalidHandle,
 }
+WaitOnError :: enum u64 {
+	None,
+	TimedOut,
+	InvalidAddress,
+	InvalidSaveArea,
+}
 KERNEL_BUILD :: #config(KERNEL_BUILD, false)
 
 when !ODIN_TEST {
@@ -98,6 +105,7 @@ when !ODIN_TEST {
 			syscall_prot_domain_destroy :: proc(handle: int) -> (err: u64) ---
 			syscall_grant_spawn :: proc(handle: int, cpu: u64, saveArea: u64, weight: u64, entry: u64) -> (err: u64) ---
 			syscall_grant_edit :: proc(handle: int, cpu: u64, weight: u64) -> (err: u64) ---
+			syscall_wait_on :: proc(addr, oldValue, deadline: u64) -> (err: u64) ---
 			cpu_current_index :: proc() -> u32 ---
 			user_resume :: proc() ---
 		}
@@ -120,6 +128,11 @@ when !ODIN_TEST {
 			weight: u64,
 		) -> GrantError {
 			return GrantError(syscall_grant_edit(handle, u64(cpu), weight))
+		}
+
+		syscall_wait_on_userspace :: proc "contextless" (addr: ^u64, oldValue, deadline: u64) -> WaitOnError {
+			assert_contextless(uintptr(addr) % 8 == 0)
+			return WaitOnError(syscall_wait_on(u64(uintptr(addr)), oldValue, deadline))
 		}
 
 		grant_exit :: proc "contextless" () -> ! {
@@ -193,6 +206,10 @@ when !ODIN_TEST {
 			return ProtDomainDestroyError(syscall_prot_domain_destroy(handle))
 		}
 
+	}
+} else {
+	syscall_wait_on_userspace :: proc "contextless" (addr: ^u64, oldValue, deadline: u64) -> WaitOnError {
+		return .None
 	}
 }
 

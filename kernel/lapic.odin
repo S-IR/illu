@@ -127,6 +127,11 @@ lapic_set_deadline :: #force_inline proc "contextless" (tsc_ticks: u64) {
 	ah.wrmsr_asm(IA32_TSC_DEADLINE_MSR, ah.rdtsc_asm() + tsc_ticks)
 }
 
+lapic_set_deadline_at :: #force_inline proc "contextless" (tsc: u64) {
+	IA32_TSC_DEADLINE_MSR :: u32(0x6E0)
+	ah.wrmsr_asm(IA32_TSC_DEADLINE_MSR, tsc)
+}
+
 lapic_disable_deadline :: #force_inline proc "contextless" () {
 	IA32_TSC_DEADLINE_MSR :: u32(0x6E0)
 	ah.wrmsr_asm(IA32_TSC_DEADLINE_MSR, 0)

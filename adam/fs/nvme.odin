@@ -29,6 +29,7 @@ NvmeError :: enum u8 {
 	NoIoQueues,
 	IoQueuesExhausted,
 	SelftestMismatch,
+	CouldNotAppendDevice,
 }
 
 Error :: union #shared_nil {
@@ -182,7 +183,7 @@ nvme_init :: proc(device: ^pci.Device) -> (err: Error) {
 		syscalls.syscall_debug_print_userspace("nvme: selftest ok", 0)
 	}
 
-	append(&disks, Disk{driver = n, blockSize = n.lbaSize, blockCount = blockCount})
+	if !disk_add(n, n.lbaSize, blockCount) do return .CouldNotAppendDevice
 	return nil
 }
 
