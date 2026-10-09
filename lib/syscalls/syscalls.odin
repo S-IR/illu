@@ -145,7 +145,7 @@ when !ODIN_TEST {
 			syscall_debug_print :: proc(labelPtr: rawptr, labelLen: u64, value: u64) ---
 		}
 
-		syscall_debug_print_userspace :: proc "contextless" (label: string, value: u64) {
+		syscall_debug_print_userspace :: proc "contextless" (label: string, value: u64 = 0) {
 			syscall_debug_print(raw_data(label), u64(len(label)), value)
 		}
 

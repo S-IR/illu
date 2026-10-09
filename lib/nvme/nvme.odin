@@ -1,6 +1,5 @@
 package nvme
 
-
 CommandHeader :: bit_field u32 {
 	opcode:    u8  | 8,
 	_:         u8  | 8,
@@ -85,12 +84,13 @@ completion_ok :: proc(c: Completion) -> bool {
 	return c.status.code == 0 && c.status.codeType == 0
 }
 QueueInfo :: struct {
-	sq:         [^]Command,
-	cq:         [^]Completion,
-	sqDoorbell: ^u32,
-	cqDoorbell: ^u32,
-	depth:      u32,
-	qid:        u16,
-	nsid:       u32,
-	lbaSize:    u32,
+	sq:          [^]Command,
+	cq:          [^]Completion,
+	maxTransfer: u64,
+	sqDoorbell:  ^u32,
+	cqDoorbell:  ^u32,
+	depth:       u32,
+	qid:         u16,
+	nsid:        u32,
+	lbaSize:     u32,
 }

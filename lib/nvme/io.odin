@@ -1,8 +1,7 @@
 package nvme
-
 import "../clock"
+import "../shared"
 import "../syscalls"
-import "../userschedule"
 import "base:intrinsics"
 
 QUEUE_DEPTH_MAX :: u32(64)
@@ -24,11 +23,12 @@ Pending :: struct {
 	queue: ^Queue,
 	cid:   u16,
 }
-IoError :: enum {
+Error :: enum {
 	None,
+	InvalidAPIUsage,
 	QueueFull,
 	Timeout,
-	DeviceFailed,
+	Failed,
 }
 
 IoOpcode :: enum u8 {
@@ -45,6 +45,10 @@ queue_init :: proc(info: QueueInfo) -> Queue {
 	assert(info.nsid != 0)
 	assert(info.lbaSize >= 512 && info.lbaSize <= 4096)
 	assert(info.lbaSize & (info.lbaSize - 1) == 0)
+
+	assert(info.maxTransfer >= u64(info.lbaSize))
+	assert(info.maxTransfer % shared.PAGE_SIZE == 0)
+
 	return Queue{info = info, phase = 1}
 }
 @(private)
@@ -55,7 +59,7 @@ free_cid :: proc(q: ^Queue) -> (cid: u16, found: bool) {
 	}
 	return 0, false
 }
-queue_submit :: proc(q: ^Queue, cmd: Command) -> (pending: Pending, err: IoError) {
+queue_submit :: proc(q: ^Queue, cmd: Command) -> (pending: Pending, err: Error) {
 	assert(q.sqTail < q.depth)
 	assert(q.inFlight < q.depth)
 	if q.inFlight == q.depth - 1 do return {}, .QueueFull
@@ -99,7 +103,7 @@ queue_poll :: proc(q: ^Queue) -> (ok: bool) {
 	return true
 
 }
-wait :: proc(p: Pending, timeout := IO_DEFAULT_TIMEOUT_MS) -> IoError {
+wait :: proc(p: Pending, timeout := IO_DEFAULT_TIMEOUT_MS) -> Error {
 	q := p.queue
 	assert(q != nil)
 	assert(u32(p.cid) < q.depth)
@@ -121,31 +125,125 @@ wait :: proc(p: Pending, timeout := IO_DEFAULT_TIMEOUT_MS) -> IoError {
 	}
 	state := q.states[p.cid]
 	q.states[p.cid] = .Free
-	return .None if state == .Done else .DeviceFailed
+	return .None if state == .Done else .Failed
 
 }
 
-queue_io :: proc(q: ^Queue, opcode: IoOpcode, startBlock: u64, block: []u8) -> (Pending, IoError) {
-	assert(opcode == .Read || opcode == .Write)
-	assert(len(block) == int(q.lbaSize))
-	assert(uintptr(raw_data(block)) % uintptr(q.lbaSize) == 0)
-	return queue_submit(
-		q,
-		{
-			header = {opcode = u8(opcode)},
-			namespaceId = q.nsid,
-			dataAddr = u64(uintptr(raw_data(block))),
-			args = {io = {startBlock = startBlock}},
+queue_io :: proc(
+	q: ^Queue,
+	opcode: IoOpcode,
+	startBlock: u64,
+	bufs: [][]u8,
+	prpList: []u64,
+) -> (
+	Pending,
+	Error,
+) {
+	opOk := opcode == .Read || opcode == .Write
+	if !shared.api_check(opOk) do return {}, .InvalidAPIUsage
+
+	if !shared.api_check(len(bufs) > 0) do return {}, .InvalidAPIUsage
+	total: u64
+	for buf, i in bufs {
+		start := uintptr(raw_data(buf))
+		end := start + uintptr(len(buf))
+		align := uintptr(4 if i == 0 else shared.PAGE_SIZE)
+		endOk := i == len(bufs) - 1 || end % shared.PAGE_SIZE == 0
+		if !shared.api_check(len(buf) > 0) do return {}, .InvalidAPIUsage
+		if !shared.api_check(start % align == 0) do return {}, .InvalidAPIUsage
+		if !shared.api_check(endOk) do return {}, .InvalidAPIUsage
+		total += u64(len(buf))
+	}
+	blocksOk := total % u64(q.lbaSize) == 0
+	listOk := len(prpList) == prp_list_len(bufs)
+	listAddr := uintptr(raw_data(prpList))
+	if !shared.api_check(blocksOk) do return {}, .InvalidAPIUsage
+	if !shared.api_check(total <= q.maxTransfer) do return {}, .InvalidAPIUsage
+	if !shared.api_check(listOk) do return {}, .InvalidAPIUsage
+	if !shared.api_check(listAddr % shared.PAGE_SIZE == 0) do return {}, .InvalidAPIUsage
+
+	cmd := Command {
+		header = {opcode = u8(opcode)},
+		namespaceId = q.nsid,
+		args = {
+			io = {startBlock = startBlock, blockCountMinus1 = u16(total / u64(q.lbaSize) - 1)},
 		},
-	)
-}
-queue_io_sync :: proc(q: ^Queue, opcode: IoOpcode, startBlock: u64, block: []u8) -> IoError {
-	pending := queue_io(q, opcode, startBlock, block) or_return
-	return wait(pending)
+	}
+	prp_fill(&cmd, bufs, prpList)
+	return queue_submit(q, cmd)
 
 }
+queue_flush :: proc(q: ^Queue) -> (Pending, Error) {
+	cmd := Command {
+		header = {opcode = u8(IoOpcode.Flush)},
+		namespaceId = q.nsid,
+	}
+	return queue_submit(q, cmd)
+}
+
+
 @(private)
 completion_word :: proc(q: ^Queue) -> ^u64 {
 	#assert(offset_of(Completion, sqHead) == 8)
 	return (^u64)(uintptr(&q.cq[q.cqHead]) + offset_of(Completion, sqHead))
+}
+
+PRP_ENTRIES_PER_PAGE :: shared.PAGE_SIZE / size_of(u64)
+
+@(private)
+prp_page_count :: proc(bufs: [][]u8) -> (pages: int) {
+	for buf in bufs {
+		start := uintptr(raw_data(buf))
+		end := start + uintptr(len(buf))
+		firstPage := start &~ (shared.PAGE_SIZE - 1)
+		endPage := (end + shared.PAGE_SIZE - 1) &~ (shared.PAGE_SIZE - 1)
+		pages += int((endPage - firstPage) / shared.PAGE_SIZE)
+	}
+	return pages
+}
+
+prp_list_len :: proc(bufs: [][]byte) -> int {
+	pages := prp_page_count(bufs)
+	if pages <= 2 do return 0
+	entries := pages - 1
+	chains := (entries - 2) / (PRP_ENTRIES_PER_PAGE - 1)
+	return entries + chains
+}
+
+@(private)
+prp_fill :: proc(cmd: ^Command, bufs: [][]byte, prpList: []u64) {
+	assert(len(bufs) > 0)
+	assert(uintptr(raw_data(prpList)) % shared.PAGE_SIZE == 0)
+	assert(len(prpList) == prp_list_len(bufs))
+	cmd.dataAddr = u64(uintptr(raw_data(bufs[0])))
+	pageIdx, listIdx := 0, 0
+	for buf, i in bufs {
+		start := uintptr(raw_data(buf))
+		end := start + uintptr(len(buf))
+		assert(len(buf) > 0)
+		assert(start % 4 == 0 if i == 0 else start % shared.PAGE_SIZE == 0)
+		if i < len(bufs) - 1 do assert(end % shared.PAGE_SIZE == 0)
+
+		for page := start &~ (shared.PAGE_SIZE - 1); page < end; page += shared.PAGE_SIZE {
+			switch {
+			case pageIdx == 0:
+			case len(prpList) == 0:
+				cmd.dataAddr2 = u64(page)
+			case:
+				lastSlot := PRP_ENTRIES_PER_PAGE - 1
+				isLastSlotOfPage := listIdx % PRP_ENTRIES_PER_PAGE == lastSlot
+				if isLastSlotOfPage && listIdx < len(prpList) - 1 {
+					prpList[listIdx] = u64(uintptr(&prpList[listIdx + 1]))
+					listIdx += 1
+				}
+				prpList[listIdx] = u64(page)
+				listIdx += 1
+
+			}
+			pageIdx += 1
+
+		}
+	}
+	if len(prpList) > 0 do cmd.dataAddr2 = u64(uintptr(raw_data(prpList)))
+	assert(listIdx == len(prpList))
 }

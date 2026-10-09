@@ -31,9 +31,6 @@ At least 32 TX/RX descriptors per ring.
 Graphics
 Boot/fallback: UEFI GOP framebuffer – linear framebuffer, typically BGRA 32-bit, resolution at least 1024x768.
 
-IOMMU
-VT-d or AMD-Vi assumed (default path). each device in its own iommu group. no SR-IOV, no PASID.
-non-iommu path must stay possible: ram targets with live loans return .Busy like disk targets.
 
 FS REQS
 

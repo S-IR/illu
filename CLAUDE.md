@@ -13,6 +13,7 @@ BE WAY WAY WAY LESS VERBOSE
 
 - simple code
 - remove dead code
+- use pure fns unless you can't. libs hold no globals; fns return results instead of editing global state. global state lives only in the program that owns it (e.g. adam)
 - always write code while thinking "what could go wrong?". what values can the states be. what assumptions do I have that are not explicit?
 - assert and ensure any invalid program state that's not an error to be returned. as many asserts as you can
 - use odin lang's syntax features. use odin lang's core packages

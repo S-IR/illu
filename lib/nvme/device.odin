@@ -1,40 +1,19 @@
-package fs
-
-
+package nvme
 import ah "../../asm_helpers"
-import "../../lib/clock"
-import "../../lib/nvme"
+import "../clock"
 import "base:intrinsics"
-
-
-admin_run :: proc(n: ^Nvme, cmd: nvme.Command) -> (result: u32, err: NvmeError) {
-	q := &n.admin
-	assert(q.depth >= 2)
-	assert(q.sqTail < q.depth && q.cqHead < q.depth)
-	assert(q.phase <= 1)
-
-	entry := cmd
-	entry.header.commandId = q.nextCid
-	q.nextCid += 1
-	q.sq[q.sqTail] = entry
-	q.sqTail = (q.sqTail + 1) % q.depth
-	ah.mmio_write_u32(doorbell(n.regs, n.cap, 0, false), q.sqTail)
-
-	deadline := clock.deadline_after_ms(ADMIN_TIMEOUT_MS)
-	for intrinsics.volatile_load(&q.cq[q.cqHead].status).phase != q.phase {
-		if clock.expired(deadline) do return 0, .AdminTimeout
-		intrinsics.cpu_relax()
-	}
-	done := q.cq[q.cqHead]
-	assert(done.status.commandId == entry.header.commandId)
-
-	q.cqHead += 1
-	if q.cqHead == q.depth {
-		q.cqHead = 0
-		q.phase ~= 1
-	}
-	ah.mmio_write_u32(doorbell(n.regs, n.cap, 0, true), q.cqHead)
-	return done.result, .None if nvme.completion_ok(done) else .AdminFailed
+Device :: struct {
+	regs:        Controller,
+	cap:         CAP,
+	admin:       AdminQueue,
+	nsid:        u32,
+	lbaSize:     u32,
+	queueDepth:  u32,
+	queueCount:  u32,
+	nextQid:     u32,
+	maxTransfer: u64,
+	serial:      [20]u8,
+	model:       [40]u8,
 }
 
 
@@ -71,7 +50,9 @@ IdentifyController :: struct #packed {
 	ssvid:  u16,
 	sn:     [20]u8,
 	mn:     [40]u8,
-	_:      [448]u8,
+	_:      [13]u8,
+	mdts:   u8,
+	_:      [434]u8,
 	sqes:   u8,
 	cqes:   u8,
 	maxcmd: u16,
@@ -82,7 +63,7 @@ IdentifyController :: struct #packed {
 #assert(offset_of(IdentifyController, mn) == 24)
 #assert(offset_of(IdentifyController, sqes) == 512)
 #assert(offset_of(IdentifyController, nn) == 516)
-
+#assert(offset_of(IdentifyController, mdts) == 77)
 
 IdentifyNamespace :: struct #packed {
 	nsze:   u64,
@@ -106,11 +87,42 @@ ActiveNamespaceList :: struct #packed {
 
 
 AdminQueue :: struct {
-	sq:      [^]nvme.Command,
-	cq:      [^]nvme.Completion,
+	sq:      [^]Command,
+	cq:      [^]Completion,
 	sqTail:  u32,
 	cqHead:  u32,
 	depth:   u32,
 	phase:   u8,
 	nextCid: u16,
+}
+
+
+admin_execute_command :: proc(n: ^Device, cmd: Command) -> (result: u32, err: Error) {
+	q := &n.admin
+	assert(q.depth >= 2)
+	assert(q.sqTail < q.depth && q.cqHead < q.depth)
+	assert(q.phase <= 1)
+
+	entry := cmd
+	entry.header.commandId = q.nextCid
+	q.nextCid += 1
+	q.sq[q.sqTail] = entry
+	q.sqTail = (q.sqTail + 1) % q.depth
+	ah.mmio_write_u32(doorbell(n.regs, n.cap, 0, false), q.sqTail)
+
+	deadline := clock.deadline_after_ms(ADMIN_TIMEOUT_MS)
+	for intrinsics.volatile_load(&q.cq[q.cqHead].status).phase != q.phase {
+		if clock.expired(deadline) do return 0, .Timeout
+		intrinsics.cpu_relax()
+	}
+	done := q.cq[q.cqHead]
+	assert(done.status.commandId == entry.header.commandId)
+
+	q.cqHead += 1
+	if q.cqHead == q.depth {
+		q.cqHead = 0
+		q.phase ~= 1
+	}
+	ah.mmio_write_u32(doorbell(n.regs, n.cap, 0, true), q.cqHead)
+	return done.result, .None if completion_ok(done) else .Failed
 }
