@@ -1,11 +1,9 @@
 package nvme
-import "../clock"
 import "../shared"
 import "../syscalls"
 import "base:intrinsics"
 
-QUEUE_DEPTH_MAX :: u32(64)
-IO_DEFAULT_TIMEOUT_MS :: u64(1000)
+QUEUE_DEPTH_SPEC_MAX :: u32(max(u16)) + 1
 CommandState :: enum u8 {
 	Free,
 	InFlight,
@@ -17,30 +15,22 @@ Queue :: struct {
 	sqTail, cqHead, inFlight: u32,
 	phase:                    u8,
 	nextCid:                  u16,
-	states:                   [QUEUE_DEPTH_MAX]CommandState,
+	states:                   []CommandState,
 }
 Pending :: struct {
 	queue: ^Queue,
 	cid:   u16,
 }
-Error :: enum {
-	None,
-	InvalidAPIUsage,
-	QueueFull,
-	Timeout,
-	Failed,
-}
-
 IoOpcode :: enum u8 {
 	Flush = 0x00,
 	Write = 0x01,
 	Read  = 0x02,
 }
 
-queue_init :: proc(info: QueueInfo) -> Queue {
+queue_init :: proc(info: QueueInfo) -> (q: Queue, err: shared.Error) {
 	assert(info.sq != nil && info.cq != nil)
 	assert(info.sqDoorbell != nil && info.cqDoorbell != nil)
-	assert(info.depth >= 2 && info.depth <= QUEUE_DEPTH_MAX)
+	assert(info.depth >= 2 && info.depth <= QUEUE_DEPTH_SPEC_MAX)
 	assert(info.qid != 0)
 	assert(info.nsid != 0)
 	assert(info.lbaSize >= 512 && info.lbaSize <= 4096)
@@ -49,7 +39,9 @@ queue_init :: proc(info: QueueInfo) -> Queue {
 	assert(info.maxTransfer >= u64(info.lbaSize))
 	assert(info.maxTransfer % shared.PAGE_SIZE == 0)
 
-	return Queue{info = info, phase = 1}
+	states, allocErr := make([]CommandState, int(info.depth))
+	if allocErr != .None do return {}, .OutOfMemory
+	return Queue{info = info, phase = 1, states = states}, .None
 }
 @(private)
 free_cid :: proc(q: ^Queue) -> (cid: u16, found: bool) {
@@ -59,12 +51,12 @@ free_cid :: proc(q: ^Queue) -> (cid: u16, found: bool) {
 	}
 	return 0, false
 }
-queue_submit :: proc(q: ^Queue, cmd: Command) -> (pending: Pending, err: Error) {
+queue_submit :: proc(q: ^Queue, cmd: Command) -> (pending: Pending, err: shared.Error) {
 	assert(q.sqTail < q.depth)
 	assert(q.inFlight < q.depth)
-	if q.inFlight == q.depth - 1 do return {}, .QueueFull
+	if q.inFlight == q.depth - 1 do return {}, .NvmeQueueFull
 	cid, found := free_cid(q)
-	if !found do return {}, .QueueFull
+	if !found do return {}, .NvmeQueueFull
 
 	entry := cmd
 	entry.header.commandId = cid
@@ -103,12 +95,11 @@ queue_poll :: proc(q: ^Queue) -> (ok: bool) {
 	return true
 
 }
-wait :: proc(p: Pending, timeout := IO_DEFAULT_TIMEOUT_MS) -> Error {
+wait :: proc(p: Pending, deadline: u64) -> shared.Error {
 	q := p.queue
 	assert(q != nil)
 	assert(u32(p.cid) < q.depth)
 	assert(q.states[p.cid] != .Free)
-	deadline := clock.deadline_after_ms(timeout)
 	for q.states[p.cid] == .InFlight {
 		if queue_poll(q) do continue
 		word := completion_word(q)
@@ -125,7 +116,7 @@ wait :: proc(p: Pending, timeout := IO_DEFAULT_TIMEOUT_MS) -> Error {
 	}
 	state := q.states[p.cid]
 	q.states[p.cid] = .Free
-	return .None if state == .Done else .Failed
+	return .None if state == .Done else .NvmeFailed
 
 }
 
@@ -137,30 +128,30 @@ queue_io :: proc(
 	prpList: []u64,
 ) -> (
 	Pending,
-	Error,
+	shared.Error,
 ) {
 	opOk := opcode == .Read || opcode == .Write
-	if !shared.api_check(opOk) do return {}, .InvalidAPIUsage
+	if !shared.api_check(opOk) do return {}, .InvalidAPICall
 
-	if !shared.api_check(len(bufs) > 0) do return {}, .InvalidAPIUsage
+	if !shared.api_check(len(bufs) > 0) do return {}, .InvalidAPICall
 	total: u64
 	for buf, i in bufs {
 		start := uintptr(raw_data(buf))
 		end := start + uintptr(len(buf))
 		align := uintptr(4 if i == 0 else shared.PAGE_SIZE)
 		endOk := i == len(bufs) - 1 || end % shared.PAGE_SIZE == 0
-		if !shared.api_check(len(buf) > 0) do return {}, .InvalidAPIUsage
-		if !shared.api_check(start % align == 0) do return {}, .InvalidAPIUsage
-		if !shared.api_check(endOk) do return {}, .InvalidAPIUsage
+		if !shared.api_check(len(buf) > 0) do return {}, .InvalidAPICall
+		if !shared.api_check(start % align == 0) do return {}, .InvalidAPICall
+		if !shared.api_check(endOk) do return {}, .InvalidAPICall
 		total += u64(len(buf))
 	}
 	blocksOk := total % u64(q.lbaSize) == 0
 	listOk := len(prpList) == prp_list_len(bufs)
 	listAddr := uintptr(raw_data(prpList))
-	if !shared.api_check(blocksOk) do return {}, .InvalidAPIUsage
-	if !shared.api_check(total <= q.maxTransfer) do return {}, .InvalidAPIUsage
-	if !shared.api_check(listOk) do return {}, .InvalidAPIUsage
-	if !shared.api_check(listAddr % shared.PAGE_SIZE == 0) do return {}, .InvalidAPIUsage
+	if !shared.api_check(blocksOk) do return {}, .InvalidAPICall
+	if !shared.api_check(total <= q.maxTransfer) do return {}, .InvalidAPICall
+	if !shared.api_check(listOk) do return {}, .InvalidAPICall
+	if !shared.api_check(listAddr % shared.PAGE_SIZE == 0) do return {}, .InvalidAPICall
 
 	cmd := Command {
 		header = {opcode = u8(opcode)},
@@ -173,7 +164,7 @@ queue_io :: proc(
 	return queue_submit(q, cmd)
 
 }
-queue_flush :: proc(q: ^Queue) -> (Pending, Error) {
+queue_flush :: proc(q: ^Queue) -> (Pending, shared.Error) {
 	cmd := Command {
 		header = {opcode = u8(IoOpcode.Flush)},
 		namespaceId = q.nsid,

@@ -1,10 +1,16 @@
 package fs
+
+
 import "../nvme"
 import "../shared"
 import "base:intrinsics"
 
+NvmeDisk :: struct {
+	dev:   nvme.Device,
+	queue: nvme.Queue,
+}
 DiskDriver :: union {
-	nvme.Device,
+	NvmeDisk,
 }
 Disk :: struct {
 	driver:     DiskDriver,

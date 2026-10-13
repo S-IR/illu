@@ -2,16 +2,16 @@ FS LIB: CONTEXT FOR THE REWRITE FROM SCRATCH (written 2026-10-09)
 
 The previous fs lib was deleted on 2026-10-09. adam/fs is gone too. What exists now:
 - lib/nvme: pure driver, no globals (init.odin, device.odin, io.odin, nvme.odin, nvme-regs.odin).
-- lib/fs/fs.odin: the start of the new fs lib. DiskDriver union holds nvme.Device BY VALUE (no pointers), Disk{driver, blockCount, base, blockSize}, disk_new(driver, blockSize, blockCount, base) -> (disk, used size). Planned cleanup: overflow intrinsics, return u64 + ok instead of int -1, drop the duplicate check and the unused spinlock import.
-- adam owns all global state: the disks array (+ lock) in adam/drivers.odin, nextMadeUpAddr in adam/gs. adam_dispatch_pci_device calls nvme.init, then fs.disk_new, then appends. The Device copy inside the disks array is the ONLY live copy (admin tail/head/phase/cid/nextQid are live hw state).
-- Tested working in QEMU 2026-10-09 (debug.sh): init, 6 admin cmds, selftest, disk registered at base 2^52. prod.sh lacks the nvme drive/device lines.
+- lib/fs/fs.odin: DiskDriver union {NvmeDisk{dev nvme.Device, queue nvme.Queue}} BY VALUE (no pointers), Disk{driver, blockCount, base, blockSize}, disk_new(driver, blockSize, blockCount, base) -> (disk, used size). Planned cleanup: return u64 + ok instead of int -1, drop the duplicate overflow check (division check + overflow_mul both present).
+- adam owns all global state: the disks array (+ lock) in adam/drivers.odin, nextMadeUpAddr in adam/gs. adam_dispatch_pci_device calls nvme.init, queue_pair_create, queue_init, then fs.disk_new, then appends. The NvmeDisk copy inside the disks array is the ONLY live copy (admin tail/head/phase/cid/nextQid + queue state are live hw state).
+- Tested working in QEMU 2026-10-09 (debug.sh): init, admin cmds, disk registered at base 2^52. prod.sh lacks the nvme drive/device lines. The nvme changes of 2026-10-12 (no made-up limits, selftest removed) are NOT compiled/tested yet.
 Everything below is decided unless it is marked OPEN.
 
 PRINCIPLES
-- The fs lib is a pure TRANSLATOR: fs commands (scan, resolve, create, write, read, delete, move, copy, resize)
-  go in, and raw disk commands come out as block ranges + buffers. The fs lib does NO IO.
+- 2026-10-10: lib/fs = meta lib, MAY issue disk commands itself (detect_fses reads GPT + sniffs partitions).
+  Format libs (lib/gpt, lib/ifs, lib/ntfs, lib/ext4) stay pure: bytes in, parsed data out, no IO.
 - The caller sends those straight to the device lib (lib/nvme now, a sata lib later).
-  No Device abstraction, no ranges_run/RangeOp, no generic read/write wrapper, no DiskIo-style union, not even in adam.
+  2026-10-13: per-hardware APIs are primary and always public. Generic convenience wrappers (e.g. read_from_disk/DiskPending) are OK on top for callers that do not care about the hw, but must never replace or hide the per-hw path.
 - Seam = BlockRange{block, count}: every fs (this one, later ext4...) outputs it, every hw lib takes it. N fs + M hw, not N*M.
 - Expose hardware: the nvme lib is public at full capability (flush, FUA, write zeroes, trim...). Never hide it, never treat the disk like a potato.
 - Async hardware: submit everything independent, wait once, batched per phase / per tree level.
@@ -105,14 +105,32 @@ DISK SECURITY (see contracts.md, fs-design.md, hardware-assumptions.md)
 - Device commands are mediated by generic kernel contracts written by adam (contracts.md). Rejected: kernel hw knowledge, fully-trusted daemon, per-IO kernel round trip, bounce buffers.
 
 NVME LIB FACTS (lib/nvme, kept)
-- queue_io(q, op .Read/.Write, startBlock, bufs [][]u8, prpList []u64) -> (Pending, IoError).
+- queue_io(q, op .Read/.Write, startBlock, bufs [][]u8, prpList []u64) -> (Pending, shared.Error).
   bufs[0] 4B aligned, the others page aligned. Every buf but the last ends on a page boundary. Total is a multiple of lbaSize and <= q.maxTransfer.
   len(prpList) == prp_list_len(bufs), page aligned.
 - maxTransfer = min(MDTS, 65536 * lbaSize), never 0.
-- queue_flush(q) -> (Pending, IoError). wait(pending, timeout). QueueFull: wait some of your own pendings, then retry.
-- lib/nvme init.odin: init(pciDevice) -> (Device, blockCount, InitError). InitError = union{ControllerError, Error}. queue_pair_create(^Device) -> QueueInfo, selftest, controller_disable, dma_pages. MDTS read at identify byte 77. Only adam calls init/admin (trusted owner); other processes only get queue pairs.
-- device.odin: Device struct, admin_execute_command (sync on purpose: admin cmds are rare and dependent). Error enum: None, InvalidAPIUsage, QueueFull, Timeout, Failed.
-- WARNING: debug-build selftest writes LBA 0 (future superblock). QUEUE_DEPTH_MAX 64 is a made-up cap (real limit = CAP.mqes + 1).
+- queue_flush(q) -> (Pending, shared.Error). wait(pending, deadline TSC; max(u64) = no deadline). .Timeout = still in flight, wait again. .NvmeQueueFull: wait your own pendings, then retry.
+- lib/nvme init.odin: init(pciDevice) -> (Device, blockCount, shared.Error). queue_pair_create(^Device) -> QueueInfo, controller_disable, dma_pages. MDTS read at identify byte 77. Only adam calls init/admin (trusted owner); other processes only get queue pairs.
+- device.odin: Device struct, admin_execute_command (sync on purpose: admin cmds are rare and dependent; no timeout, returns .NvmeControllerFatal on CSTS.CFS). ADMIN_QUEUE_DEPTH 2 (sync => 1 in flight; spec max 4096, open).
+- Errors: shared.Error (lib/shared/error.odin), nvme block 0x100 (Nvme* prefix).
+- I/O queue depth = CAP.mqes + 1 (no software cap). queue_init(info) -> (Queue, shared.Error), allocates states slice.
+
+GPT + FS DETECTION (state 2026-10-13)
+- Goal: per disk, detect partitions -> flat list of Fs so ntfs/ext4/ifs drivers plug in later.
+- lib/fs/parse.odin: detect_fses(disk ^Disk, diskIdx int) -> ([dynamic]Fs, shared.Error). Fs #all_or_none {diskIdx, start, len, type FsType{Ifs, Ntfs, Ext4}}.
+  Reads GPT header (LBA 1), entry array (PRP list when needed), gpt.parse_entries, then ONE DMA PAGE PER PARTITION from firstLba (covers ext4 magic at 1080), submit all, wait_all, sniff ntfs.is / ext4.is / ifs.is. No match = skip. Detection only, no mount.
+  .NvmeQueueFull with own pendings: wait_all then retry; with none: return the error.
+  Also holds DiskPending union {nvme.Pending}, read_from_disk(disk, block, buf, prpList), wait, wait_all.
+- Sniff libs (pure, is(partitionStart []byte) -> bool, api_check on length): lib/ntfs "NTFS    " @3, lib/ext4 u16le 0xEF53 @1080, lib/ifs u64le 0x5346_495f_554c_4c49 @0.
+- lib/gpt reader: parse_header(data) (myLba must be 1, so it cannot parse the backup header), parse_entries(h, data) -> [dynamic]Partition{typeGuid, firstLba, lastLba}.
+- lib/gpt writer (API "A" = small pure procs, caller does IO):
+  DONE: Mbr + MbrPartitionRecord structs, protective_mbr(blockCount) -> (Mbr, Error); caller zeroes LBA 0 and copies the 512B Mbr in.
+  DONE: header_new(blockCount, blockSize, entryCount, diskGuid) -> (Header, Error): primary header, CRCs 0, entries at LBA 2, entry size 128, min array 16384B (spec), firstUsable = 2 + entryBlocks, lastUsable = blockCount - 2 - entryBlocks.
+  DONE: entries_write(h, entries []PartitionEntry, out) -> (crc u32, Error): api_checks used-only entries, in usable range, no overlap; zeroes out, copies, returns crc32 of count*size bytes. Caller sets h.partitionEntryArrayCrc32.
+  NEXT: header CRC proc (crc32 of header[:headerSize] with headerCrc32 = 0), backup header (myLba = last LBA, alternateLba = 1, partitionEntryLba = lastUsableLba + 1, own CRC).
+  THEN: caller writes LBA 0, LBA 1, primary array, backup array, backup header. Then wire detect_fses into adam (after append to disks.v, pass &disks.v[i], i; store fses in adam), test in QEMU against a GPT disk image (debug.sh).
+  WATCH: Pending holds ^Queue inside the disks.v dynamic array -> dangling if the array grows while pendings live.
+- Open nvme questions: ADMIN_QUEUE_DEPTH 2 vs spec max 4096; lbads 9..12 still enforced.
 
 FREESTANDING NOTES
 - fmt has no print/println on freestanding (fmt_os.odin excluded). Use core:log: adam sets context.logger = runtime.Logger{adam_logger_proc, nil, .Debug, {.Level, .Short_File_Path}}; the proc calls syscalls.syscall_debug_print_userspace(text) (value param now defaults to 0).

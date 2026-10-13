@@ -3,6 +3,7 @@ package adam
 import "../lib/fs"
 import "../lib/nvme"
 import "../lib/pci"
+import "../lib/shared"
 import "../lib/spinlock"
 import "gs"
 DriverResult :: enum {
@@ -16,31 +17,35 @@ disks: struct {
 	v:    [dynamic]fs.Disk,
 	lock: spinlock.Spinlock,
 }
-PciDeviceError :: union {
-	nvme.InitError,
-}
 adam_dispatch_pci_device :: proc(
 	device: ^pci.Device,
 ) -> (
 	result: DriverResult = .Failed,
-	code: PciDeviceError,
+	code: shared.Error,
 ) {
 	switch device.classCode {
 	case .MASS_STORAGE:
 		if device.subclass == .NVM && device.progIf == pci.PROG_IF_NVME {
-			nvmeDevice, blockCount := nvme.init(device) or_return
+			nvmeDisk: fs.NvmeDisk
+			blockCount: u64
+			nvmeDisk.dev, blockCount = nvme.init(device) or_return
+			info := nvme.queue_pair_create(&nvmeDisk.dev) or_return
+			nvmeDisk.queue = nvme.queue_init(info) or_return
+			defer if result != nil do nvme.controller_disable(nvmeDisk.dev.regs, nvmeDisk.dev.cap)
 
-			if disks.v == nil do disks.v = make([dynamic]fs.Disk)
-			disk, used := fs.disk_new(
-				nvmeDevice,
-				auto_cast nvmeDevice.lbaSize,
-				blockCount,
-				gs.nextMadeUpAddr.v,
-			)
-			if used == -1 do return .Failed, .BlockSizeUnsupported
+			disk: fs.Disk
 			{
 				spinlock.lock(&gs.nextMadeUpAddr.lock)
 				defer spinlock.unlock(&gs.nextMadeUpAddr.lock)
+				used: int
+				disk, used = fs.disk_new(
+					nvmeDisk,
+					nvmeDisk.dev.lbaSize,
+					blockCount,
+					gs.nextMadeUpAddr.v,
+				)
+				if used == -1 do return .Failed, .NvmeBlockSizeUnsupported
+
 				gs.nextMadeUpAddr.v += u64(used)
 			}
 			{

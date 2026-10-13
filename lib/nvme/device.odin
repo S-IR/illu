@@ -1,6 +1,6 @@
 package nvme
 import ah "../../asm_helpers"
-import "../clock"
+import "../shared"
 import "base:intrinsics"
 Device :: struct {
 	regs:        Controller,
@@ -33,8 +33,8 @@ IDENTIFY_CNS :: enum u8 {
 	ACTIVE_NS_LIST = 0x07,
 }
 SET_FEATURES_FID_NUM_QUEUES :: u8(0x07)
-ADMIN_TIMEOUT_MS :: u64(1000)
-NUM_QUEUES_REQUEST_MAX :: u32(0xFFFE)
+ADMIN_QUEUE_DEPTH :: u32(2)
+NUM_QUEUES_REQUEST_MAX :: u32(max(u16))
 
 
 LBAFormat :: bit_field u32 {
@@ -97,7 +97,7 @@ AdminQueue :: struct {
 }
 
 
-admin_execute_command :: proc(n: ^Device, cmd: Command) -> (result: u32, err: Error) {
+admin_execute_command :: proc(n: ^Device, cmd: Command) -> (result: u32, err: shared.Error) {
 	q := &n.admin
 	assert(q.depth >= 2)
 	assert(q.sqTail < q.depth && q.cqHead < q.depth)
@@ -110,9 +110,8 @@ admin_execute_command :: proc(n: ^Device, cmd: Command) -> (result: u32, err: Er
 	q.sqTail = (q.sqTail + 1) % q.depth
 	ah.mmio_write_u32(doorbell(n.regs, n.cap, 0, false), q.sqTail)
 
-	deadline := clock.deadline_after_ms(ADMIN_TIMEOUT_MS)
 	for intrinsics.volatile_load(&q.cq[q.cqHead].status).phase != q.phase {
-		if clock.expired(deadline) do return 0, .Timeout
+		if read_csts(n.regs).cfs != 0 do return 0, .NvmeControllerFatal
 		intrinsics.cpu_relax()
 	}
 	done := q.cq[q.cqHead]
@@ -124,5 +123,5 @@ admin_execute_command :: proc(n: ^Device, cmd: Command) -> (result: u32, err: Er
 		q.phase ~= 1
 	}
 	ah.mmio_write_u32(doorbell(n.regs, n.cap, 0, true), q.cqHead)
-	return done.result, .None if completion_ok(done) else .Failed
+	return done.result, .None if completion_ok(done) else .NvmeFailed
 }
