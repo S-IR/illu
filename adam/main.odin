@@ -2,6 +2,7 @@ package adam
 import "../lib/alloc"
 import "../lib/fs"
 import "../lib/gpt"
+import "../lib/ifs"
 import "../lib/pci"
 import "../lib/syscalls"
 import "../lib/userschedule"
@@ -63,22 +64,36 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 	for &disk, i in disks.v {
 		syscalls.syscall_debug_print_userspace("disk:")
 		syscalls.syscall_debug_print_userspace(fmt.tprintln(disk))
+		msFs := gpt.PartitionEntry {
+			firstLba   = 2048,
+			lastLba    = disk.blockCount - 2048,
+			attributes = {},
+			name       = {},
+			typeGuid   = gpt.TYPE_MS_BASIC_DATA,
+			uniqueGuid = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		}
+
 		fses, err := fs.detect_fses(&disk, i)
+		syscalls.syscall_debug_print_userspace(fmt.tprintf("detect 1 err:%d", err))
 		if err != .None {
-			msFs := gpt.PartitionEntry {
-				firstLba   = 2048,
-				lastLba    = disk.blockCount - 2048,
-				attributes = {},
-				name       = {},
-				typeGuid   = gpt.TYPE_MS_BASIC_DATA,
-				uniqueGuid = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
-			}
+
 			if err == .GptNotGpt do err = fs.gpt_format(&disk, {msFs}, 128, {2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
 			if err != nil do syscalls.syscall_debug_print_userspace(fmt.tprintf("disk err:%d", err))
 			fses, err = fs.detect_fses(&disk, i)
 
 		}
-		if err != nil do syscalls.syscall_debug_print_userspace(fmt.tprintf("disk err:%d", err))
+		if err != nil {
+			syscalls.syscall_debug_print_userspace(fmt.tprintf("disk err:%d", err))
+			syscalls.grant_exit()
+		}
+		if len(fses) == 0 {
+			diskAlloc: ifs.DiskAllocator
+			err = ifs.format(&disk, msFs.firstLba, msFs.lastLba - msFs.firstLba + 1, &diskAlloc)
+			syscalls.syscall_debug_print_userspace(fmt.tprintf("ifsFormatErr err:%d", err))
+
+			fses, err = fs.detect_fses(&disk, i)
+			assert(err == .None && len(fses) == 1 && fses[0].type == .Ifs)
+		}
 		for fs in fses do syscalls.syscall_debug_print_userspace(fmt.tprintln(fs))
 
 	}

@@ -10,6 +10,7 @@ expose as much as possible to userland. the kernel only does what is security se
 DO NOT WRITE ANY CODE IN ANY FILES YOURSELF UNLESS I LITERALLY ASK YOU TO MODIFY FILES. PRINT HERE IN THIS CHAT STEP BY STEP CHANGES OF THE CODEBASE + CODE
 BE WAY WAY WAY LESS VERBOSE
 read the mds in the root dir of this project
+ALL claude memory / context for this project goes in .md files in the root dir of this project (claude-memory.md). never write hidden memory or context files anywhere else.
 
 # CODE STANDARDS
 

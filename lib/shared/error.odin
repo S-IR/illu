@@ -7,6 +7,7 @@ Error :: enum u64 {
 	Timeout,
 	Corrupt,
 	NotFound,
+	//NVME
 	NvmeQueueFull = 0x100,
 	NvmeFailed,
 	NvmeBarNotMemory,
@@ -24,5 +25,7 @@ Error :: enum u64 {
 	NvmeNamespaceEmpty,
 	NvmeNoIoQueues,
 	NvmeIoQueuesExhausted,
+	//GENERAL FS
 	GptNotGpt = 0x200,
+	FsDiskFull = 0x300,
 }

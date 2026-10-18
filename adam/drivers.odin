@@ -1,5 +1,5 @@
 package adam
-import "../lib/fs"
+import "../lib/diskhelpers"
 import "../lib/nvme"
 import "../lib/pci"
 import "../lib/shared"
@@ -16,7 +16,7 @@ DriverResult :: enum {
 }
 
 disks: struct {
-	v:    [dynamic]fs.Disk,
+	v:    [dynamic]diskhelpers.Disk,
 	lock: spinlock.Spinlock,
 }
 
@@ -34,7 +34,7 @@ adam_dispatch_pci_device :: proc(
 		if device.subclass == .NVM && device.progIf == pci.PROG_IF_NVME {
 
 
-			nvmeDisk: fs.NvmeDisk
+			nvmeDisk: diskhelpers.NvmeDisk
 			blockCount: u64
 			nvmeDisk.dev, blockCount = nvme.init(device) or_return
 			defer if result != .Initialized do nvme.controller_disable(nvmeDisk.dev.regs, nvmeDisk.dev.cap)
@@ -71,12 +71,12 @@ adam_dispatch_pci_device :: proc(
 			info := nvme.queue_pair_create(&nvmeDisk.dev, NVME_MSIX_ROW) or_return
 			nvmeDisk.queue = nvme.queue_init(info) or_return
 
-			disk: fs.Disk
+			disk: diskhelpers.Disk
 			{
 				spinlock.lock(&gs.nextMadeUpAddr.lock)
 				defer spinlock.unlock(&gs.nextMadeUpAddr.lock)
 				used: int
-				disk, used = fs.disk_new(
+				disk, used = diskhelpers.disk_new(
 					nvmeDisk,
 					nvmeDisk.dev.lbaSize,
 					blockCount,

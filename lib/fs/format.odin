@@ -1,6 +1,7 @@
 package fs
 
 import "../alloc"
+import "../diskhelpers"
 import "../gpt"
 import "../nvme"
 import "../shared"
@@ -9,7 +10,7 @@ import "core:hash"
 import "core:mem"
 
 gpt_format :: proc(
-	disk: ^Disk,
+	disk: ^diskhelpers.Disk,
 	entries: []gpt.PartitionEntry,
 	entryCount: u32,
 	diskGuid: gpt.Guid,
@@ -84,10 +85,10 @@ gpt_format :: proc(
 		{backup.partitionEntryLba, entriesBuf, prpBuf},
 		{backup.myLba, blocks[.BackupHeader], nil},
 	}
-	dps := make([dynamic]DiskPending, 0, len(writesTodo))
+	dps := make([dynamic]diskhelpers.DiskPending, 0, len(writesTodo))
 	defer delete(dps)
 	for writeTodo in writesTodo {
-		submitErr := disk_submit(
+		submitErr := diskhelpers.disk_submit(
 			disk,
 			&dps,
 			.Write,
@@ -96,12 +97,12 @@ gpt_format :: proc(
 			writeTodo.prpList,
 		)
 		if submitErr != .None {
-			wait_all(dps[:])
+			diskhelpers.wait_all(dps[:])
 			return submitErr
 		}
 	}
-	wait_all(dps[:]) or_return
-	dp := disk_io(disk, .Flush, 0, nil) or_return
-	wait(dp) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	dp := diskhelpers.disk_io(disk, .Flush, 0, nil) or_return
+	diskhelpers.wait(dp) or_return
 	return .None
 }

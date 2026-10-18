@@ -10,7 +10,8 @@ Everything below is decided unless it is marked OPEN.
 
 PRINCIPLES
 - 2026-10-10: lib/fs = meta lib, MAY issue disk commands itself (detect_fses reads GPT + sniffs partitions).
-  Format libs (lib/gpt, lib/ifs, lib/ntfs, lib/ext4) stay pure: bytes in, parsed data out, no IO.
+  Format libs (lib/gpt, lib/ntfs, lib/ext4) stay pure: bytes in, parsed data out, no IO.
+  2026-10-18: lib/ifs is NOT pure: it MAY alloc DMA and issue disk IO itself.
 - The caller sends those straight to the device lib (lib/nvme now, a sata lib later).
   2026-10-13: per-hardware APIs are primary and always public. Generic convenience wrappers (e.g. read_from_disk/DiskPending) are OK on top for callers that do not care about the hw, but must never replace or hide the per-hw path.
 - Seam = BlockRange{block, count}: every fs (this one, later ext4...) outputs it, every hw lib takes it. N fs + M hw, not N*M.
@@ -34,7 +35,8 @@ ON-DISK LAYOUT
 - Every file (dirs too) is one contiguous extent described by a Slot in its parent dir.
 - The lib knows only slots. Type-specific metadata (windows attrs, times, byte size) is the first part of the file's data, written by that type's user lib.
 - dir = DirHeader{count u64, reserved u64 = 0} 16B + Slot[]. Slots never straddle a block.
-  slot 0 = the dir's name file. count = last used slot + 1. The last slot is reserved for the chunk link.
+  slot 0 = the dir's name file. The name file is a NORMAL file: the allocator places its extent like any file's, with no special position (never "right after the dir"). Read/written like any file, only its content format is special.
+  count = last used slot + 1. The last slot is reserved for the chunk link.
 - Names decide types: dir = name ends with an unescaped '/'. '\' escapes the next byte.
   Names are UTF-8 (WTF-8 in the win layer) and case sensitive. '|' is forbidden in user names.
 - Dirs have a fixed cap and NEVER move, because other processes' private pathmaps hold the dir offset.
@@ -66,13 +68,16 @@ OP COMPOSITION (caller side)
 
 PATHMAP (per process, private)
 - map[u128 = xxh3_128(path)]PathEntry{offset, cap, slotIdx, dir = slot of the chunk holding the entry}.
-- The init scan inserts ONLY dirs + chunk keys. Chunks flatten: a "|/" chunk is scanned under the SAME dir path,
+- 2026-10-18: LAZY by default. No full-tree fill per process. A lookup walks from the nearest cached ancestor (or root), reads the missing dirs + name files, and inserts the dirs.
+  No LRU, no eviction (rejected as overengineering). A remove fn exists for processes that want to shrink it. Growing huge is the process's problem.
+  Optional later: seeding (copy another process's map to speed up startup).
+- Inserted dirs include chunk keys. Chunks flatten: a "|/" chunk is read under the SAME dir path,
   and each link is also inserted under key path + "|k/" (k = chunk number 1..) so chunk k is found by hash.
-- Files only get marked used for the allocator. Files enter the pathmap on open and leave on close (insert/remove pieces).
+- Files enter the pathmap on open and leave on close (insert/remove pieces).
 - Root "/" must be in the map (the old code never inserted it).
-- The scan starts from ANY dir (path + slot), not only root. It is batched per tree level: read all dirs of a level, then all their name files.
-- The scan collects used extents (superblock, every dir, name file, file) for the allocator.
-- OPEN: how the batched scan hands reads to the caller with no IO inside the lib. A scan_begin/scan_next state machine was built and rejected. Ask the user before designing it.
+- MOUNT = superblock + root into the pathmap + FULL SCAN for the allocator: walk every dir and its slots to find every used extent and build the free list (no on-disk free map). It does NOT fill the pathmap. Done by the allocator owner (adam for now), once at boot, batched per tree level (all dirs of a level, then all their name files).
+  It can start from ANY dir (path + slot). It collects used extents (superblock, every dir, name file, file) for the allocator. An on-disk cache of this may come later.
+- lib/ifs may do IO itself (2026-10-18), so the old OPEN (how the scan hands reads to the caller with no IO in the lib; the scan_begin/scan_next state machine was rejected) is moot.
 - Known: one corrupt dir or name file aborts the whole scan. Deal with it when fs security starts.
 - path_split on the last unescaped '/'. Lookups must search every chunk of a chunked dir.
 
@@ -135,7 +140,13 @@ GPT + FS DETECTION (state 2026-10-18: written, first boot run + verified)
 - lib/gpt (pure): parse.odin (was gpt.odin): parse_header(data) (myLba must be 1, cannot parse the backup header), parse_entries(h, data) -> [dynamic]Partition, header_new, entries_write. mbr.odin: protective_mbr (finished; endingChs always 0xFFFFFF, fine). Readers do not check the protective MBR (GPT header + CRC decide).
 - adam/main.odin (debug test, already written): after the pci loop, per disk: print disk, detect_fses; on .GptNotGpt -> gpt_format(1 MS basic data partition 2048 .. blockCount-2048, 128 entries, fixed test guids), detect again, print errors + fses. Runs to alive_loop.
 - Verify on host after a run (quit qemu first): fdisk -l diskimg/nvme.img (sgdisk not installed). First boot verified 2026-10-18.
-- NEXT: second boot must detect WITHOUT formatting (no gpt_format call), fses empty (no fs inside). Add a print of each detect_fses result to tell the two boots apart.
+- Second boot verified 2026-10-18: detect err 0, no gpt_format, fses empty. adam/main.odin prints "detect 1 err".
+
+IFS FORMAT (NEXT, 2026-10-18)
+- Goal: format the empty GPT partition as ifs, re-detect -> 1 Ifs fs.
+- Default caps (user chosen): root dir cap = PAGE_SIZE, name file cap = PAGE_SIZE.
+- Format writes superblock (block 0, root Slot), root dir (count 1, slot 0 = name file), name file header {0, cap}. Name file extent from the allocator (see ON-DISK LAYOUT).
+- Import cycle fix: fs imports ifs (ifs.is), ifs needs disk IO -> move Disk/DiskDriver/NvmeDisk/disk_new (lib/fs/fs.odin) + DiskPending/disk_io/disk_submit/wait/wait_all (lib/fs/parse.odin) into new lib/diskhelpers. They are quick helpers, not core API. Users: adam/drivers.odin, adam/main.odin, lib/fs.
 - WATCH: Pending holds ^Queue inside the disks.v dynamic array -> dangling if the array grows while pendings live.
 - Open nvme questions: ADMIN_QUEUE_DEPTH 2 vs spec max 4096; lbads 9..12 still enforced.
 - adam stack is 1 MiB now (was 16 KiB: fmt.tprintln(disk) overflowed it in a debug build).
