@@ -6,8 +6,10 @@ SINGLE ADDRESS SPACE OPERATING SYSTEM.
 every program / lib is code. position independent, dumb. no distinction between static and dynamic libraries. . executables are just libraries that you specify an enter fn.
 authority and security are boiled down to memory permissions. any higher level security concept like file writes, process permissions etc. boils down to "do you have read or write permissions on some memory range"
 we avoid daemons and we instead go for many decentralized apps that do not trust each other having memory contracts around devices ("we share this block of memory, i can lock this memory for x ms to do my business then i let you" bla bla). each program loads a userlib to work with the hardware as close as possible while respecting the contract.
+expose as much as possible to userland. the kernel only does what is security sensitive; everything else (routing, policy, tuning, convenience) is userland's job. as few abstractions as possible. if userland shoots itself in the foot that is not the kernel's problem.
 DO NOT WRITE ANY CODE IN ANY FILES YOURSELF UNLESS I LITERALLY ASK YOU TO MODIFY FILES. PRINT HERE IN THIS CHAT STEP BY STEP CHANGES OF THE CODEBASE + CODE
 BE WAY WAY WAY LESS VERBOSE
+read the mds in the root dir of this project
 
 # CODE STANDARDS
 

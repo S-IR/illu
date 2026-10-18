@@ -23,7 +23,13 @@ enumerate :: proc "contextless" (rsdp: ^acpi.Rsdp, out: []Device) -> (count: int
 					header := ecam_address(entry, u8(bus), device, function)
 					if ecam_read_u16(header, 0x00) == PCI_NO_DEVICE do continue
 					if count < len(out) {
-						out[count] = device_read(entry.segmentGroup, u8(bus), device, function, header)
+						out[count] = device_read(
+							entry.segmentGroup,
+							u8(bus),
+							device,
+							function,
+							header,
+						)
 					}
 					count += 1
 				}
@@ -34,7 +40,11 @@ enumerate :: proc "contextless" (rsdp: ^acpi.Rsdp, out: []Device) -> (count: int
 }
 
 @(private)
-device_read :: proc "contextless" (segment: u16, bus, device, function: u8, header: u64) -> Device {
+device_read :: proc "contextless" (
+	segment: u16,
+	bus, device, function: u8,
+	header: u64,
+) -> Device {
 	info := Device {
 		segment           = segment,
 		bus               = bus,
@@ -56,10 +66,9 @@ device_read :: proc "contextless" (segment: u16, bus, device, function: u8, head
 		interruptPin      = ecam_read_u8(header, 0x3D),
 		bars              = {},
 		capabilitiesPtr   = ecam_read_u8(header, 0x34),
-		capabilityCount   = 0,
 		capabilities      = {},
 	}
-	info.capabilityCount = capabilities_read(header, &info.capabilities)
+	capabilities_read(header, &info.capabilities)
 
 	barCount: u32 = 6
 	if info.headerType & 0x7F == 0x01 do barCount = 2
@@ -159,19 +168,17 @@ bar_valid :: proc "contextless" (bar: Bar) -> bool {
 }
 
 @(private)
-capabilities_read :: proc "contextless" (header: u64, out: ^[64]Capability) -> (count: u8) {
+capabilities_read :: proc "contextless" (
+	header: u64,
+	out: ^[dynamic; DEVICE_MAX_CAPABILITIES]Capability,
+) {
 	ptr := ecam_read_u8(header, 0x34)
 	seen: [256]bool
-	for ptr != 0 && int(count) < len(out) {
+	for ptr != 0 && len(out) < DEVICE_MAX_CAPABILITIES {
 		if ptr < 0x40 || ptr >= 0xFE || seen[ptr] do break
 		seen[ptr] = true
 		capHeader := ecam_read_u16(header, u64(ptr))
-		out[count] = Capability {
-			id     = u8(capHeader & 0xFF),
-			offset = ptr,
-		}
-		count += 1
+		append(out, Capability{id = u8(capHeader & 0xFF), offset = ptr})
 		ptr = u8(capHeader >> 8)
 	}
-	return count
 }

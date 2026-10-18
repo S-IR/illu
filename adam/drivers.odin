@@ -1,10 +1,12 @@
 package adam
-
 import "../lib/fs"
 import "../lib/nvme"
 import "../lib/pci"
 import "../lib/shared"
 import "../lib/spinlock"
+import "../lib/syscalls"
+import "../lib/userschedule"
+import "base:intrinsics"
 import "gs"
 DriverResult :: enum {
 	Ignored,
@@ -17,6 +19,10 @@ disks: struct {
 	v:    [dynamic]fs.Disk,
 	lock: spinlock.Spinlock,
 }
+
+NVME_VECTOR :: u32(32)
+NVME_MSIX_ROW :: u16(0)
+
 adam_dispatch_pci_device :: proc(
 	device: ^pci.Device,
 ) -> (
@@ -26,12 +32,44 @@ adam_dispatch_pci_device :: proc(
 	switch device.classCode {
 	case .MASS_STORAGE:
 		if device.subclass == .NVM && device.progIf == pci.PROG_IF_NVME {
+
+
 			nvmeDisk: fs.NvmeDisk
 			blockCount: u64
 			nvmeDisk.dev, blockCount = nvme.init(device) or_return
-			info := nvme.queue_pair_create(&nvmeDisk.dev) or_return
+			defer if result != .Initialized do nvme.controller_disable(nvmeDisk.dev.regs, nvmeDisk.dev.cap)
+
+			table, capOffset := pci.msix_table(device) or_return
+			cpus := userschedule.cpu_infos(
+				(^userschedule.CpuInfoPage)(uintptr(userschedule.CPU_INFO_ADDR)),
+			)
+			apicId := cpus[syscalls.cpu_current_index()].apicId
+			assert(apicId <= 255)
+			row := &table[NVME_MSIX_ROW]
+			intrinsics.volatile_store(&row.msgAddrLo, pci.MSI_ADDRESS_BASE | apicId << 12)
+			intrinsics.volatile_store(&row.msgAddrHi, 0)
+			intrinsics.volatile_store(&row.msgData, NVME_VECTOR)
+			intrinsics.volatile_store(&row.vectorControl, 0)
+
+			messageControlOffset :=
+				uintptr(capOffset) + offset_of(pci.MsixCapability, messageControl)
+			messageControl := transmute(pci.MsixMessageControl)pci.config_read_u16(
+				device,
+				messageControlOffset,
+			)
+			messageControl.enable = true
+			messageControl.functionMask = false
+			pci.config_write_u16(device, messageControlOffset, transmute(u16)messageControl)
+
+			command := pci.config_read_u16(device, pci.CONFIG_COMMAND_OFFSET)
+			pci.config_write_u16(
+				device,
+				pci.CONFIG_COMMAND_OFFSET,
+				command | pci.COMMAND_INTX_DISABLE,
+			)
+
+			info := nvme.queue_pair_create(&nvmeDisk.dev, NVME_MSIX_ROW) or_return
 			nvmeDisk.queue = nvme.queue_init(info) or_return
-			defer if result != nil do nvme.controller_disable(nvmeDisk.dev.regs, nvmeDisk.dev.cap)
 
 			disk: fs.Disk
 			{

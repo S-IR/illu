@@ -1,9 +1,9 @@
 package alloc
 
+import "../../kernel/pmm"
 import "../lmem"
 import "../shared"
 import "../syscalls"
-import "../../kernel/pmm"
 import "core:mem"
 
 KERNEL_BUILD :: #config(KERNEL_BUILD, false)
@@ -42,14 +42,16 @@ backend_free_pages :: proc(addr, count: u64) {
 		_ = syscalls.mem_free_userspace(addr)
 	}
 }
-
-dma_pages :: proc(count: u64) -> (base: u64, ok: bool) {
-	assert(count > 0)
-	regions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = count, flags = {.Write, .NX}}}
-	mmapErr, addr := syscalls.syscall_mmap_userspace(regions[:])
-	if mmapErr != .None do return 0, false
-	assert(addr != nil)
-	assert(u64(uintptr(addr)) % shared.PAGE_SIZE == 0)
-	mem.zero(addr, int(count * shared.PAGE_SIZE))
-	return u64(uintptr(addr)), true
+when !KERNEL_BUILD {
+	@(require_results)
+	dma_pages :: proc(count: u64) -> (base: u64, ok: bool) {
+		assert(count > 0)
+		regions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = count, flags = {.Write, .NX}}}
+		mmapErr, addr := syscalls.syscall_mmap_userspace(regions[:])
+		if mmapErr != .None do return 0, false
+		assert(addr != nil)
+		assert(u64(uintptr(addr)) % shared.PAGE_SIZE == 0)
+		mem.zero(addr, int(count * shared.PAGE_SIZE))
+		return u64(uintptr(addr)), true
+	}
 }

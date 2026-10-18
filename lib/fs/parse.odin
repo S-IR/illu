@@ -21,7 +21,7 @@ FsType :: enum {
 	Ext4,
 }
 detect_fses :: proc(disk: ^Disk, diskIdx: int) -> (fses: [dynamic]Fs, err: shared.Error) {
-	if !shared.api_check(disk != nil) do return fses, .InvalidAPICall
+	if !shared.assert(disk != nil) do return fses, .InvalidAPICall
 	assert(disk.blockSize <= shared.PAGE_SIZE)
 	assert(shared.PAGE_SIZE % disk.blockSize == 0)
 	headerDma, k := alloc.dma_pages(1)
@@ -30,7 +30,7 @@ detect_fses :: proc(disk: ^Disk, diskIdx: int) -> (fses: [dynamic]Fs, err: share
 	headerDmaBuf := mem.byte_slice(rawptr(uintptr(headerDma)), int(disk.blockSize))
 
 
-	dp := read_from_disk(disk, gpt.HEADER_BLOCK_LOCATION, headerDmaBuf) or_return
+	dp := disk_io(disk, .Read, gpt.HEADER_BLOCK_LOCATION, headerDmaBuf) or_return
 	wait(dp) or_return
 	header := gpt.parse_header(headerDmaBuf) or_return
 	if header.partitionEntryCount == 0 do return fses, .None
@@ -65,7 +65,7 @@ detect_fses :: proc(disk: ^Disk, diskIdx: int) -> (fses: [dynamic]Fs, err: share
 		if !prpK do return {}, .OutOfMemory
 		prpBuf = mem.slice_ptr((^u64)(uintptr(prpDma)), prpListLen)
 	}
-	dp = read_from_disk(disk, header.partitionEntryLba, entriesBuf, prpBuf) or_return
+	dp = disk_io(disk, .Read, header.partitionEntryLba, entriesBuf, prpBuf) or_return
 	wait(dp) or_return
 	partitions := gpt.parse_entries(header, entriesBuf) or_return
 	defer delete(partitions)
@@ -83,21 +83,13 @@ detect_fses :: proc(disk: ^Disk, diskIdx: int) -> (fses: [dynamic]Fs, err: share
 	defer delete(dps)
 	for partition, i in partitions {
 		buf := partitionsBuf[i * shared.PAGE_SIZE:][:shared.PAGE_SIZE]
-		for {
-			partDp, readErr := read_from_disk(disk, partition.firstLba, buf)
-			if readErr == .None {
-				append(&dps, partDp)
-				break
-			}
-			if readErr == .NvmeQueueFull && len(dps) > 0 {
-				wait_all(&dps) or_return
-				continue
-			}
-			wait_all(&dps)
-			return fses, readErr
+		submitErr := disk_submit(disk, &dps, .Read, partition.firstLba, buf)
+		if submitErr != .None {
+			wait_all(dps[:])
+			return fses, submitErr
 		}
 	}
-	wait_all(&dps) or_return
+	wait_all(dps[:]) or_return
 	for partition, i in partitions {
 		buf := partitionsBuf[i * shared.PAGE_SIZE:][:shared.PAGE_SIZE]
 		fsType: FsType
@@ -127,8 +119,9 @@ DiskPending :: union {
 	nvme.Pending,
 }
 
-read_from_disk :: proc(
+disk_io :: proc(
 	disk: ^Disk,
+	op: nvme.IoOpcode,
 	block: u64,
 	buffer: []byte,
 	prpList: []u64 = nil,
@@ -136,22 +129,52 @@ read_from_disk :: proc(
 	dp: DiskPending,
 	err: shared.Error,
 ) {
-	if !shared.api_check(disk != nil) do return {}, .InvalidAPICall
-	if !shared.api_check(len(buffer) != 0) do return {}, .InvalidAPICall
+	if !shared.assert(disk != nil) do return {}, .InvalidAPICall
+	switch op {
+	case .Flush:
+		if !shared.assert(len(buffer) == 0) do return {}, .InvalidAPICall
+		if !shared.assert(block == 0) do return {}, .InvalidAPICall
+		if !shared.assert(len(prpList) == 0) do return {}, .InvalidAPICall
+
+	case .Read, .Write:
+		if !shared.assert(len(buffer) != 0) do return {}, .InvalidAPICall
+
+	}
 
 
 	switch &d in disk.driver {
 	case NvmeDisk:
-		if !shared.api_check(len(buffer) % int(d.dev.lbaSize) == 0) do return {}, .InvalidAPICall
+		if op == .Flush do return nvme.queue_flush(&d.queue)
+		if !shared.assert(len(buffer) % int(d.dev.lbaSize) == 0) do return {}, .InvalidAPICall
 
 		blockCount := len(buffer) / int(d.dev.lbaSize)
-		if !shared.api_check(block <= disk.blockCount) do return {}, .InvalidAPICall
-		if !shared.api_check(u64(blockCount) <= disk.blockCount - block) do return {}, .InvalidAPICall
-		return nvme.queue_io(&d.queue, .Read, block, {buffer}, prpList)
+		if !shared.assert(block <= disk.blockCount) do return {}, .InvalidAPICall
+		if !shared.assert(u64(blockCount) <= disk.blockCount - block) do return {}, .InvalidAPICall
+		return nvme.queue_io(&d.queue, op, block, {buffer}, prpList)
 
-	// d is NvmeDisk, bound by reference
 	}
 	unreachable()
+}
+disk_submit :: proc(
+	disk: ^Disk,
+	dps: ^[dynamic]DiskPending,
+	op: nvme.IoOpcode,
+	block: u64,
+	buffer: []byte,
+	prpList: []u64 = nil,
+) -> shared.Error {
+	if !shared.assert(dps != nil) do return .InvalidAPICall
+	for {
+		dp, err := disk_io(disk, op, block, buffer, prpList)
+		if err == .None {
+			append(dps, dp)
+			return .None
+		}
+		if err != .NvmeQueueFull || len(dps^) == 0 do return err
+		waitErr := wait_all(dps^[:])
+		clear(dps)
+		if waitErr != .None do return waitErr
+	}
 }
 wait :: proc(dp: DiskPending) -> shared.Error {
 	switch p in dp {
@@ -160,11 +183,10 @@ wait :: proc(dp: DiskPending) -> shared.Error {
 	}
 	unreachable()
 }
-wait_all :: proc(dps: ^[dynamic]DiskPending) -> (err: shared.Error) {
-	for dp in dps^ {
+wait_all :: proc(dps: []DiskPending) -> (err: shared.Error) {
+	for dp in dps {
 		waitErr := wait(dp)
 		if err == .None do err = waitErr
 	}
-	clear(dps)
 	return err
 }

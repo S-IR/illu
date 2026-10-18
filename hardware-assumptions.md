@@ -10,6 +10,9 @@ At least 2 GB total system memory (Windows 10 minimum is 2 GB, so we assume that
 
 EFI memory map provides usable pages; we can allocate physically contiguous DMA buffers.
 
+Interrupts
+MSI-X default, MSI fallback. No pin (INTx) interrupts, no IOAPIC routing. Every device we support has MSI or MSI-X.
+
 Disk
 At least one NVMe 1.0+ drive (PCIe M.2/U.2). 15-year-old hardware puts us around 2011; NVMe started shipping in consumer hardware ~2013 (Samsung XP941), so this is aggressive but okay if we allow SATA fallback. For simplicity we can assume NVMe, but if we need 15-year coverage, we must also handle AHCI/SATA.
 
@@ -20,9 +23,11 @@ If AHCI/SATA: 1–4 ports, NCQ, 48-bit LBA, MSI or MSI-X interrupts.
 LBA size 512 bytes or 4096 bytes (both handled).
 
 Network
-At least one Intel e1000/e1000e NIC (PCIe or onboard). These are ubiquitous in enterprise and consumer boards from ~2008 onward.
+Real consumer NICs: Realtek RTL8111/8168 (most common wired NIC on consumer boards, dev laptop has it) and Intel I219 (e1000e family, Intel laptops). Plain e1000 (82540, QEMU default) is out: pins only, no MSI.
 
-MSI-X (preferred) or MSI for TX/RX interrupt routing.
+Wi-Fi: Intel CNVi (iwlwifi family, dev laptop 8086:7a70).
+
+MSI-X (preferred) or MSI.
 
 1 Gbps line rate.
 

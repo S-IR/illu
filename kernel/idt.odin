@@ -143,7 +143,10 @@ InterruptFrame :: struct #packed {
 #assert(offset_of(InterruptFrame, rflags) == 664)
 #assert(offset_of(InterruptFrame, rsp) == 672)
 #assert(offset_of(InterruptFrame, ss) == 680)
-#assert(offset_of(InterruptFrame, r15) - offset_of(InterruptFrame, rax) == offset_of(userschedule.UserSaveArea, r15) - offset_of(userschedule.UserSaveArea, rax))
+#assert(
+	offset_of(InterruptFrame, r15) - offset_of(InterruptFrame, rax) ==
+	offset_of(userschedule.UserSaveArea, r15) - offset_of(userschedule.UserSaveArea, rax),
+)
 
 interrupt_frame_from_user :: #force_inline proc "contextless" (frame: ^InterruptFrame) -> bool {
 	return (frame.cs & 3) == 3
@@ -278,11 +281,10 @@ irq_handler :: proc(frame: ^InterruptFrame) {
 		print.serial_writeln("lapic: lint1 fired")
 	case VECTOR_APIC_IPI:
 	case:
-		print.serial_write("lapic: unhandled irq=")
-		print.serial_write_hex(u64(v))
-		print.serial_writeln("")
+		lapic_send_eoi()
+		return
+
 	}
 
 	lapic_send_eoi()
 }
-

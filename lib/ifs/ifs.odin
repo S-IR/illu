@@ -6,7 +6,7 @@ IFS_MAGIC_OFFSET :: 0
 
 
 is :: proc(partitionStart: []byte) -> bool {
-	if !shared.api_check(len(partitionStart) >= (IFS_MAGIC_OFFSET + size_of(IFS_MAGIC))) {
+	if !shared.assert(len(partitionStart) >= (IFS_MAGIC_OFFSET + size_of(IFS_MAGIC))) {
 		return false
 	}
 	return endian.unchecked_get_u64le(partitionStart[IFS_MAGIC_OFFSET:]) == IFS_MAGIC

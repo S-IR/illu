@@ -5,7 +5,7 @@ import "core:math/bits"
 import "core:mem"
 import "core:slice"
 parse_header :: proc(data: []byte) -> (h: Header, err: shared.Error) {
-	if !shared.api_check(len(data) >= 512) do return {}, .InvalidAPICall
+	if !shared.assert(len(data) >= 512) do return {}, .InvalidAPICall
 	h = (^Header)(raw_data(data))^
 	if h.signature != SIGNATURE do return {}, .GptNotGpt
 	if h.headerSize < size_of(Header) || int(h.headerSize) > len(data) do return {}, .Corrupt
@@ -26,7 +26,7 @@ parse_header :: proc(data: []byte) -> (h: Header, err: shared.Error) {
 }
 parse_entries :: proc(h: Header, data: []byte) -> (out: [dynamic]Partition, err: shared.Error) {
 	arrayBytes := u64(h.partitionEntryCount) * u64(h.partitionEntrySize)
-	if !shared.api_check(len(data) >= int(arrayBytes)) do return nil, .InvalidAPICall
+	if !shared.assert(len(data) >= int(arrayBytes)) do return nil, .InvalidAPICall
 	crc32 := hash.crc32(data[:arrayBytes])
 	if crc32 != h.partitionEntryArrayCrc32 do return out, .Corrupt
 
@@ -67,12 +67,12 @@ header_new :: proc(
 	header: Header,
 	err: shared.Error,
 ) {
-	if !shared.api_check(blockSize >= 512) do return {}, .InvalidAPICall
-	if !shared.api_check(u64(entryCount) * size_of(PartitionEntry) >= 16384) do return {}, .InvalidAPICall
+	if !shared.assert(blockSize >= 512) do return {}, .InvalidAPICall
+	if !shared.assert(u64(entryCount) * size_of(PartitionEntry) >= 16384) do return {}, .InvalidAPICall
 
 	entryBlocks: u64 =
 		(u64(entryCount) * size_of(PartitionEntry) + u64(blockSize) - 1) / u64(blockSize)
-	if !shared.api_check(blockCount >= 2 * entryBlocks + 4) do return {}, .InvalidAPICall
+	if !shared.assert(blockCount >= 2 * entryBlocks + 4) do return {}, .InvalidAPICall
 
 
 	return {
@@ -93,19 +93,19 @@ header_new :: proc(
 }
 
 entries_write :: proc(h: Header, entries: []PartitionEntry, out: []byte) -> (u32, shared.Error) {
-	if !shared.api_check(h.partitionEntrySize >= size_of(PartitionEntry)) do return {}, .InvalidAPICall
-	if !shared.api_check(len(entries) <= int(h.partitionEntryCount)) do return {}, .InvalidAPICall
+	if !shared.assert(h.partitionEntrySize >= size_of(PartitionEntry)) do return {}, .InvalidAPICall
+	if !shared.assert(len(entries) <= int(h.partitionEntryCount)) do return {}, .InvalidAPICall
 	arrayBytes := int(h.partitionEntryCount) * int(h.partitionEntrySize)
-	if !shared.api_check(len(out) >= (arrayBytes)) do return {}, .InvalidAPICall
+	if !shared.assert(len(out) >= (arrayBytes)) do return {}, .InvalidAPICall
 
 	for entry, i in entries {
-		if !shared.api_check(entry.typeGuid != {}) do return {}, .InvalidAPICall
-		if !shared.api_check(entry.uniqueGuid != {}) do return {}, .InvalidAPICall
-		if !shared.api_check(entry.firstLba <= entry.lastLba) do return {}, .InvalidAPICall
-		if !shared.api_check(entry.firstLba >= h.firstUsableLba) do return {}, .InvalidAPICall
-		if !shared.api_check(entry.lastLba <= h.lastUsableLba) do return {}, .InvalidAPICall
+		if !shared.assert(entry.typeGuid != {}) do return {}, .InvalidAPICall
+		if !shared.assert(entry.uniqueGuid != {}) do return {}, .InvalidAPICall
+		if !shared.assert(entry.firstLba <= entry.lastLba) do return {}, .InvalidAPICall
+		if !shared.assert(entry.firstLba >= h.firstUsableLba) do return {}, .InvalidAPICall
+		if !shared.assert(entry.lastLba <= h.lastUsableLba) do return {}, .InvalidAPICall
 		for p in entries[:i] {
-			if !shared.api_check(entry.firstLba > p.lastLba || p.firstLba > entry.lastLba) do return {}, .InvalidAPICall
+			if !shared.assert(entry.firstLba > p.lastLba || p.firstLba > entry.lastLba) do return {}, .InvalidAPICall
 		}
 	}
 	mem.zero_slice(out)

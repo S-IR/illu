@@ -1,5 +1,7 @@
 package adam
 import "../lib/alloc"
+import "../lib/fs"
+import "../lib/gpt"
 import "../lib/pci"
 import "../lib/syscalls"
 import "../lib/userschedule"
@@ -26,6 +28,8 @@ adam_entry :: proc "c" (
 }
 
 adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
+	syscalls.syscall_debug_print_userspace("adam_start", u64(uintptr(rawptr(adam_start))))
+
 	context = runtime.default_context()
 	context.allocator = alloc.heap_allocator()
 	context.temp_allocator = alloc.heap_allocator()
@@ -56,10 +60,29 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 		}
 	}
 
-	for disk in disks.v {
+	for &disk, i in disks.v {
 		syscalls.syscall_debug_print_userspace("disk:")
 		syscalls.syscall_debug_print_userspace(fmt.tprintln(disk))
+		fses, err := fs.detect_fses(&disk, i)
+		if err != .None {
+			msFs := gpt.PartitionEntry {
+				firstLba   = 2048,
+				lastLba    = disk.blockCount - 2048,
+				attributes = {},
+				name       = {},
+				typeGuid   = gpt.TYPE_MS_BASIC_DATA,
+				uniqueGuid = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+			}
+			if err == .GptNotGpt do err = fs.gpt_format(&disk, {msFs}, 128, {2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
+			if err != nil do syscalls.syscall_debug_print_userspace(fmt.tprintf("disk err:%d", err))
+			fses, err = fs.detect_fses(&disk, i)
+
+		}
+		if err != nil do syscalls.syscall_debug_print_userspace(fmt.tprintf("disk err:%d", err))
+		for fs in fses do syscalls.syscall_debug_print_userspace(fmt.tprintln(fs))
+
 	}
+
 	alive_loop()
 }
 

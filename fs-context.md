@@ -4,7 +4,8 @@ The previous fs lib was deleted on 2026-10-09. adam/fs is gone too. What exists 
 - lib/nvme: pure driver, no globals (init.odin, device.odin, io.odin, nvme.odin, nvme-regs.odin).
 - lib/fs/fs.odin: DiskDriver union {NvmeDisk{dev nvme.Device, queue nvme.Queue}} BY VALUE (no pointers), Disk{driver, blockCount, base, blockSize}, disk_new(driver, blockSize, blockCount, base) -> (disk, used size). Planned cleanup: return u64 + ok instead of int -1, drop the duplicate overflow check (division check + overflow_mul both present).
 - adam owns all global state: the disks array (+ lock) in adam/drivers.odin, nextMadeUpAddr in adam/gs. adam_dispatch_pci_device calls nvme.init, queue_pair_create, queue_init, then fs.disk_new, then appends. The NvmeDisk copy inside the disks array is the ONLY live copy (admin tail/head/phase/cid/nextQid + queue state are live hw state).
-- Tested working in QEMU 2026-10-09 (debug.sh): init, admin cmds, disk registered at base 2^52. prod.sh lacks the nvme drive/device lines. The nvme changes of 2026-10-12 (no made-up limits, selftest removed) are NOT compiled/tested yet.
+- Tested in QEMU (.zed/debug.sh, image diskimg/nvme.img 64MiB, 512B blocks): init, admin cmds, disk registered at base 2^52. prod.sh lacks the nvme drive/device lines.
+- 2026-10-18 RUN AND WORKING: nvme I/O queues (submit/poll/wait), kernel wait_on sleep + MSI-X wake, disk_io/disk_submit, gpt_format, detect_fses (first boot: no GPT -> format -> detect, 0 fses). Host check: valid protective MBR, primary + backup headers, all CRCs ok.
 Everything below is decided unless it is marked OPEN.
 
 PRINCIPLES
@@ -20,7 +21,7 @@ PRINCIPLES
 - Single-phase pieces: no multi-phase ops inside the lib. The caller composes create/delete/move/copy/resize from pieces.
 - No implicit work: a missing parent gives .NotFound, and the caller creates parents itself.
 - A std-like file API (win32 CreateFile/ReadFile) is a separate lib on top.
-- Invalid API usage = assert AND return error, both, always: `if !shared.api_check(cond) do return ..., .InvalidAPICall`.
+- Invalid API usage = assert AND return error, both, always: `if !shared.assert(cond) do return ..., .InvalidAPICall` (shared.assert was api_check; it must call runtime.assert, a bare assert inside package shared recurses into itself).
 - No made-up limits. Only real hardware limits (MDTS, MQES, ...). Any unavoidable software cap must be flagged loudly.
 - Prove first: lib/modelcheck (TLA+-like BFS over states) is the test standard. RAM-disk tests are extra.
 
@@ -77,7 +78,7 @@ PATHMAP (per process, private)
 
 RESOLVE
 - resolve(pathmap, blockSize, []FileRange{path, offset, len}, []BlockRange) -> (resolved, err).
-  offset/len are bytes inside the file, block aligned (api_check), and must fit entry.cap else .OutOfRange. err concerns files[resolved].
+  offset/len are bytes inside the file, block aligned (shared.assert), and must fit entry.cap else .OutOfRange. err concerns files[resolved].
 - The caller then does nvme.queue_io(&q, op, blocks[i].block, bufs, prpList), with total bufs = count * lbaSize.
 
 DISK ALLOCATOR
@@ -110,27 +111,34 @@ NVME LIB FACTS (lib/nvme, kept)
   len(prpList) == prp_list_len(bufs), page aligned.
 - maxTransfer = min(MDTS, 65536 * lbaSize), never 0.
 - queue_flush(q) -> (Pending, shared.Error). wait(pending, deadline TSC; max(u64) = no deadline). .Timeout = still in flight, wait again. .NvmeQueueFull: wait your own pendings, then retry.
-- lib/nvme init.odin: init(pciDevice) -> (Device, blockCount, shared.Error). queue_pair_create(^Device) -> QueueInfo, controller_disable, dma_pages. MDTS read at identify byte 77. Only adam calls init/admin (trusted owner); other processes only get queue pairs.
+- NvmeQueueFull has 2 causes (io.odin:57/59): inFlight == depth-1 (any completion frees it) or no Free cid (a cid only frees in its OWNER's wait()). So never block inside submit waiting for a slot: a caller holding all cids as unwaited Done would deadlock. Waiting a finished pending twice trips the assert states[cid] != .Free.
+- lib/nvme init.odin: init(pciDevice) -> (Device, blockCount, shared.Error). queue_pair_create(^Device, msixRow u16) -> QueueInfo (CQ created with IEN, IV = msixRow), controller_disable.
+- Interrupts: adam programs MSI-X (pci.msix_table) between nvme.init and queue_pair_create, row NVME_MSIX_ROW 0 -> vector NVME_VECTOR 0x20 on the current core. See interrupts-context.md. dma_pages moved to lib/alloc (userspace only, `when !KERNEL_BUILD`, @(require_results)). MDTS read at identify byte 77. Only adam calls init/admin (trusted owner); other processes only get queue pairs.
 - device.odin: Device struct, admin_execute_command (sync on purpose: admin cmds are rare and dependent; no timeout, returns .NvmeControllerFatal on CSTS.CFS). ADMIN_QUEUE_DEPTH 2 (sync => 1 in flight; spec max 4096, open).
 - Errors: shared.Error (lib/shared/error.odin), nvme block 0x100 (Nvme* prefix).
 - I/O queue depth = CAP.mqes + 1 (no software cap). queue_init(info) -> (Queue, shared.Error), allocates states slice.
 
-GPT + FS DETECTION (state 2026-10-13)
+GPT + FS DETECTION (state 2026-10-18: written, first boot run + verified)
 - Goal: per disk, detect partitions -> flat list of Fs so ntfs/ext4/ifs drivers plug in later.
-- lib/fs/parse.odin: detect_fses(disk ^Disk, diskIdx int) -> ([dynamic]Fs, shared.Error). Fs #all_or_none {diskIdx, start, len, type FsType{Ifs, Ntfs, Ext4}}.
+- lib/fs/parse.odin:
+  detect_fses(disk ^Disk, diskIdx int) -> ([dynamic]Fs, shared.Error). Fs #all_or_none {diskIdx, start, len, type FsType{Ifs, Ntfs, Ext4}}.
   Reads GPT header (LBA 1), entry array (PRP list when needed), gpt.parse_entries, then ONE DMA PAGE PER PARTITION from firstLba (covers ext4 magic at 1080), submit all, wait_all, sniff ntfs.is / ext4.is / ifs.is. No match = skip. Detection only, no mount.
-  .NvmeQueueFull with own pendings: wait_all then retry; with none: return the error.
-  Also holds DiskPending union {nvme.Pending}, read_from_disk(disk, block, buf, prpList), wait, wait_all.
-- Sniff libs (pure, is(partitionStart []byte) -> bool, api_check on length): lib/ntfs "NTFS    " @3, lib/ext4 u16le 0xEF53 @1080, lib/ifs u64le 0x5346_495f_554c_4c49 @0.
-- lib/gpt reader: parse_header(data) (myLba must be 1, so it cannot parse the backup header), parse_entries(h, data) -> [dynamic]Partition{typeGuid, firstLba, lastLba}.
-- lib/gpt writer (API "A" = small pure procs, caller does IO):
-  DONE: Mbr + MbrPartitionRecord structs, protective_mbr(blockCount) -> (Mbr, Error); caller zeroes LBA 0 and copies the 512B Mbr in.
-  DONE: header_new(blockCount, blockSize, entryCount, diskGuid) -> (Header, Error): primary header, CRCs 0, entries at LBA 2, entry size 128, min array 16384B (spec), firstUsable = 2 + entryBlocks, lastUsable = blockCount - 2 - entryBlocks.
-  DONE: entries_write(h, entries []PartitionEntry, out) -> (crc u32, Error): api_checks used-only entries, in usable range, no overlap; zeroes out, copies, returns crc32 of count*size bytes. Caller sets h.partitionEntryArrayCrc32.
-  NEXT: header CRC proc (crc32 of header[:headerSize] with headerCrc32 = 0), backup header (myLba = last LBA, alternateLba = 1, partitionEntryLba = lastUsableLba + 1, own CRC).
-  THEN: caller writes LBA 0, LBA 1, primary array, backup array, backup header. Then wire detect_fses into adam (after append to disks.v, pass &disks.v[i], i; store fses in adam), test in QEMU against a GPT disk image (debug.sh).
-  WATCH: Pending holds ^Queue inside the disks.v dynamic array -> dangling if the array grows while pendings live.
+  disk_io(disk, op nvme.IoOpcode, block, buf, prpList = nil) -> (DiskPending, Error): generic wrapper. .Flush needs block 0, empty buf, empty prpList -> nvme.queue_flush. .Read/.Write -> nvme.queue_io.
+  disk_submit(disk, dps ^[dynamic]DiskPending, op, block, buf, prpList = nil) -> Error: disk_io + append; on .NvmeQueueFull with own pendings: wait_all, clear (also on wait error, so nothing is waited twice), retry; else return the error. On error the CALLER must wait_all(dps[:]) before returning (device may still DMA into buffers the caller's defers free).
+  wait(dp), wait_all(dps []DiskPending) (slice, does not clear; caller clears).
+- lib/fs/format.odin: gpt_format(disk, entries []gpt.PartitionEntry, entryCount u32, diskGuid) -> Error.
+  header_new, meta buffers [gpt.MetaBlock]{Mbr, PrimaryHeader, BackupHeader} one block each in one dma_pages(len(MetaBlock)), entry array buffer + PRP list,
+  protective_mbr, entries_write -> partitionEntryArrayCrc32, headerCrc32 = crc32(header bytes) inline (field must be 0 when hashing),
+  backup = header with myLba/alternateLba swapped, partitionEntryLba = lastUsableLba + 1, headerCrc32 zeroed then rehashed, assert backup array ends right before backup header.
+  5 writes via disk_submit (LBA 0, LBA 1, array at 2, backup array, backup header), wait_all, .Flush, wait.
+- Sniff libs (pure, is(partitionStart []byte) -> bool, shared.assert on length): lib/ntfs "NTFS    " @3, lib/ext4 u16le 0xEF53 @1080, lib/ifs u64le 0x5346_495f_554c_4c49 @0.
+- lib/gpt (pure): parse.odin (was gpt.odin): parse_header(data) (myLba must be 1, cannot parse the backup header), parse_entries(h, data) -> [dynamic]Partition, header_new, entries_write. mbr.odin: protective_mbr (finished; endingChs always 0xFFFFFF, fine). Readers do not check the protective MBR (GPT header + CRC decide).
+- adam/main.odin (debug test, already written): after the pci loop, per disk: print disk, detect_fses; on .GptNotGpt -> gpt_format(1 MS basic data partition 2048 .. blockCount-2048, 128 entries, fixed test guids), detect again, print errors + fses. Runs to alive_loop.
+- Verify on host after a run (quit qemu first): fdisk -l diskimg/nvme.img (sgdisk not installed). First boot verified 2026-10-18.
+- NEXT: second boot must detect WITHOUT formatting (no gpt_format call), fses empty (no fs inside). Add a print of each detect_fses result to tell the two boots apart.
+- WATCH: Pending holds ^Queue inside the disks.v dynamic array -> dangling if the array grows while pendings live.
 - Open nvme questions: ADMIN_QUEUE_DEPTH 2 vs spec max 4096; lbads 9..12 still enforced.
+- adam stack is 1 MiB now (was 16 KiB: fmt.tprintln(disk) overflowed it in a debug build).
 
 FREESTANDING NOTES
 - fmt has no print/println on freestanding (fmt_os.odin excluded). Use core:log: adam sets context.logger = runtime.Logger{adam_logger_proc, nil, .Debug, {.Level, .Short_File_Path}}; the proc calls syscalls.syscall_debug_print_userspace(text) (value param now defaults to 0).

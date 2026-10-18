@@ -1,13 +1,13 @@
 package shared
 
 Error :: enum u64 {
-	None                      = 0,
+	None = 0,
 	InvalidAPICall,
 	OutOfMemory,
 	Timeout,
 	Corrupt,
-
-	NvmeQueueFull             = 0x100,
+	NotFound,
+	NvmeQueueFull = 0x100,
 	NvmeFailed,
 	NvmeBarNotMemory,
 	NvmeBarTooSmall,
@@ -24,6 +24,5 @@ Error :: enum u64 {
 	NvmeNamespaceEmpty,
 	NvmeNoIoQueues,
 	NvmeIoQueuesExhausted,
-
-	GptNotGpt                 = 0x200,
+	GptNotGpt = 0x200,
 }

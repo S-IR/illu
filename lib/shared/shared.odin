@@ -1,4 +1,5 @@
 package shared
+import "base:runtime"
 import "core:mem"
 FrameBuffer :: struct {
 	base:   [^]u32,
@@ -6,8 +7,8 @@ FrameBuffer :: struct {
 	height: u64,
 	stride: u64,
 }
-api_check :: proc(ok: bool, loc := #caller_location) -> bool {
-	assert(ok, loc = loc)
+assert :: proc(ok: bool, loc := #caller_location) -> bool {
+	runtime.assert(ok, loc = loc)
 	return ok
 }
 

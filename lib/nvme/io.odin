@@ -131,27 +131,27 @@ queue_io :: proc(
 	shared.Error,
 ) {
 	opOk := opcode == .Read || opcode == .Write
-	if !shared.api_check(opOk) do return {}, .InvalidAPICall
+	if !shared.assert(opOk) do return {}, .InvalidAPICall
 
-	if !shared.api_check(len(bufs) > 0) do return {}, .InvalidAPICall
+	if !shared.assert(len(bufs) > 0) do return {}, .InvalidAPICall
 	total: u64
 	for buf, i in bufs {
 		start := uintptr(raw_data(buf))
 		end := start + uintptr(len(buf))
 		align := uintptr(4 if i == 0 else shared.PAGE_SIZE)
 		endOk := i == len(bufs) - 1 || end % shared.PAGE_SIZE == 0
-		if !shared.api_check(len(buf) > 0) do return {}, .InvalidAPICall
-		if !shared.api_check(start % align == 0) do return {}, .InvalidAPICall
-		if !shared.api_check(endOk) do return {}, .InvalidAPICall
+		if !shared.assert(len(buf) > 0) do return {}, .InvalidAPICall
+		if !shared.assert(start % align == 0) do return {}, .InvalidAPICall
+		if !shared.assert(endOk) do return {}, .InvalidAPICall
 		total += u64(len(buf))
 	}
 	blocksOk := total % u64(q.lbaSize) == 0
 	listOk := len(prpList) == prp_list_len(bufs)
 	listAddr := uintptr(raw_data(prpList))
-	if !shared.api_check(blocksOk) do return {}, .InvalidAPICall
-	if !shared.api_check(total <= q.maxTransfer) do return {}, .InvalidAPICall
-	if !shared.api_check(listOk) do return {}, .InvalidAPICall
-	if !shared.api_check(listAddr % shared.PAGE_SIZE == 0) do return {}, .InvalidAPICall
+	if !shared.assert(blocksOk) do return {}, .InvalidAPICall
+	if !shared.assert(total <= q.maxTransfer) do return {}, .InvalidAPICall
+	if !shared.assert(listOk) do return {}, .InvalidAPICall
+	if !shared.assert(listAddr % shared.PAGE_SIZE == 0) do return {}, .InvalidAPICall
 
 	cmd := Command {
 		header = {opcode = u8(opcode)},

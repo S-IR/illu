@@ -98,3 +98,8 @@ Partition :: struct {
 	typeGuid:          Guid,
 	firstLba, lastLba: u64,
 }
+MetaBlock :: enum {
+	Mbr,
+	PrimaryHeader,
+	BackupHeader,
+}

@@ -124,8 +124,15 @@ e1000 / e1000e (ring, TailDoorbell, completion = DD bit in own descriptor, in or
 - rx desc {addr, len, csum, status, errors, special}: buffers posted by rx owner, demux via rx contract + Deliver.
 - 82574 has 2 rx queues (rss), no flow steering we can rely on.
 
-rtl8822be wifi (adam/rtl8822be.odin):
-- tx/rx buffer-descriptor rings, firmware owned by adam. same shape as e1000: tx HasPerm, rx Deliver.
+rtl8168/8111 ethernet (10ec:8168, dev laptop) (ring, CycleBit-like: OWN bit written last, constant doorbell TxPoll NPQ, completion = device clears OWN in own descriptor, in order):
+- desc 16B {opts1 u32 (OWN bit 31, EOR bit 30, FS bit 29, LS bit 28, len), opts2 u32, addr u64}.
+- tx: HasPerm(addr, len, Read). EOR (ring wrap) set by kernel, client EOR deny.
+- rx: buffers posted by rx owner with OWN set, demux via rx contract + Deliver.
+- MSI / MSI-X, no pins.
+
+intel cnvi wifi (8086:7a70, iwlwifi family, dev laptop):
+- firmware blob + command queue owned by adam.
+- tx frame descriptor = up to 20 buffers {addr, len} -> List. details later.
 
 xhci (ring per endpoint, CycleBit, doorbell value = endpoint id):
 - transfer TRB allow: Normal, Setup/Data/Status (control), Isoch. link TRBs from clients deny, kernel handles wrap.

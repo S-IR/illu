@@ -23,7 +23,7 @@ Mbr :: struct #packed {
 #assert(offset_of(Mbr, partitions) == 446)
 
 protective_mbr :: proc(blockCount: u64) -> (mbr: Mbr, err: shared.Error) {
-	if !shared.api_check(blockCount >= 2) do return {}, .InvalidAPICall
+	if !shared.assert(blockCount >= 2) do return {}, .InvalidAPICall
 	mbr.signature = MBR_SIGNATURE
 	mbr.partitions[0] = {
 		startingChs = {0x00, 0x02, 0x00},

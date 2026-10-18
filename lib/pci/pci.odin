@@ -2,7 +2,7 @@ package pci
 
 PCI_NO_DEVICE :: u16(0xFFFF)
 PCI_MULTIFUNCTIONAL :: u8(0x80)
-
+CONFIG_SPACE_SIZE :: uintptr(4096)
 Class :: enum u8 {
 	MASS_STORAGE = 0x01,
 	NETWORK      = 0x02,
@@ -51,22 +51,23 @@ Device :: struct #all_or_none {
 	interruptLine, interruptPin:          u8,
 	bars:                                 [6]Bar,
 	capabilitiesPtr:                      u8,
-	capabilityCount:                      u8,
-	capabilities:                         [64]Capability,
+	capabilities:                         [dynamic; DEVICE_MAX_CAPABILITIES]Capability,
 }
+DEVICE_MAX_CAPABILITIES :: 48
 Capability :: struct #all_or_none {
 	id:     u8,
 	offset: u8,
 }
 
 config_read_u16 :: proc(device: ^Device, offset: uintptr) -> u16 {
-	return (^u16)(uintptr(device.configBase) + offset)^
+	assert(device != nil && offset & 1 == 0 && offset + 2 <= CONFIG_SPACE_SIZE)
+	return ecam_read_u16(device.configBase, u64(offset))
 }
 
 config_write_u16 :: proc(device: ^Device, offset: uintptr, value: u16) {
-	(^u16)(uintptr(device.configBase) + offset)^ = value
+	assert(device != nil && offset & 1 == 0 && offset + 2 <= CONFIG_SPACE_SIZE)
+	ecam_write_u16(device.configBase, u64(offset), value)
 }
-
 
 
 CONFIG_COMMAND_OFFSET :: uintptr(0x04)
@@ -74,3 +75,4 @@ CONFIG_COMMAND_OFFSET :: uintptr(0x04)
 COMMAND_IO_SPACE :: u16(1 << 0)
 COMMAND_MEMORY :: u16(1 << 1)
 COMMAND_BUS_MASTER :: u16(1 << 2)
+COMMAND_INTX_DISABLE :: u16(1 << 10)

@@ -147,15 +147,17 @@ controller_disable :: proc(regs: Controller, cap: CAP) -> shared.Error {
 	return .NvmeControllerFatal if read_csts(regs).cfs != 0 else .None
 }
 
-queue_pair_create :: proc(device: ^Device) -> (info: QueueInfo, err: shared.Error) {
+queue_pair_create :: proc(device: ^Device, msixRow: u16) -> (info: QueueInfo, err: shared.Error) {
 	assert(device.nextQid >= 1)
 	assert(device.queueDepth >= 2 && device.queueDepth <= QUEUE_DEPTH_SPEC_MAX)
 	if device.nextQid > device.queueCount do return {}, .NvmeIoQueuesExhausted
 	assert(device.nextQid <= u32(max(u16)))
 	qid := u16(device.nextQid)
 
-	sqPages := (u64(device.queueDepth) * size_of(Command) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
-	cqPages := (u64(device.queueDepth) * size_of(Completion) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
+	sqPages :=
+		(u64(device.queueDepth) * size_of(Command) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
+	cqPages :=
+		(u64(device.queueDepth) * size_of(Completion) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
 	pages, pagesOk := alloc.dma_pages(sqPages + cqPages)
 	if !pagesOk do return {}, .OutOfMemory
 	defer if err != .None do assert(syscalls.mem_free_userspace(pages) == .None)
@@ -168,7 +170,14 @@ queue_pair_create :: proc(device: ^Device) -> (info: QueueInfo, err: shared.Erro
 		{
 			header = {opcode = u8(ADMIN_COMMANDS.CREATE_IO_CQ)},
 			dataAddr = cq,
-			args = {createCq = {queueId = qid, sizeMinus1 = sizeMinus1, flags = {.Contiguous}}},
+			args = {
+				createCq = {
+					queueId = qid,
+					sizeMinus1 = sizeMinus1,
+					flags = {.Contiguous, .InterruptsEnable},
+					interruptVector = msixRow,
+				},
+			},
 		},
 	) or_return
 	_, sqErr := admin_execute_command(
