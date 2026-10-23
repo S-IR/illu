@@ -3,12 +3,12 @@ import "../lib/alloc"
 import "../lib/fs"
 import "../lib/gpt"
 import "../lib/ifs"
+import "../lib/log"
 import "../lib/pci"
 import "../lib/syscalls"
 import "../lib/userschedule"
 import "base:intrinsics"
 import "base:runtime"
-import "core:fmt"
 import "core:slice"
 ALIVE_PRINT_MASK :: u64(1) << 24 - 1
 
@@ -24,9 +24,16 @@ adam_entry :: proc "c" (
 	case .Start:
 		adam_start(slice.from_ptr(pciesPtr, int(pciesLen)))
 	case .Fault:
-		syscalls.syscall_debug_print_userspace("fault vector", saveArea.faultVector)
-		syscalls.syscall_debug_print_userspace("fault rip", saveArea.rip)
-		syscalls.syscall_debug_print_userspace("fault addr", saveArea.faultAddress)
+		log.write(
+			&adamLog,
+			.Critical,
+			.None,
+			saveArea.faultVector,
+			saveArea.rip,
+			saveArea.faultAddress,
+			saveArea.faultError,
+		)
+		adamLogPrinted = adam_log_dump(&adamLog, adamLogPrinted)
 		syscalls.grant_exit()
 	case .Resume:
 		unreachable()
@@ -35,40 +42,27 @@ adam_entry :: proc "c" (
 }
 
 adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
-	syscalls.syscall_debug_print_userspace("adam_start", u64(uintptr(rawptr(adam_start))))
+	adamLog.records = adamLogRecords[:]
+	log.write(&adamLog, .Debug, .None, u64(uintptr(rawptr(adam_start))))
 	context = runtime.default_context()
 	context.allocator = alloc.heap_allocator()
 	context.temp_allocator = alloc.heap_allocator()
 	context.assertion_failure_proc = adam_assertion_failure_handler
-
-	context.logger = runtime.Logger {
-		procedure    = adam_logger_proc,
-		data         = nil,
-		lowest_level = .Debug,
-		options      = {.Level, .Short_File_Path},
-	}
 
 	for &device in pcies {
 		result, code := adam_dispatch_pci_device(&device)
 
 		switch result {
 		case .Initialized:
-			syscalls.syscall_debug_print_userspace(
-				"pci driver initialized, class",
-				u64(device.classCode),
-			)
+			log.write(&adamLog, .Notice, .None, u64(device.classCode))
 		case .Failed:
-			syscalls.syscall_debug_print_userspace("pci driver failed")
-			syscalls.syscall_debug_print_userspace(fmt.tprint(code))
+			log.write(&adamLog, .Error, code, u64(device.classCode))
 		case .Ignored, .Unsupported:
-		// syscalls.syscall_debug_print_userspace("pci driver ignored or unsupported", code)
-
 		}
 	}
 
 	for &disk, i in disks.v {
-		syscalls.syscall_debug_print_userspace("disk:")
-		syscalls.syscall_debug_print_userspace(fmt.tprintln(disk))
+		log.write(&adamLog, .Informational, .None, u64(i), disk.blockCount, u64(disk.blockSize))
 		msFs := gpt.PartitionEntry {
 			firstLba   = 2048,
 			lastLba    = disk.blockCount - 2048,
@@ -79,31 +73,46 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 		}
 
 		fses, err := fs.detect_fses(&disk, i)
-		syscalls.syscall_debug_print_userspace(fmt.tprintf("detect 1 err:%d", err))
+		log.write(&adamLog, .Informational, err, u64(i))
 		if err != .None {
 
 			if err == .GptNotGpt do err = fs.gpt_format(&disk, {msFs}, 128, {2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
-			if err != nil do syscalls.syscall_debug_print_userspace(fmt.tprintf("disk err:%d", err))
+			if err != .None do log.write(&adamLog, .Error, err, u64(i))
 			fses, err = fs.detect_fses(&disk, i)
 
 		}
-		if err != nil {
-			syscalls.syscall_debug_print_userspace(fmt.tprintf("disk err:%d", err))
+		if err != .None {
+			log.write(&adamLog, .Error, err, u64(i))
+			adamLogPrinted = adam_log_dump(&adamLog, adamLogPrinted)
 			syscalls.grant_exit()
 		}
 		if len(fses) == 0 {
 			diskAlloc: ifs.DiskAllocator
 			diskAlloc, err = ifs.format(&disk, msFs.firstLba, msFs.lastLba - msFs.firstLba + 1)
-			syscalls.syscall_debug_print_userspace(fmt.tprintf("ifsFormatErr err:%d", err))
+			if err != .None do log.write(&adamLog, .Error, err, u64(i), msFs.firstLba)
 
 			fses, err = fs.detect_fses(&disk, i)
 			assert(err == .None && len(fses) == 1 && fses[0].type == .Ifs)
 		}
-		for fileSystem in fses do syscalls.syscall_debug_print_userspace(fmt.tprintln(fileSystem))
+		for fileSystem in fses {
+			log.write(
+				&adamLog,
+				.Notice,
+				.None,
+				u64(fileSystem.diskIdx),
+				fileSystem.start,
+				fileSystem.len,
+				u64(fileSystem.type),
+			)
+		}
 		for fileSystem in fses {
 			if fileSystem.type != .Ifs do continue
 			diskAlloc, mountErr := ifs.mount(&disk, fileSystem.start, fileSystem.len)
-			if mountErr != .None do syscalls.syscall_debug_print_userspace(fmt.tprintf("ifs mount err:%d", mountErr))
+			if mountErr != .None {
+				log.write(&adamLog, .Error, mountErr, fileSystem.start, fileSystem.len)
+			} else {
+				log.write(&adamLog, .Notice, .None, fileSystem.start, fileSystem.len)
+			}
 		}
 	}
 	free_all(context.temp_allocator)
@@ -121,13 +130,4 @@ alive_loop :: proc "c" () -> ! {
 		}
 		counter += 1
 	}
-}
-adam_logger_proc :: proc(
-	data: rawptr,
-	level: runtime.Logger_Level,
-	text: string,
-	options: runtime.Logger_Options,
-	location := #caller_location,
-) {
-	syscalls.syscall_debug_print_userspace(text)
 }

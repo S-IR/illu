@@ -54,5 +54,5 @@ DETOUR: LOGGING (2026-10-23, design agreed, nothing built)
 - Decided 2026-10-23: drop context.logger and core:log, use our own log proc. No strings stored in records, all fields numeric, the viewer decodes them with normal code.
 - Severity = syslog RFC 5424 levels 0..7 (Emergency..Debug), u8 enum. Milestones = Notice.
 - Record file field = u64 address of #caller_location file_path bytes (rodata, zero cost). #hash cannot take the caller path (needs a constant), Odin has no return-address intrinsic.
-- Step 1 DONE: Severity + LogRecord (64B) in lib/shared/log.odin.
-- NEXT for the detour: step 2 ring (LogRing {head u64 atomic claim, records []LogRecord, len power of 2}, log_write(ring, record)). OPEN question: accept torn reads in the viewer, or a per-slot sequence number (args drops to 3)? Then log proc, call sites, assert handler, .Fault record, tsc read, error origin.
+- DONE + boot verified 2026-10-23: lib/log (Severity, Record 64B with u8 seq, Ring, ring_push, write($severity, err, ..u64 args max 4, loc)), adam ring (adamLog 1024 records, adamLogPrinted), adam_log_dump in adam/debug.odin (serial viewer), all adam prints converted to log.write, context.logger removed, assert handler + .Fault log + dump.
+- NEXT for the detour: boot test, then error origin tracing, enum names in the dump (core:reflect), viewer perms on the ring.

@@ -1,5 +1,6 @@
 package adam
 import "../lib/diskhelpers"
+import "../lib/log"
 import "../lib/nvme"
 import "../lib/pci"
 import "../lib/shared"
@@ -19,7 +20,10 @@ disks: struct {
 	v:    [dynamic]diskhelpers.Disk,
 	lock: spinlock.Spinlock,
 }
-
+ADAM_LOG_RECORDS :: 1024
+adamLogRecords: [ADAM_LOG_RECORDS]log.Record
+adamLog: log.Ring
+adamLogPrinted: u64
 NVME_VECTOR :: u32(32)
 NVME_MSIX_ROW :: u16(0)
 
