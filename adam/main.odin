@@ -36,7 +36,6 @@ adam_entry :: proc "c" (
 
 adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 	syscalls.syscall_debug_print_userspace("adam_start", u64(uintptr(rawptr(adam_start))))
-	intrinsics.volatile_store((^int)(nil), -1)
 	context = runtime.default_context()
 	context.allocator = alloc.heap_allocator()
 	context.temp_allocator = alloc.heap_allocator()
