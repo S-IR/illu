@@ -1,8 +1,10 @@
 package diskhelpers
-
+import "../alloc"
 import "../nvme"
 import "../shared"
 import "base:intrinsics"
+import "core:math"
+import "core:mem"
 
 NvmeDisk :: struct {
 	dev:   nvme.Device,
@@ -122,4 +124,71 @@ wait_all :: proc(dps: []DiskPending) -> (err: shared.Error) {
 		if err == .None do err = waitErr
 	}
 	return err
+}
+
+disk_read_batch :: proc(
+	disk: ^Disk,
+	dps: ^[dynamic]DiskPending,
+	blocks: []u64,
+	bufs: [][]byte,
+) -> (
+	prpDma: u64,
+	err: shared.Error,
+) {
+	if !shared.assert(disk != nil) do return 0, .InvalidAPICall
+	if !shared.assert(dps != nil) do return 0, .InvalidAPICall
+	if !shared.assert(len(blocks) == len(bufs)) do return 0, .InvalidAPICall
+
+	for buf in bufs {
+		if !shared.assert(len(buf) > 0) do return 0, .InvalidAPICall
+		if !shared.assert(len(buf) % int(disk.blockSize) == 0) do return 0, .InvalidAPICall
+		if !shared.assert(uintptr(raw_data(buf)) % shared.PAGE_SIZE == 0) do return 0, .InvalidAPICall
+
+
+	}
+	switch &d in disk.driver {
+
+	case NvmeDisk:
+		listBytes: u64 = 0
+		for buf in bufs {
+			for off := 0; off < len(buf); off += int(d.queue.maxTransfer) {
+				cutSlice := buf[off:min(off + int(d.queue.maxTransfer), len(buf))]
+				listBytes += u64(
+					mem.align_forward_int(
+						nvme.prp_list_len({cutSlice}) * size_of(u64),
+						shared.PAGE_SIZE,
+					),
+				)
+			}
+		}
+
+		assert(listBytes % shared.PAGE_SIZE == 0)
+		if listBytes >= shared.PAGE_SIZE {
+			prpDma = alloc.dma_pages(listBytes / shared.PAGE_SIZE) or_return
+		}
+		listOff: u64 = 0
+		for buf, i in bufs {
+			for off := 0; off < len(buf); off += int(d.queue.maxTransfer) {
+				cutSlice := buf[off:min(off + int(d.queue.maxTransfer), len(buf))]
+				n := nvme.prp_list_len({cutSlice})
+				prpList: []u64 = nil
+				if n > 0 do prpList = mem.slice_ptr((^u64)(uintptr(prpDma + listOff)), n)
+				listOff += u64(mem.align_forward_int(n * size_of(u64), shared.PAGE_SIZE))
+				disk_submit(
+					disk,
+					dps,
+					.Read,
+					blocks[i] + u64(off) / u64(disk.blockSize),
+					cutSlice,
+					prpList,
+				) or_return
+
+			}
+		}
+		assert(listOff == listBytes)
+		return prpDma, .None
+	case:
+		unreachable()
+	}
+
 }

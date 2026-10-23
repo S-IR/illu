@@ -7,8 +7,13 @@ WORK RULES
 - Ultra terse: a few short lines. One point, one recommendation, one question max. No walls of text.
 - No invented design: minimal = minimal. No callbacks/proc-ptr args, state machines, extra params or new structs (check whether an existing struct already holds the data). Ask before any design choice.
 - No inferred rejections: a bare "no" = ask which part. Never widen it into a category.
-- Verify before showing: think it through mentally. NO scratchpad temp files, test images or compile/test runs (banned 2026-10-10). Reading real repo files and Odin core source is fine.
+- Verify before showing: think it through mentally. NO scratchpad temp files or test images. Reading real repo files and Odin core source is fine.
+- Compiling (2026-10-23): Claude MAY compile (commands that terminate, e.g. odin check / odin build to obj). Never run qemu: it never ends and is slow; the user runs it.
 - Never call SendFeedback (banned 2026-10-04).
+- Temp allocs use context.temp_allocator by default (2026-10-19). Do not push context.allocator + delete for scratch data.
+- Odin style APIs (2026-10-19): fns RETURN structs (value, err). No C-style "pass a ptr and fill it" params.
+- Never mention unused imports (2026-10-19): they compile away, the user does not care.
+- Insert spots (2026-10-23): when telling the user to add code to existing code, give file:line (grep/read the current file first).
 - Context files: all Claude memory/context for this project goes in .md files in the repo root. Never write hidden memory files.
 
 DESIGN RULES
@@ -27,7 +32,21 @@ IFS FACTS
 - lib/ifs may alloc DMA and do IO (2026-10-18). gpt/ntfs/ext4 stay pure.
 - Pathmap is lazy, no LRU, no eviction. Mount = full scan for the allocator only (see fs-context.md PATHMAP).
 
-CURRENT WORK (2026-10-18)
-- Done: MSI-X, GPT format + detect (both boots), lib/diskhelpers split, lib/ifs/alloc.odin (restored from 7f97d07 and fixed), lib/ifs/format.odin (takes a caller-owned ^DiskAllocator).
-- The adam debug test formats ifs on partition 2048..blockCount-2048 when detect finds 0 fses. Host check (od) ok: superblock {magic, root {0x200, 0x1000}}, dir {count 1, slot0 {0x1200, 0x1000}}, name header {0, 0x1000}.
-- NEXT: boot again (detect must find Ifs without formatting), then ifs mount: read the superblock, put root in the pathmap, full scan builds the DiskAllocator.
+CURRENT WORK (2026-10-23)
+- Done + boot verified: MSI-X, GPT format + detect, lib/diskhelpers split, ifs format, ifs mount (second boot: detect finds Ifs, mount returns .None).
+- ifs mount (lib/ifs/mount.odin): superblock, BFS per tree level (all dirs, then all their name files), usedBlocks guard vs cycles, classify child dirs via name file, return disk_allocator_init({1, partBlocks-1}, used[:]).
+  - Two grow-only DMA buffers reused across levels (dirsDma, namesDma). `level` is cleared and refilled with child dirs after the name read (bufs/nameBufs hold the data, level no longer read).
+  - Read pattern: prp, readErr := disk_read_batch (no or_return), defer free prp, wait_all ALWAYS, then readErr, then waitErr.
+- lib/ifs/file.odin: NameRef, NameRecord #packed, ref_name(buf, ref) (validated refs only), name_file_parse(buf) -> (refs view, err) (bounds chain makes overflow impossible, .Corrupt on garbage, no shared.assert on disk data), is_dir_name (trailing '/' with even count of preceding '\'), CHUNK_LINK "|/".
+- Not yet tested: format-then-mount in the same boot (fresh disk image). mount result (diskAlloc.free) not printed/checked.
+- Not checked by parser (user may decide): overlapping heap records, duplicate slotIdx. Orphan slots (slot without name, crash leak) are counted used, not reclaimed.
+- NEXT: basic CRUD (fs-context.md MILESTONE).
+
+DETOUR: LOGGING (2026-10-23, design agreed, nothing built)
+- Events with severity. Prod keeps errors + rare milestone events (boot stage, fs mounted). Verbose = debug only, gated by compile-time `when` (zero cost in prod).
+- Per-process ring buffer in memory, written by the process's context.logger. A viewer is a normal program granted read perms on the rings (no daemon, authority = memory perms). Persist: survive warm reboot region or a program copies rings to disk (open).
+- Binary fixed-size records: {tsc, severity, shared.Error, #caller_location file:line, few u64 args}. Formatting happens in the viewer. No struct dumps.
+- Error origin tracing: record where an error first becomes non-.None + each or_return hop.
+- Crash dump: kernel writes regs + stack top into the faulting process's ring (only kernel part).
+- syscall_debug_print (serial) stays for debug builds only.
+- NEXT for the detour: list what to refactor (logger proc in adam, ring layout, record struct, error tracing hook).

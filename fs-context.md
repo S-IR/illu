@@ -1,33 +1,25 @@
-FS LIB: CONTEXT FOR THE REWRITE FROM SCRATCH (written 2026-10-09)
+FS LIB: CONTEXT
 
-The previous fs lib was deleted on 2026-10-09. adam/fs is gone too. What exists now:
+What exists now:
 - lib/nvme: pure driver, no globals (init.odin, device.odin, io.odin, nvme.odin, nvme-regs.odin).
-- lib/fs/fs.odin: DiskDriver union {NvmeDisk{dev nvme.Device, queue nvme.Queue}} BY VALUE (no pointers), Disk{driver, blockCount, base, blockSize}, disk_new(driver, blockSize, blockCount, base) -> (disk, used size). Planned cleanup: return u64 + ok instead of int -1, drop the duplicate overflow check (division check + overflow_mul both present).
-- adam owns all global state: the disks array (+ lock) in adam/drivers.odin, nextMadeUpAddr in adam/gs. adam_dispatch_pci_device calls nvme.init, queue_pair_create, queue_init, then fs.disk_new, then appends. The NvmeDisk copy inside the disks array is the ONLY live copy (admin tail/head/phase/cid/nextQid + queue state are live hw state).
-- Tested in QEMU (.zed/debug.sh, image diskimg/nvme.img 64MiB, 512B blocks): init, admin cmds, disk registered at base 2^52. prod.sh lacks the nvme drive/device lines.
-- 2026-10-18 RUN AND WORKING: nvme I/O queues (submit/poll/wait), kernel wait_on sleep + MSI-X wake, disk_io/disk_submit, gpt_format, detect_fses (first boot: no GPT -> format -> detect, 0 fses). Host check: valid protective MBR, primary + backup headers, all CRCs ok.
+- lib/diskhelpers: DiskDriver union {NvmeDisk{dev nvme.Device, queue nvme.Queue}} BY VALUE (no pointers), Disk{driver, blockCount, base, blockSize}, disk_new(driver, blockSize, blockCount, base) -> (disk, used size). Planned cleanup: return u64 + ok instead of int -1, drop the duplicate overflow check (division check + overflow_mul both present).
+- adam owns all global state: the disks array (+ lock) in adam/drivers.odin, nextMadeUpAddr in adam/gs. adam_dispatch_pci_device calls nvme.init, queue_pair_create, queue_init, then diskhelpers.disk_new, then appends. The NvmeDisk copy inside the disks array is the ONLY live copy (admin tail/head/phase/cid/nextQid + queue state are live hw state).
+- Tested in QEMU (.zed/debug.sh, image diskimg/nvme.img 64MiB, 512B blocks): init, admin cmds, disk registered at base 2^52.
 Everything below is decided unless it is marked OPEN.
 
-PRINCIPLES
-- 2026-10-10: lib/fs = meta lib, MAY issue disk commands itself (detect_fses reads GPT + sniffs partitions).
-  Format libs (lib/gpt, lib/ntfs, lib/ext4) stay pure: bytes in, parsed data out, no IO.
-  2026-10-18: lib/ifs is NOT pure: it MAY alloc DMA and issue disk IO itself.
-- The caller sends those straight to the device lib (lib/nvme now, a sata lib later).
-  2026-10-13: per-hardware APIs are primary and always public. Generic convenience wrappers (e.g. read_from_disk/DiskPending) are OK on top for callers that do not care about the hw, but must never replace or hide the per-hw path.
+PRINCIPLES (general rules: claude-memory.md DESIGN RULES)
+- lib/fs = meta lib, MAY issue disk commands itself (detect_fses reads GPT + sniffs partitions).
+  Format libs (lib/gpt, lib/ntfs, lib/ext4) stay pure: bytes in, parsed data out, no IO. lib/ifs is NOT pure: it MAY alloc DMA and issue disk IO itself.
 - Seam = BlockRange{block, count}: every fs (this one, later ext4...) outputs it, every hw lib takes it. N fs + M hw, not N*M.
-- Expose hardware: the nvme lib is public at full capability (flush, FUA, write zeroes, trim...). Never hide it, never treat the disk like a potato.
-- Async hardware: submit everything independent, wait once, batched per phase / per tree level.
-  Never sync submit+wait per item. Never call a batch API with 1-element batches in a loop.
-  Each caller waits only its own pendings (queues are shared between processes, no queue-wide wait_all).
+- Queues are shared between processes: no queue-wide wait_all.
 - Single-phase pieces: no multi-phase ops inside the lib. The caller composes create/delete/move/copy/resize from pieces.
 - No implicit work: a missing parent gives .NotFound, and the caller creates parents itself.
 - A std-like file API (win32 CreateFile/ReadFile) is a separate lib on top.
-- Invalid API usage = assert AND return error, both, always: `if !shared.assert(cond) do return ..., .InvalidAPICall` (shared.assert was api_check; it must call runtime.assert, a bare assert inside package shared recurses into itself).
-- No made-up limits. Only real hardware limits (MDTS, MQES, ...). Any unavoidable software cap must be flagged loudly.
-- Prove first: lib/modelcheck (TLA+-like BFS over states) is the test standard. RAM-disk tests are extra.
+- shared.assert must call runtime.assert: a bare assert inside package shared recurses into itself.
+- RAM-disk tests are extra to modelcheck.
 
-ERRORS (last set)
-None, InvalidAPICall, NotFound, DirFull, OutOfRange, DiskFull, DiskFileFull, Corrupt, OutOfMemory, NameAlreadyExists.
+ERRORS
+shared.Error (lib/shared/error.odin). Exists: None, InvalidAPICall, OutOfMemory, Timeout, Corrupt, NotFound, FsDiskFull. Planned for ifs, not in the enum yet: DirFull, OutOfRange, DiskFileFull, NameAlreadyExists.
 
 ON-DISK LAYOUT
 - Block 0 = Superblock{magic u64 = 0x5346_495f_554c_4c49, root Slot} (24B).
@@ -75,9 +67,8 @@ PATHMAP (per process, private)
   and each link is also inserted under key path + "|k/" (k = chunk number 1..) so chunk k is found by hash.
 - Files enter the pathmap on open and leave on close (insert/remove pieces).
 - Root "/" must be in the map (the old code never inserted it).
-- MOUNT = superblock + root into the pathmap + FULL SCAN for the allocator: walk every dir and its slots to find every used extent and build the free list (no on-disk free map). It does NOT fill the pathmap. Done by the allocator owner (adam for now), once at boot, batched per tree level (all dirs of a level, then all their name files).
+- MOUNT = superblock + FULL SCAN for the allocator: walk every dir and its slots to find every used extent and build the free list (no on-disk free map). It does NOT fill the pathmap. Done by the allocator owner (adam for now), once at boot, batched per tree level (all dirs of a level, then all their name files).
   It can start from ANY dir (path + slot). It collects used extents (superblock, every dir, name file, file) for the allocator. An on-disk cache of this may come later.
-- lib/ifs may do IO itself (2026-10-18), so the old OPEN (how the scan hands reads to the caller with no IO in the lib; the scan_begin/scan_next state machine was rejected) is moot.
 - Known: one corrupt dir or name file aborts the whole scan. Deal with it when fs security starts.
 - path_split on the last unescaped '/'. Lookups must search every chunk of a chunked dir.
 
@@ -88,7 +79,8 @@ RESOLVE
 
 DISK ALLOCATOR
 - No on-disk free map: the boot scan rebuilds it (referenced = used, rest free).
-- Sorted [dynamic]Extent{block, count}, first fit, free = binary search + 4-case merge, init builds free gaps from the used list (.Corrupt on overlap or out of disk).
+- Range based (2026-10-19): DiskAllocator{free [dynamic]Extent, range Extent}. disk_allocator_init(range, used) -> (DiskAllocator, Error) builds free gaps inside range from the used list (.Corrupt on overlap or out of range). Separate allocators can own separate ranges.
+- Sorted, first fit, free = binary search + 4-case merge. ifs uses range {1, partBlocks-1} (block 0 = superblock stays outside).
 - A process gets big extents rarely and allocates locally. For now adam grants all. Policy (quotas, popups) = granter daemon later.
 
 PARALLELISM (decided, not built)
@@ -105,7 +97,7 @@ PARKED / OPEN
 - The file byte length is not stored (Slot = offset, cap). Fine for basic CRUD, a real file API needs it (type lib header).
 - Small files (~50% < 2KB) vs block-granular perms.
 
-DISK SECURITY (see contracts.md, fs-design.md, hardware-assumptions.md)
+DISK SECURITY (see contracts.md, hardware-assumptions.md)
 - No IOMMU, no LBA perms, no SR-IOV assumed. The kernel stays dumb and knows no device or fs.
 - Disk perms = memory perms: disk window = fake phys DISK_BASE + lba << blockShift, granted/split via prot_domain_edit.
 - Device commands are mediated by generic kernel contracts written by adam (contracts.md). Rejected: kernel hw knowledge, fully-trusted daemon, per-IO kernel round trip, bounce buffers.
@@ -128,6 +120,7 @@ GPT + FS DETECTION (state 2026-10-18: written, first boot run + verified)
 - lib/fs/parse.odin:
   detect_fses(disk ^Disk, diskIdx int) -> ([dynamic]Fs, shared.Error). Fs #all_or_none {diskIdx, start, len, type FsType{Ifs, Ntfs, Ext4}}.
   Reads GPT header (LBA 1), entry array (PRP list when needed), gpt.parse_entries, then ONE DMA PAGE PER PARTITION from firstLba (covers ext4 magic at 1080), submit all, wait_all, sniff ntfs.is / ext4.is / ifs.is. No match = skip. Detection only, no mount.
+- lib/diskhelpers:
   disk_io(disk, op nvme.IoOpcode, block, buf, prpList = nil) -> (DiskPending, Error): generic wrapper. .Flush needs block 0, empty buf, empty prpList -> nvme.queue_flush. .Read/.Write -> nvme.queue_io.
   disk_submit(disk, dps ^[dynamic]DiskPending, op, block, buf, prpList = nil) -> Error: disk_io + append; on .NvmeQueueFull with own pendings: wait_all, clear (also on wait error, so nothing is waited twice), retry; else return the error. On error the CALLER must wait_all(dps[:]) before returning (device may still DMA into buffers the caller's defers free).
   wait(dp), wait_all(dps []DiskPending) (slice, does not clear; caller clears).
@@ -138,22 +131,21 @@ GPT + FS DETECTION (state 2026-10-18: written, first boot run + verified)
   5 writes via disk_submit (LBA 0, LBA 1, array at 2, backup array, backup header), wait_all, .Flush, wait.
 - Sniff libs (pure, is(partitionStart []byte) -> bool, shared.assert on length): lib/ntfs "NTFS    " @3, lib/ext4 u16le 0xEF53 @1080, lib/ifs u64le 0x5346_495f_554c_4c49 @0.
 - lib/gpt (pure): parse.odin (was gpt.odin): parse_header(data) (myLba must be 1, cannot parse the backup header), parse_entries(h, data) -> [dynamic]Partition, header_new, entries_write. mbr.odin: protective_mbr (finished; endingChs always 0xFFFFFF, fine). Readers do not check the protective MBR (GPT header + CRC decide).
-- adam/main.odin (debug test, already written): after the pci loop, per disk: print disk, detect_fses; on .GptNotGpt -> gpt_format(1 MS basic data partition 2048 .. blockCount-2048, 128 entries, fixed test guids), detect again, print errors + fses. Runs to alive_loop.
-- Verify on host after a run (quit qemu first): fdisk -l diskimg/nvme.img (sgdisk not installed). First boot verified 2026-10-18.
-- Second boot verified 2026-10-18: detect err 0, no gpt_format, fses empty. adam/main.odin prints "detect 1 err".
+- adam/main.odin (debug test): after the pci loop, per disk: print disk, detect_fses; on .GptNotGpt -> gpt_format(1 MS basic data partition 2048 .. blockCount-2048, 128 entries, fixed test guids), detect again; 0 fses -> ifs format, detect again; every Ifs fs -> ifs.mount. Runs to alive_loop.
+- Verify on host after a run (quit qemu first): fdisk -l diskimg/nvme.img (sgdisk not installed).
 
-IFS FORMAT (NEXT, 2026-10-18)
-- Goal: format the empty GPT partition as ifs, re-detect -> 1 Ifs fs.
+IFS FORMAT (DONE, boot verified 2026-10-18)
 - Default caps (user chosen): root dir cap = PAGE_SIZE, name file cap = PAGE_SIZE.
-- Format writes superblock (block 0, root Slot), root dir (count 1, slot 0 = name file), name file header {0, cap}. Name file extent from the allocator (see ON-DISK LAYOUT).
-- Import cycle fix: fs imports ifs (ifs.is), ifs needs disk IO -> move Disk/DiskDriver/NvmeDisk/disk_new (lib/fs/fs.odin) + DiskPending/disk_io/disk_submit/wait/wait_all (lib/fs/parse.odin) into new lib/diskhelpers. They are quick helpers, not core API. Users: adam/drivers.odin, adam/main.odin, lib/fs.
+- format(disk, partStart, partBlocks) -> (DiskAllocator, Error): writes root dir (count 1, slot 0 = name file) + name file header {0, cap}, flush, then superblock (block 0, root Slot), flush. Extents from the allocator.
 - WATCH: Pending holds ^Queue inside the disks.v dynamic array -> dangling if the array grows while pendings live.
 - Open nvme questions: ADMIN_QUEUE_DEPTH 2 vs spec max 4096; lbads 9..12 still enforced.
-- adam stack is 1 MiB now (was 16 KiB: fmt.tprintln(disk) overflowed it in a debug build).
+- adam stack is 1 MiB (was 16 KiB: fmt.tprintln(disk) overflowed it in a debug build).
+
+IFS MOUNT (DONE, boot verified 2026-10-23): see claude-memory.md CURRENT WORK.
 
 FREESTANDING NOTES
 - fmt has no print/println on freestanding (fmt_os.odin excluded). Use core:log: adam sets context.logger = runtime.Logger{adam_logger_proc, nil, .Debug, {.Level, .Short_File_Path}}; the proc calls syscalls.syscall_debug_print_userspace(text) (value param now defaults to 0).
-- log/tprint allocate from context.temp_allocator = adam heap allocator, never freed.
+- log/tprint allocate from context.temp_allocator. The user added free for it (2026-10-19). Default: temp allocs use context.temp_allocator, no delete needed.
 - No checked int casts in Odin; use intrinsics overflow_add/sub/mul or compare against the target max before casting.
 
 MILESTONE
@@ -161,3 +153,11 @@ MILESTONE
 - Model to prove: 2 procs, 3-slot dir, name file, allocator, in-flight writes, crash transition.
   Invariants: no races, no corruption, no half writes, no double alloc, no use-after-free, durability after flush+ack,
   readers see old or new, tree stays a tree, crash leaks reclaimed by scan, no deadlock / lease acquired, garbage-proof parse.
+
+PERMS IDEAS (from the old fs-design.md, not built, still valid)
+- transfer_perm(oldPtr, oldSize, newPtr, newSize) syscall (generic, knows no fs): for resize/move. Caller needs W on both ranges, no overlap. Kernel scans every domain: resource == old range -> new range; inside old -> shifted + clipped (empty = removed); containing old (space owner) -> untouched; straddling an edge -> reject. Mapped: unmap old, map new, tlb shootdown. Disk window: list rewrite only. Live loan/pin on old -> .Busy. Stripping old perms is what makes reusing the old range safe.
+- Stale cached location in a pathmap: NoPermission = stale -> re-resolve once, retry; second failure is real. Disk is never mapped -> stale access = error, never a crash.
+- Fault upcall: page fault -> kernel saves regs to a user save area, enters the process at a registered handler with reason Fault (+ addr, read/write). Needed for SEH, guard pages, stack growth, perm probing.
+- Perm granter: policy daemon outside the kernel (adam for now, split later by delegating ranges). Request via shared page + Notify, granter prot_domain_edit Add + Notify back. Control path only. Granter dies -> no new perms, old ones keep working.
+- Unverified hw security: MSI-X vector per CQ grantable to a client; CQE posted only after data DMA is done (PCIe ordering); xHCI interrupter count on consumer controllers + setup TRB cross-device harm.
+- Revoke DoS: a client keeps re-pinning a shared target. Fix: revoker first pulls the client's slot + doorbell grants.

@@ -8,56 +8,59 @@ Extent :: struct {
 }
 
 DiskAllocator :: struct {
-	free:       [dynamic]Extent,
-	blockCount: u64,
+	free:  [dynamic]Extent,
+	range: Extent,
 }
 
 disk_allocator_init :: proc(
-	alloc: ^DiskAllocator,
-	blockCount: u64,
+	range: Extent,
 	used: []Extent,
 ) -> (
+	diskAlloc: DiskAllocator,
 	err: shared.Error,
 ) {
 
-	if !shared.assert(alloc != nil && len(alloc.free) == 0) do return .InvalidAPICall
-	defer if err != .None do clear(&alloc.free)
-	alloc.blockCount = blockCount
+	free: [dynamic]Extent
+	defer if err != .None do delete(free)
+	if !shared.assert(range.count > 0) do return {}, .InvalidAPICall
+	rangeUpperBound, overflown := intrinsics.overflow_add(range.block, range.count)
+	if !shared.assert(!overflown) do return {}, .InvalidAPICall
+
+
 	slice.sort_by(used, proc(a, b: Extent) -> bool {
 		return a.block < b.block
 	})
-	if !shared.assert(len(used) > 0 && used[0].block == 0) do return .InvalidAPICall
 
-	next := u64(0)
+	next := range.block
 	for extent in used {
-		if !shared.assert(extent.count > 0) do return .InvalidAPICall
+		if !shared.assert(extent.count > 0) do return {}, .InvalidAPICall
 
 
-		if extent.block < next do return .Corrupt
-		if extent.block > blockCount || extent.count > blockCount - extent.block do return .Corrupt
+		if extent.block < next do return {}, .Corrupt
+		if extent.block > rangeUpperBound || extent.count > rangeUpperBound - extent.block do return {}, .Corrupt
 		if extent.block > next {
-			_, aErr := append(&alloc.free, Extent{block = next, count = extent.block - next})
-			if aErr != nil do return .OutOfMemory
+			_, aErr := append(&free, Extent{block = next, count = extent.block - next})
+			if aErr != nil do return {}, .OutOfMemory
 		}
 		next = extent.block + extent.count
 	}
-	if next < blockCount {
-		_, aErr := append(&alloc.free, Extent{block = next, count = blockCount - next})
-		if aErr != nil do return .OutOfMemory
+	if next < rangeUpperBound {
+		_, aErr := append(&free, Extent{block = next, count = rangeUpperBound - next})
+		if aErr != nil do return {}, .OutOfMemory
 
 	}
-	return .None
+	return DiskAllocator{free = free, range = range}, .None
 }
 
 disk_free :: proc(alloc: ^DiskAllocator, block, count: u64) -> shared.Error {
 	if !shared.assert(alloc != nil) do return .InvalidAPICall
 
-	if !shared.assert(block > 0) do return .InvalidAPICall
+	if !shared.assert(block >= alloc.range.block) do return .InvalidAPICall
 	if !shared.assert(count > 0) do return .InvalidAPICall
 
 	blockUpperBound, overflown := intrinsics.overflow_add(block, count)
 	if !shared.assert(!overflown) do return .InvalidAPICall
-	if !shared.assert(blockUpperBound <= alloc.blockCount) do return .InvalidAPICall
+	if !shared.assert(blockUpperBound <= alloc.range.block + alloc.range.count) do return .InvalidAPICall
 
 
 	i, found := slice.binary_search_by(
@@ -99,7 +102,7 @@ disk_alloc :: proc(alloc: ^DiskAllocator, count: u64) -> (block: u64, err: share
 	if !shared.assert(count > 0) do return 0, .InvalidAPICall
 
 	for &extent, i in alloc.free {
-		assert(extent.block > 0)
+		assert(extent.block >= alloc.range.block)
 		assert(extent.count > 0)
 
 		if extent.count < count do continue

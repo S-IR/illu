@@ -88,16 +88,20 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 		}
 		if len(fses) == 0 {
 			diskAlloc: ifs.DiskAllocator
-			err = ifs.format(&disk, msFs.firstLba, msFs.lastLba - msFs.firstLba + 1, &diskAlloc)
+			diskAlloc, err = ifs.format(&disk, msFs.firstLba, msFs.lastLba - msFs.firstLba + 1)
 			syscalls.syscall_debug_print_userspace(fmt.tprintf("ifsFormatErr err:%d", err))
 
 			fses, err = fs.detect_fses(&disk, i)
 			assert(err == .None && len(fses) == 1 && fses[0].type == .Ifs)
 		}
-		for fs in fses do syscalls.syscall_debug_print_userspace(fmt.tprintln(fs))
-
+		for fileSystem in fses do syscalls.syscall_debug_print_userspace(fmt.tprintln(fileSystem))
+		for fileSystem in fses {
+			if fileSystem.type != .Ifs do continue
+			diskAlloc, mountErr := ifs.mount(&disk, fileSystem.start, fileSystem.len)
+			if mountErr != .None do syscalls.syscall_debug_print_userspace(fmt.tprintf("ifs mount err:%d", mountErr))
+		}
 	}
-
+	free_all(context.temp_allocator)
 	alive_loop()
 }
 

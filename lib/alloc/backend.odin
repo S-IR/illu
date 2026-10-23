@@ -44,14 +44,14 @@ backend_free_pages :: proc(addr, count: u64) {
 }
 when !KERNEL_BUILD {
 	@(require_results)
-	dma_pages :: proc(count: u64) -> (base: u64, ok: bool) {
+	dma_pages :: proc(count: u64) -> (base: u64, err: shared.Error) {
 		assert(count > 0)
 		regions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = count, flags = {.Write, .NX}}}
 		mmapErr, addr := syscalls.syscall_mmap_userspace(regions[:])
-		if mmapErr != .None do return 0, false
+		if mmapErr != .None do return 0, .OutOfMemory
 		assert(addr != nil)
 		assert(u64(uintptr(addr)) % shared.PAGE_SIZE == 0)
 		mem.zero(addr, int(count * shared.PAGE_SIZE))
-		return u64(uintptr(addr)), true
+		return u64(uintptr(addr)), .None
 	}
 }

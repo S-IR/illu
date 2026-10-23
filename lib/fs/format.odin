@@ -26,16 +26,14 @@ gpt_format :: proc(
 	arrayBlocks := header.firstUsableLba - header.partitionEntryLba
 	arrayBytes := arrayBlocks * u64(disk.blockSize)
 
-	metaDma, metaDmaOk := alloc.dma_pages(len(gpt.MetaBlock))
-	if !metaDmaOk do return .OutOfMemory
+	metaDma := alloc.dma_pages(len(gpt.MetaBlock)) or_return
 	defer syscalls.mem_free_userspace(metaDma)
 	metaDmaBuf := mem.byte_slice(
 		rawptr(uintptr(metaDma)),
 		len(gpt.MetaBlock) * int(disk.blockSize),
 	)
 
-	arrayDma, arrayDmaOk := alloc.dma_pages((arrayBytes + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE)
-	if !arrayDmaOk do return .OutOfMemory
+	arrayDma := alloc.dma_pages((arrayBytes + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE) or_return
 	defer syscalls.mem_free_userspace(arrayDma)
 
 	entriesBuf := mem.byte_slice(rawptr(uintptr(arrayDma)), int(arrayBytes))
@@ -46,11 +44,9 @@ gpt_format :: proc(
 	prpDma: u64 = 0
 	defer if prpDma != 0 do syscalls.mem_free_userspace(prpDma)
 	if prpListLen > 0 {
-		prpK: bool
-		prpDma, prpK = alloc.dma_pages(
+		prpDma = alloc.dma_pages(
 			u64((prpListLen + nvme.PRP_ENTRIES_PER_PAGE - 1) / nvme.PRP_ENTRIES_PER_PAGE),
-		)
-		if !prpK do return .OutOfMemory
+		) or_return
 		prpBuf = mem.slice_ptr((^u64)(uintptr(prpDma)), prpListLen)
 	}
 

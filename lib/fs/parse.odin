@@ -25,8 +25,7 @@ detect_fses :: proc(disk: ^diskhelpers.Disk, diskIdx: int) -> (fses: [dynamic]Fs
 	if !shared.assert(disk != nil) do return fses, .InvalidAPICall
 	assert(disk.blockSize <= shared.PAGE_SIZE)
 	assert(shared.PAGE_SIZE % disk.blockSize == 0)
-	headerDma, k := alloc.dma_pages(1)
-	if !k do return nil, .OutOfMemory
+	headerDma := alloc.dma_pages(1) or_return
 	defer syscalls.mem_free_userspace(headerDma)
 	headerDmaBuf := mem.byte_slice(rawptr(uintptr(headerDma)), int(disk.blockSize))
 
@@ -44,10 +43,9 @@ detect_fses :: proc(disk: ^diskhelpers.Disk, diskIdx: int) -> (fses: [dynamic]Fs
 	if blocksCount > header.firstUsableLba do return fses, .Corrupt
 	if header.partitionEntryLba > header.firstUsableLba - blocksCount do return fses, .Corrupt
 
-	entriesDma, k2 := alloc.dma_pages(
+	entriesDma := alloc.dma_pages(
 		(blocksCount * u64(disk.blockSize) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE,
-	)
-	if !k2 do return fses, .OutOfMemory
+	) or_return
 	defer syscalls.mem_free_userspace(entriesDma)
 
 	entriesBuf := mem.byte_slice(
@@ -59,11 +57,9 @@ detect_fses :: proc(disk: ^diskhelpers.Disk, diskIdx: int) -> (fses: [dynamic]Fs
 	prpDma: u64 = 0
 	defer if prpDma != 0 do syscalls.mem_free_userspace(prpDma)
 	if prpListLen > 0 {
-		prpK: bool
-		prpDma, prpK = alloc.dma_pages(
+		prpDma = alloc.dma_pages(
 			u64((prpListLen + nvme.PRP_ENTRIES_PER_PAGE - 1) / nvme.PRP_ENTRIES_PER_PAGE),
-		)
-		if !prpK do return {}, .OutOfMemory
+		) or_return
 		prpBuf = mem.slice_ptr((^u64)(uintptr(prpDma)), prpListLen)
 	}
 	dp = diskhelpers.disk_io(disk, .Read, header.partitionEntryLba, entriesBuf, prpBuf) or_return
@@ -72,8 +68,7 @@ detect_fses :: proc(disk: ^diskhelpers.Disk, diskIdx: int) -> (fses: [dynamic]Fs
 	defer delete(partitions)
 	if len(partitions) == 0 do return fses, .None
 
-	partitionDmas, okPartitions := alloc.dma_pages(u64(len(partitions)))
-	if !okPartitions do return {}, .OutOfMemory
+	partitionDmas := alloc.dma_pages(u64(len(partitions))) or_return
 	defer syscalls.mem_free_userspace(partitionDmas)
 	partitionsBuf := mem.byte_slice(
 		rawptr(uintptr(partitionDmas)),

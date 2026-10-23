@@ -8,27 +8,25 @@ import "core:mem"
 format :: proc(
 	disk: ^diskhelpers.Disk,
 	partStart, partBlocks: u64,
-	diskAlloc: ^DiskAllocator,
 ) -> (
+	diskAlloc: DiskAllocator,
 	err: shared.Error,
 ) {
-	if !shared.assert(disk != nil && diskAlloc != nil) do return .InvalidAPICall
-	if !shared.assert(shared.PAGE_SIZE % disk.blockSize == 0) do return .InvalidAPICall
-	if !shared.assert(partBlocks > 0) do return .InvalidAPICall
+	if !shared.assert(disk != nil) do return diskAlloc, .InvalidAPICall
+	if !shared.assert(shared.PAGE_SIZE % disk.blockSize == 0) do return diskAlloc, .InvalidAPICall
+	if !shared.assert(partBlocks > 1) do return diskAlloc, .InvalidAPICall
 	partUpperBound, overflown := intrinsics.overflow_add(partStart, partBlocks)
-	if !shared.assert(!overflown) do return .InvalidAPICall
-	if !shared.assert(partUpperBound <= disk.blockCount) do return .InvalidAPICall
+	if !shared.assert(!overflown) do return diskAlloc, .InvalidAPICall
+	if !shared.assert(partUpperBound <= disk.blockCount) do return diskAlloc, .InvalidAPICall
 
-	used := [?]Extent{{block = 0, count = 1}}
-	disk_allocator_init(diskAlloc, partBlocks, used[:]) or_return
-	defer if err != .None do clear(&diskAlloc.free)
+	diskAlloc = disk_allocator_init({1, partBlocks - 1}, nil) or_return
+	defer if err != .None do delete(diskAlloc.free)
 
 
-	dirBlock := disk_alloc(diskAlloc, ROOT_DIR_DEFAULT_CAP / u64(disk.blockSize)) or_return
-	nameBlock := disk_alloc(diskAlloc, NAME_FILE_DEFAULT_CAP / u64(disk.blockSize)) or_return
+	dirBlock := disk_alloc(&diskAlloc, ROOT_DIR_DEFAULT_CAP / u64(disk.blockSize)) or_return
+	nameBlock := disk_alloc(&diskAlloc, NAME_FILE_DEFAULT_CAP / u64(disk.blockSize)) or_return
 
-	dmas, ok := alloc.dma_pages(3)
-	if !ok do return .OutOfMemory
+	dmas := alloc.dma_pages(3) or_return
 	defer syscalls.mem_free_userspace(dmas)
 
 	sb: Superblock = {
@@ -55,8 +53,8 @@ format :: proc(
 		submitErr = diskhelpers.disk_submit(disk, &dps, .Write, partStart + nameBlock, nameBuf)
 	}
 	waitErr := diskhelpers.wait_all(dps[:])
-	if submitErr != .None do return submitErr
-	if waitErr != .None do return waitErr
+	if submitErr != .None do return diskAlloc, submitErr
+	if waitErr != .None do return diskAlloc, waitErr
 
 	dp := diskhelpers.disk_io(disk, .Flush, 0, nil) or_return
 	diskhelpers.wait(dp) or_return
@@ -65,5 +63,5 @@ format :: proc(
 	diskhelpers.wait(dp) or_return
 	dp = diskhelpers.disk_io(disk, .Flush, 0, nil) or_return
 	diskhelpers.wait(dp) or_return
-	return .None
+	return diskAlloc, .None
 }
