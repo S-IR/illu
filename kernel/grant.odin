@@ -18,6 +18,7 @@ SLEEPER_POLLS_PER_MS :: 10
 
 #assert(userschedule.SCHED_WEIGHT_TOTAL <= u64(1) << 20)
 #assert(size_of(userschedule.UserSaveArea) <= shared.PAGE_SIZE)
+#assert(u64(syscalls.SchedulerEnterReason.Fault) == 1)
 #assert(u64(syscalls.SchedulerEnterReason.Resume) == 2)
 
 IdleLevel :: distinct u8
@@ -50,7 +51,7 @@ when !ODIN_TEST {
 	@(default_calling_convention = "c")
 	foreign _ {
 		gs_read_cpustate :: proc() -> ^CpuState ---
-		run_resume :: proc(targetCr3: u64, entry: u64, area: ^userschedule.UserSaveArea) -> ! ---
+		run_resume :: proc(targetCr3: u64, entry: u64, area: ^userschedule.UserSaveArea, reason: syscalls.SchedulerEnterReason) -> ! ---
 		run_abort :: proc() -> ! ---
 		user_save_area_store :: proc(area: ^userschedule.UserSaveArea, frame: ^InterruptFrame) ---
 		save_area_xsave :: proc(area: ^userschedule.UserSaveArea) ---
@@ -64,9 +65,17 @@ when !ODIN_TEST {
 	testCpu: ^CpuState
 
 	gs_read_cpustate :: proc "contextless" () -> ^CpuState {return testCpu}
-	run_resume :: proc "contextless" (targetCr3: u64, entry: u64, area: ^userschedule.UserSaveArea) -> ! {for {}}
+	run_resume :: proc "contextless" (
+		targetCr3: u64,
+		entry: u64,
+		area: ^userschedule.UserSaveArea,
+		reason: syscalls.SchedulerEnterReason,
+	) -> ! {for {}}
 	run_abort :: proc "contextless" () -> ! {for {}}
-	user_save_area_store :: proc "contextless" (area: ^userschedule.UserSaveArea, frame: ^InterruptFrame) {}
+	user_save_area_store :: proc "contextless" (
+		area: ^userschedule.UserSaveArea,
+		frame: ^InterruptFrame,
+	) {}
 	save_area_xsave :: proc "contextless" (area: ^userschedule.UserSaveArea) {}
 	cpu_cli :: proc "contextless" () {}
 	cpu_monitor :: proc "contextless" (address: rawptr) {}
@@ -118,7 +127,13 @@ grant_enqueue :: proc(cpu: ^CpuState, grant: CpuGrant) -> mem.Allocator_Error {
 	return .None
 }
 
-grant_find_locked :: proc(cpu: ^CpuState, domain: ^ProtectionDomain) -> (grant: ^CpuGrant, asleep: bool) {
+grant_find_locked :: proc(
+	cpu: ^CpuState,
+	domain: ^ProtectionDomain,
+) -> (
+	grant: ^CpuGrant,
+	asleep: bool,
+) {
 	if cpu.currentGrant.domain == domain && cpu.currentGrant.weight > 0 do return &cpu.currentGrant, false
 	for &queued in cpu.grants {
 		if queued.domain == domain do return &queued, false
@@ -192,13 +207,13 @@ grant_spawn :: proc(
 		defer spinlock.unlock(&cpu.lock)
 
 		grant := CpuGrant {
-			saveArea = saveArea,
+			saveArea         = saveArea,
 			saveAreaUnderlay = saveAreaUnderlay,
-			entry = entry,
-			weight = weight,
-			domain = domain,
-			virtualTime = cpu.floorVirtualTime + grant_charge(weight),
-			idleLevel = IdleLevel(max(info.idleCount, 1) - 1),
+			entry            = entry,
+			weight           = weight,
+			domain           = domain,
+			virtualTime      = cpu.floorVirtualTime + grant_charge(weight),
+			idleLevel        = IdleLevel(max(info.idleCount, 1) - 1),
 		}
 		if grant_enqueue(cpu, grant) != nil do return .OutOfMemory
 		intrinsics.atomic_store(&info.grantedWeight, info.grantedWeight + weight)
@@ -316,7 +331,7 @@ grant_run :: proc(cpu: ^CpuState, next: CpuGrant, contended: bool) -> ! {
 		lapic_disable_deadline()
 		cpu.sliceArmed = false
 	}
-	run_resume(domain_cr3(cpu, next.domain), next.entry, next.saveArea)
+	run_resume(domain_cr3(cpu, next.domain), next.entry, next.saveArea, .Resume)
 }
 
 cpu_sleep :: proc(cpu: ^CpuState) {
@@ -338,7 +353,13 @@ cpu_sleep :: proc(cpu: ^CpuState) {
 	cpu_mwait(info.mwaitHints[idleLevel])
 }
 
-sleep_target :: proc(cpu: ^CpuState) -> (watched: ^u64, watchedOld, deadline: u64, idleLevel: IdleLevel) {
+sleep_target :: proc(
+	cpu: ^CpuState,
+) -> (
+	watched: ^u64,
+	watchedOld, deadline: u64,
+	idleLevel: IdleLevel,
+) {
 	info := cpu_info(cpu)
 	spinlock.lock(&cpu.lock)
 	defer spinlock.unlock(&cpu.lock)
@@ -362,7 +383,8 @@ grant_wake_locked :: proc(cpu: ^CpuState) {
 	now := ah.rdtsc_asm()
 	for idx := len(cpu.sleepers) - 1; idx >= 0; idx -= 1 {
 		sleeper := cpu.sleepers[idx]
-		changed := intrinsics.atomic_load((^u64)(pmm.phys_to_ptr(sleeper.addr))) != sleeper.oldValue
+		changed :=
+			intrinsics.atomic_load((^u64)(pmm.phys_to_ptr(sleeper.addr))) != sleeper.oldValue
 		if !changed && now < sleeper.deadline do continue
 		saveArea := (^userschedule.UserSaveArea)(pmm.phys_to_ptr(u64(uintptr(sleeper.saveArea))))
 		result := syscalls.WaitOnError.None if changed else syscalls.WaitOnError.TimedOut
@@ -385,7 +407,20 @@ grant_preempt :: proc(cpu: ^CpuState, frame: ^InterruptFrame) -> ! {
 	}
 	grant_switch_out(cpu, nil)
 }
-
+grant_fault :: proc(cpu: ^CpuState, frame: ^InterruptFrame) -> ! {
+	grant := &cpu.currentGrant
+	assert(grant.domain != nil)
+	assert(grant.saveArea != nil)
+	saveArea := (^userschedule.UserSaveArea)(pmm.phys_to_ptr(u64(uintptr(grant.saveArea))))
+	if intrinsics.atomic_load(&grant.weight) == 0 || saveArea.control.restoring {
+		grant_exit()
+	}
+	user_save_area_store(saveArea, frame)
+	saveArea.faultVector = frame.interruptNumber
+	saveArea.faultError = frame.error_code
+	saveArea.faultAddress = ah.read_cr2()
+	run_resume(domain_cr3(cpu, grant.domain), grant.entry, grant.saveArea, .Fault)
+}
 grant_switch_out :: proc(cpu: ^CpuState, wait: Maybe(WaitTarget)) -> ! {
 	kernel_switch_cr3()
 	released: ^MemoryUnderlay

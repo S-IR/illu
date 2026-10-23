@@ -15,6 +15,7 @@ WORK RULES
 - Never mention unused imports (2026-10-19): they compile away, the user does not care.
 - Insert spots (2026-10-23): when telling the user to add code to existing code, give file:line (grep/read the current file first).
 - Context files: all Claude memory/context for this project goes in .md files in the repo root. Never write hidden memory files.
+- Commit reminder (2026-10-23): when a task is done and ready to git commit, remind the user to run `zed prod.sh` too.
 
 DESIGN RULES
 - Expose to userland: the kernel does only security-sensitive work. Routing, policy, tuning and convenience are userland's job. Foot-guns allowed.
@@ -44,9 +45,14 @@ CURRENT WORK (2026-10-23)
 
 DETOUR: LOGGING (2026-10-23, design agreed, nothing built)
 - Events with severity. Prod keeps errors + rare milestone events (boot stage, fs mounted). Verbose = debug only, gated by compile-time `when` (zero cost in prod).
-- Per-process ring buffer in memory, written by the process's context.logger. A viewer is a normal program granted read perms on the rings (no daemon, authority = memory perms). Persist: survive warm reboot region or a program copies rings to disk (open).
+- Per-process ring buffer in memory, written by the process's own log proc. A viewer is a normal program granted read perms on the rings (no daemon, authority = memory perms). Persist: survive warm reboot region or a program copies rings to disk (open).
 - Binary fixed-size records: {tsc, severity, shared.Error, #caller_location file:line, few u64 args}. Formatting happens in the viewer. No struct dumps.
 - Error origin tracing: record where an error first becomes non-.None + each or_return hop.
-- Crash dump: kernel writes regs + stack top into the faulting process's ring (only kernel part).
+- Crash dump: NO kernel part (2026-10-23). The process logs its own fault from the .Fault entry + saveArea. The kernel never touches log rings.
+- FAULT FORWARDING (built + boot verified 2026-10-23: #PF nil write -> adam .Fault prints vector/rip/cr2, grant_exit): grant_fault in kernel/grant.odin, adam _start fault branch in asm_helpers/adam_helpers.asm. User fault -> if saveArea.control.restoring is set (handler/restore still running) kill the grant, else store the frame like grant_preempt, write vector/error/cr2 into the 3 spare u64s of UserSaveArea (offset 168), enter entry with .Fault. App logs, then fixes + restores itself or grant_exit. Kernel faults still halt. Today: kernel/idt.odin user fault prints + grant_exit. Handler stack = the faulting rsp from saveArea minus red zone (stack overflow -> killed). Separate fault stack only when stack growth is built.
 - syscall_debug_print (serial) stays for debug builds only.
-- NEXT for the detour: list what to refactor (logger proc in adam, ring layout, record struct, error tracing hook).
+- Decided 2026-10-23: drop context.logger and core:log, use our own log proc. No strings stored in records, all fields numeric, the viewer decodes them with normal code.
+- Severity = syslog RFC 5424 levels 0..7 (Emergency..Debug), u8 enum. Milestones = Notice.
+- Record file field = u64 address of #caller_location file_path bytes (rodata, zero cost). #hash cannot take the caller path (needs a constant), Odin has no return-address intrinsic.
+- Step 1 DONE: Severity + LogRecord (64B) in lib/shared/log.odin.
+- NEXT for the detour: step 2 ring (LogRing {head u64 atomic claim, records []LogRecord, len power of 2}, log_write(ring, record)). OPEN question: accept torn reads in the viewer, or a per-slot sequence number (args drops to 3)? Then log proc, call sites, assert handler, .Fault record, tsc read, error origin.

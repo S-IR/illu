@@ -6,6 +6,7 @@ import "../lib/ifs"
 import "../lib/pci"
 import "../lib/syscalls"
 import "../lib/userschedule"
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:slice"
@@ -22,15 +23,20 @@ adam_entry :: proc "c" (
 	switch reason {
 	case .Start:
 		adam_start(slice.from_ptr(pciesPtr, int(pciesLen)))
-	case .Fault, .Resume:
+	case .Fault:
+		syscalls.syscall_debug_print_userspace("fault vector", saveArea.faultVector)
+		syscalls.syscall_debug_print_userspace("fault rip", saveArea.rip)
+		syscalls.syscall_debug_print_userspace("fault addr", saveArea.faultAddress)
 		syscalls.grant_exit()
+	case .Resume:
+		unreachable()
 	}
 	unreachable()
 }
 
 adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 	syscalls.syscall_debug_print_userspace("adam_start", u64(uintptr(rawptr(adam_start))))
-
+	intrinsics.volatile_store((^int)(nil), -1)
 	context = runtime.default_context()
 	context.allocator = alloc.heap_allocator()
 	context.temp_allocator = alloc.heap_allocator()

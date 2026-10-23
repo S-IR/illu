@@ -850,6 +850,7 @@ cpu_halt:
 .global run_resume
 run_resume:
     cli
+    mov %rcx, %r10
     mov %rsi, %r8
     mov %rdx, %r9
     mov kernel_xsave_mask(%rip), %eax
@@ -869,7 +870,7 @@ run_resume:
     pushq $USER_RFLAGS_FORCED
     pushq $USER_CS
     push %r8
-    mov $RESUME_REASON, %edi
+    mov %r10, %rdi
     mov %r9, %rsi
     xor %eax, %eax
     xor %ebx, %ebx

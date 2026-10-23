@@ -13,14 +13,14 @@ MXCSR_DEFAULT :: u32(0x1F80)
 XSAVE_MXCSR_OFFSET :: 24
 
 UserSaveArea :: struct #align (64) {
-	rax, rbx, rcx, rdx, rsi, rdi, rbp:    u64,
-	r8, r9, r10, r11, r12, r13, r14, r15: u64,
-	rip, rsp, rflags:                     u64,
-	gsBase:                               u64,
-	control:                              SaveControl,
-	xsaveMask:                            u64,
-	_:                                    [3]u64,
-	xsave:                                [XSAVE_AREA_BYTES]u8,
+	rax, rbx, rcx, rdx, rsi, rdi, rbp:     u64,
+	r8, r9, r10, r11, r12, r13, r14, r15:  u64,
+	rip, rsp, rflags:                      u64,
+	gsBase:                                u64,
+	control:                               SaveControl,
+	xsaveMask:                             u64,
+	faultVector, faultError, faultAddress: u64,
+	xsave:                                 [XSAVE_AREA_BYTES]u8,
 }
 
 #assert(offset_of(UserSaveArea, rax) == 0)
@@ -34,13 +34,15 @@ UserSaveArea :: struct #align (64) {
 #assert(offset_of(UserSaveArea, xsave) == 192)
 #assert(offset_of(UserSaveArea, xsave) % 64 == 0)
 #assert(XSAVE_AREA_BYTES % 64 == 0)
-
+#assert(offset_of(UserSaveArea, faultVector) == 168)
+#assert(offset_of(UserSaveArea, faultError) == 176)
+#assert(offset_of(UserSaveArea, faultAddress) == 184)
 save_area_init :: proc "contextless" (area: ^UserSaveArea, rip, rsp: u64) {
 	area^ = {
-		rip       = rip,
-		rsp       = rsp,
-		rflags    = 0x202,
-		control   = {restoring = true},
+		rip = rip,
+		rsp = rsp,
+		rflags = 0x202,
+		control = {restoring = true},
 		xsaveMask = XSAVE_MASK_ALL,
 	}
 	(^u32)(&area.xsave[XSAVE_MXCSR_OFFSET])^ = MXCSR_DEFAULT
@@ -55,10 +57,10 @@ MAX_IDLE_STATES :: 7
 
 CpuInfo :: struct #align (64) {
 	grantedWeight: u64,
-	apicId:         u32,
-	mwaitHints:     [MAX_IDLE_STATES]u32,
-	idleCount:      u8,
-	online:         bool,
+	apicId:        u32,
+	mwaitHints:    [MAX_IDLE_STATES]u32,
+	idleCount:     u8,
+	online:        bool,
 }
 #assert(size_of(CpuInfo) == 64)
 

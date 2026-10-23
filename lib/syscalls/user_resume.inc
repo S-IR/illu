@@ -27,6 +27,7 @@
 
 .equ USER_CS,0x2B
 .equ USER_SS,0x23
+.equ FAULT_REASON,1
 .equ RESUME_REASON,2
 
 .macro USER_RESUME_BODY

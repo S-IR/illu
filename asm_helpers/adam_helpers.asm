@@ -4,9 +4,22 @@
 
 .global _start
 _start:
+    cmp $FAULT_REASON, %rdi
+    jne 1f
+    mov SA_RSP(%rsi), %rsp
+    sub $USER_RED_ZONE, %rsp
+    and $-16, %rsp
+    pushq $0
+    mov SA_GSBASE(%rsi), %rax
+    wrgsbase %rax
+    mov %rsi, %rcx
+    xor %esi, %esi
+    jmp adam_entry
+1:
     cmp $RESUME_REASON, %rdi
     jne adam_entry
     USER_RESUME_BODY
+
 
 .global mmio_read_u8
 mmio_read_u8:

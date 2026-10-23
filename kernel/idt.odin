@@ -193,7 +193,7 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		print.serial_write_hex(gs_read_cpustate().currentGrant.domain.pml4)
 		print.serial_writeln("")
 		spinlock.unlock(&serialPrintLock)
-		grant_exit()
+		grant_fault(gs_read_cpustate(), frame)
 	}
 
 	name := exceptionNames[frame.interruptNumber]
