@@ -23,15 +23,16 @@ FsType :: enum {
 }
 detect_fses :: proc(disk: ^diskhelpers.Disk, diskIdx: int) -> (fses: [dynamic]Fs, err: shared.Error) {
 	if !shared.assert(disk != nil) do return fses, .InvalidAPICall
+	defer if err != .None do delete(fses)
 	assert(disk.blockSize <= shared.PAGE_SIZE)
 	assert(shared.PAGE_SIZE % disk.blockSize == 0)
-	headerDma := alloc.dma_pages(1) or_return
-	defer syscalls.mem_free_userspace(headerDma)
-	headerDmaBuf := mem.byte_slice(rawptr(uintptr(headerDma)), int(disk.blockSize))
+	headerDmaBuf, hErr := make_aligned([]byte, disk.blockSize, shared.PAGE_SIZE, context.temp_allocator)
+	if hErr != nil do return fses, .OutOfMemory
 
-
-	dp := diskhelpers.disk_io(disk, .Read, gpt.HEADER_BLOCK_LOCATION, headerDmaBuf) or_return
-	diskhelpers.wait(dp) or_return
+	dps := make([dynamic]diskhelpers.DiskPending, context.temp_allocator)
+	diskhelpers.disk_io(disk, &dps, .Read, {gpt.HEADER_BLOCK_LOCATION}, {headerDmaBuf}) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	clear(&dps)
 	header := gpt.parse_header(headerDmaBuf) or_return
 	if header.partitionEntryCount == 0 do return fses, .None
 
@@ -43,48 +44,37 @@ detect_fses :: proc(disk: ^diskhelpers.Disk, diskIdx: int) -> (fses: [dynamic]Fs
 	if blocksCount > header.firstUsableLba do return fses, .Corrupt
 	if header.partitionEntryLba > header.firstUsableLba - blocksCount do return fses, .Corrupt
 
-	entriesDma := alloc.dma_pages(
-		(blocksCount * u64(disk.blockSize) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE,
-	) or_return
-	defer syscalls.mem_free_userspace(entriesDma)
-
-	entriesBuf := mem.byte_slice(
-		rawptr(uintptr(entriesDma)),
-		int(blocksCount * u64(disk.blockSize)),
+	entriesBuf, eErr := make_aligned(
+		[]byte,
+		blocksCount * u64(disk.blockSize),
+		shared.PAGE_SIZE,
+		context.temp_allocator,
 	)
-	prpListLen := nvme.prp_list_len({entriesBuf})
-	prpBuf: []u64 = nil
-	prpDma: u64 = 0
-	defer if prpDma != 0 do syscalls.mem_free_userspace(prpDma)
-	if prpListLen > 0 {
-		prpDma = alloc.dma_pages(
-			u64((prpListLen + nvme.PRP_ENTRIES_PER_PAGE - 1) / nvme.PRP_ENTRIES_PER_PAGE),
-		) or_return
-		prpBuf = mem.slice_ptr((^u64)(uintptr(prpDma)), prpListLen)
-	}
-	dp = diskhelpers.disk_io(disk, .Read, header.partitionEntryLba, entriesBuf, prpBuf) or_return
-	diskhelpers.wait(dp) or_return
+	if eErr != nil do return fses, .OutOfMemory
+	diskhelpers.disk_io(disk, &dps, .Read, {header.partitionEntryLba}, {entriesBuf}) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	clear(&dps)
 	partitions := gpt.parse_entries(header, entriesBuf) or_return
 	defer delete(partitions)
 	if len(partitions) == 0 do return fses, .None
 
-	partitionDmas := alloc.dma_pages(u64(len(partitions))) or_return
-	defer syscalls.mem_free_userspace(partitionDmas)
-	partitionsBuf := mem.byte_slice(
-		rawptr(uintptr(partitionDmas)),
+	partitionsBuf, dErr := make_aligned(
+		[]byte,
 		len(partitions) * shared.PAGE_SIZE,
+		shared.PAGE_SIZE,
+		context.temp_allocator,
 	)
+	if dErr != nil do return fses, .OutOfMemory
 
-	dps := make([dynamic]diskhelpers.DiskPending, 0, len(partitions))
-	defer delete(dps)
+	partitionBlocks, bErr := make([]u64, len(partitions), context.temp_allocator)
+	if bErr != nil do return fses, .OutOfMemory
+	partitionBufs, pErr := make([][]byte, len(partitions), context.temp_allocator)
+	if pErr != nil do return fses, .OutOfMemory
 	for partition, i in partitions {
-		buf := partitionsBuf[i * shared.PAGE_SIZE:][:shared.PAGE_SIZE]
-		submitErr := diskhelpers.disk_submit(disk, &dps, .Read, partition.firstLba, buf)
-		if submitErr != .None {
-			diskhelpers.wait_all(dps[:])
-			return fses, submitErr
-		}
+		partitionBlocks[i] = partition.firstLba
+		partitionBufs[i] = partitionsBuf[i * shared.PAGE_SIZE:][:shared.PAGE_SIZE]
 	}
+	diskhelpers.disk_io(disk, &dps, .Read, partitionBlocks, partitionBufs) or_return
 	diskhelpers.wait_all(dps[:]) or_return
 	for partition, i in partitions {
 		buf := partitionsBuf[i * shared.PAGE_SIZE:][:shared.PAGE_SIZE]
@@ -99,15 +89,13 @@ detect_fses :: proc(disk: ^diskhelpers.Disk, diskIdx: int) -> (fses: [dynamic]Fs
 		case:
 			continue
 		}
-		append(
-			&fses,
-			Fs {
-				diskIdx = diskIdx,
-				start = partition.firstLba,
-				len = partition.lastLba - partition.firstLba + 1,
-				type = fsType,
-			},
-		)
+		fs := Fs {
+			diskIdx = diskIdx,
+			start   = partition.firstLba,
+			len     = partition.lastLba - partition.firstLba + 1,
+			type    = fsType,
+		}
+		if _, aErr := append(&fses, fs); aErr != nil do return fses, .OutOfMemory
 	}
 	return fses, .None
 }

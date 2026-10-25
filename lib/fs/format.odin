@@ -26,29 +26,16 @@ gpt_format :: proc(
 	arrayBlocks := header.firstUsableLba - header.partitionEntryLba
 	arrayBytes := arrayBlocks * u64(disk.blockSize)
 
-	metaDma := alloc.dma_pages(len(gpt.MetaBlock)) or_return
-	defer syscalls.mem_free_userspace(metaDma)
-	metaDmaBuf := mem.byte_slice(
-		rawptr(uintptr(metaDma)),
+	metaDmaBuf, mErr := make_aligned(
+		[]byte,
 		len(gpt.MetaBlock) * int(disk.blockSize),
+		shared.PAGE_SIZE,
+		context.temp_allocator,
 	)
+	if mErr != nil do return .OutOfMemory
+	entriesBuf, eErr := make_aligned([]byte, arrayBytes, shared.PAGE_SIZE, context.temp_allocator)
+	if eErr != nil do return .OutOfMemory
 
-	arrayDma := alloc.dma_pages((arrayBytes + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE) or_return
-	defer syscalls.mem_free_userspace(arrayDma)
-
-	entriesBuf := mem.byte_slice(rawptr(uintptr(arrayDma)), int(arrayBytes))
-
-
-	prpListLen := nvme.prp_list_len({entriesBuf})
-	prpBuf: []u64 = nil
-	prpDma: u64 = 0
-	defer if prpDma != 0 do syscalls.mem_free_userspace(prpDma)
-	if prpListLen > 0 {
-		prpDma = alloc.dma_pages(
-			u64((prpListLen + nvme.PRP_ENTRIES_PER_PAGE - 1) / nvme.PRP_ENTRIES_PER_PAGE),
-		) or_return
-		prpBuf = mem.slice_ptr((^u64)(uintptr(prpDma)), prpListLen)
-	}
 
 	blocks: [gpt.MetaBlock][]byte
 	for &block, i in blocks {
@@ -69,36 +56,18 @@ gpt_format :: proc(
 	copy(blocks[.BackupHeader], mem.any_to_bytes(backup))
 	assert(backup.partitionEntryLba + arrayBlocks == backup.myLba)
 
-	SingleWrite :: struct {
-		block:   u64,
-		buf:     []byte,
-		prpList: []u64,
-	}
-	writesTodo := [?]SingleWrite {
-		{0, blocks[.Mbr], nil},
-		{header.myLba, blocks[.PrimaryHeader], nil},
-		{header.partitionEntryLba, entriesBuf, prpBuf},
-		{backup.partitionEntryLba, entriesBuf, prpBuf},
-		{backup.myLba, blocks[.BackupHeader], nil},
-	}
-	dps := make([dynamic]diskhelpers.DiskPending, 0, len(writesTodo))
-	defer delete(dps)
-	for writeTodo in writesTodo {
-		submitErr := diskhelpers.disk_submit(
-			disk,
-			&dps,
-			.Write,
-			writeTodo.block,
-			writeTodo.buf,
-			writeTodo.prpList,
-		)
-		if submitErr != .None {
-			diskhelpers.wait_all(dps[:])
-			return submitErr
-		}
-	}
+	dps := make([dynamic]diskhelpers.DiskPending, context.temp_allocator)
+	diskhelpers.disk_io(
+		disk,
+		&dps,
+		.Write,
+		{0, header.myLba, header.partitionEntryLba, backup.partitionEntryLba, backup.myLba},
+		{blocks[.Mbr], blocks[.PrimaryHeader], entriesBuf, entriesBuf, blocks[.BackupHeader]},
+	) or_return
 	diskhelpers.wait_all(dps[:]) or_return
-	dp := diskhelpers.disk_io(disk, .Flush, 0, nil) or_return
-	diskhelpers.wait(dp) or_return
+	clear(&dps)
+
+	diskhelpers.disk_io(disk, &dps, .Flush, nil, nil) or_return
+	diskhelpers.wait_all(dps[:]) or_return
 	return .None
 }

@@ -26,8 +26,8 @@ format :: proc(
 	dirBlock := disk_alloc(&diskAlloc, ROOT_DIR_DEFAULT_CAP / u64(disk.blockSize)) or_return
 	nameBlock := disk_alloc(&diskAlloc, NAME_FILE_DEFAULT_CAP / u64(disk.blockSize)) or_return
 
-	dmas := alloc.dma_pages(3) or_return
-	defer syscalls.mem_free_userspace(dmas)
+	pages, aErr := make_aligned([]byte, 3 * shared.PAGE_SIZE, shared.PAGE_SIZE, context.temp_allocator)
+	if aErr != nil do return diskAlloc, .OutOfMemory
 
 	sb: Superblock = {
 		magic = IFS_MAGIC,
@@ -36,7 +36,6 @@ format :: proc(
 	rootDir := DirHeader{1, 0}
 	rootNameSlot := Slot{nameBlock * u64(disk.blockSize), NAME_FILE_DEFAULT_CAP}
 
-	pages := mem.byte_slice(rawptr(uintptr(dmas)), 3 * shared.PAGE_SIZE)
 	sbBuf := pages[:disk.blockSize]
 	dirBuf := pages[shared.PAGE_SIZE:][:ROOT_DIR_DEFAULT_CAP]
 	nameBuf := pages[2 * shared.PAGE_SIZE:][:NAME_FILE_DEFAULT_CAP]
@@ -48,20 +47,25 @@ format :: proc(
 
 	dps := make([dynamic]diskhelpers.DiskPending, 0, 2)
 	defer delete(dps)
-	submitErr := diskhelpers.disk_submit(disk, &dps, .Write, partStart + dirBlock, dirBuf)
-	if submitErr == .None {
-		submitErr = diskhelpers.disk_submit(disk, &dps, .Write, partStart + nameBlock, nameBuf)
-	}
-	waitErr := diskhelpers.wait_all(dps[:])
-	if submitErr != .None do return diskAlloc, submitErr
-	if waitErr != .None do return diskAlloc, waitErr
+	diskhelpers.disk_io(
+		disk,
+		&dps,
+		.Write,
+		{partStart + dirBlock, partStart + nameBlock},
+		{dirBuf, nameBuf},
+	) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	clear(&dps)
 
-	dp := diskhelpers.disk_io(disk, .Flush, 0, nil) or_return
-	diskhelpers.wait(dp) or_return
+	diskhelpers.disk_io(disk, &dps, .Flush, nil, nil) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	clear(&dps)
 
-	dp = diskhelpers.disk_io(disk, .Write, partStart, sbBuf) or_return
-	diskhelpers.wait(dp) or_return
-	dp = diskhelpers.disk_io(disk, .Flush, 0, nil) or_return
-	diskhelpers.wait(dp) or_return
+	diskhelpers.disk_io(disk, &dps, .Write, {partStart}, {sbBuf}) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	clear(&dps)
+
+	diskhelpers.disk_io(disk, &dps, .Flush, nil, nil) or_return
+	diskhelpers.wait_all(dps[:]) or_return
 	return diskAlloc, .None
 }

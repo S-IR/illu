@@ -28,4 +28,8 @@ Error :: enum u64 {
 	//GENERAL FS
 	GptNotGpt = 0x200,
 	FsDiskFull = 0x300,
+	FsDirFull,
+	FsOutOfRange,
+	FsDiskFileFull,
+	FsNameAlreadyExists,
 }

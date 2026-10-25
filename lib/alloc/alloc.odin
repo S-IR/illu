@@ -285,7 +285,7 @@ heap_free :: proc(p: rawptr, oldSize: int) {
 	if p == nil do return
 
 	if uintptr(p) % uintptr(shared.PAGE_SIZE) == 0 {
-		assert(oldSize > 0, "heap: invalid page allocation size")
+		when KERNEL_BUILD do assert(oldSize > 0, "heap: invalid page allocation size")
 		pages := max(u64(1), (u64(oldSize) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE)
 		backend_free_pages(u64(uintptr(p)), pages)
 		return

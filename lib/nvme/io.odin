@@ -126,6 +126,7 @@ queue_io :: proc(
 	startBlock: u64,
 	bufs: [][]u8,
 	prpList: []u64,
+	fua: bool,
 ) -> (
 	Pending,
 	shared.Error,
@@ -157,7 +158,11 @@ queue_io :: proc(
 		header = {opcode = u8(opcode)},
 		namespaceId = q.nsid,
 		args = {
-			io = {startBlock = startBlock, blockCountMinus1 = u16(total / u64(q.lbaSize) - 1)},
+			io = {
+				control = {forceUnitAccess = fua},
+				startBlock = startBlock,
+				blockCountMinus1 = u16(total / u64(q.lbaSize) - 1),
+			},
 		},
 	}
 	prp_fill(&cmd, bufs, prpList)

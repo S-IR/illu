@@ -7,7 +7,7 @@ every program / lib is code. position independent, dumb. no distinction between 
 authority and security are boiled down to memory permissions. any higher level security concept like file writes, process permissions etc. boils down to "do you have read or write permissions on some memory range"
 we avoid daemons and we instead go for many decentralized apps that do not trust each other having memory contracts around devices ("we share this block of memory, i can lock this memory for x ms to do my business then i let you" bla bla). each program loads a userlib to work with the hardware as close as possible while respecting the contract.
 expose as much as possible to userland. the kernel only does what is security sensitive; everything else (routing, policy, tuning, convenience) is userland's job. as few abstractions as possible. if userland shoots itself in the foot that is not the kernel's problem.
-DO NOT WRITE ANY CODE IN ANY FILES YOURSELF UNLESS I LITERALLY ASK YOU TO MODIFY FILES. PRINT HERE IN THIS CHAT STEP BY STEP CHANGES OF THE CODEBASE + CODE
+DO NOT WRITE ANY CODE IN ANY FILES YOURSELF UNLESS I LITERALLY ASK YOU TO MODIFY FILES.
 BE WAY WAY WAY LESS VERBOSE
 read the mds in the root dir of this project
 ALL claude memory / context for this project goes in .md files in the root dir of this project (claude-memory.md). never write hidden memory or context files anywhere else.
@@ -22,3 +22,4 @@ ALL claude memory / context for this project goes in .md files in the root dir o
 - use odin lang's syntax features. use odin lang's core packages
 - no comments unless it is a must, even in asserts. code should read like comments. it should be abvious what you do based on the code
 - be very careful with assembly. write #assert where you are assuming an odin lang struct layout. when having kernel issues first check the alignment problems then the argument order passings
+- returned errors from fns imply either the returned variable or the modified input variables are undefined thus you should never read vars before checking errors

@@ -26,11 +26,19 @@ CommandArgs :: struct #raw_union {
 }
 #assert(size_of(CommandArgs) == 24)
 
+IoControl :: bit_field u16 {
+	_:               u16  | 14,
+	forceUnitAccess: bool | 1,
+	limitedRetry:    bool | 1,
+}
 IoArgs :: struct #packed {
 	startBlock:       u64,
 	blockCountMinus1: u16,
-	_:                [14]u8,
+	control:          IoControl,
+	_:                [12]u8,
 }
+#assert(size_of(IoArgs) == 24)
+#assert(offset_of(IoArgs, control) == 10)
 IdentifyArgs :: struct #packed {
 	what: u8,
 	_:    [23]u8,

@@ -1,14 +1,17 @@
 package adam
 import "../lib/alloc"
+import "../lib/diskhelpers"
 import "../lib/fs"
 import "../lib/gpt"
 import "../lib/ifs"
 import "../lib/log"
 import "../lib/pci"
+import "../lib/shared"
 import "../lib/syscalls"
 import "../lib/userschedule"
 import "base:intrinsics"
 import "base:runtime"
+import "core:mem"
 import "core:slice"
 ALIVE_PRINT_MASK :: u64(1) << 24 - 1
 
@@ -46,7 +49,10 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 	log.write(&adamLog, .Debug, .None, u64(uintptr(rawptr(adam_start))))
 	context = runtime.default_context()
 	context.allocator = alloc.heap_allocator()
-	context.temp_allocator = alloc.heap_allocator()
+	tempArena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&tempArena, alloc.heap_allocator(), alloc.heap_allocator())
+
+	context.temp_allocator = mem.dynamic_arena_allocator(&tempArena)
 	context.assertion_failure_proc = adam_assertion_failure_handler
 
 	for &device in pcies {
@@ -60,6 +66,8 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 		case .Ignored, .Unsupported:
 		}
 	}
+
+	ifsPathmap := make(ifs.Pathmap)
 
 	for &disk, i in disks.v {
 		log.write(&adamLog, .Informational, .None, u64(i), disk.blockCount, u64(disk.blockSize))
@@ -107,11 +115,23 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 		}
 		for fileSystem in fses {
 			if fileSystem.type != .Ifs do continue
-			diskAlloc, mountErr := ifs.mount(&disk, fileSystem.start, fileSystem.len)
+			diskAlloc, root, mountErr := ifs.mount(&disk, fileSystem.start, fileSystem.len)
 			if mountErr != .None {
 				log.write(&adamLog, .Error, mountErr, fileSystem.start, fileSystem.len)
+
 			} else {
 				log.write(&adamLog, .Notice, .None, fileSystem.start, fileSystem.len)
+				if map_insert(&ifsPathmap, ifs.path_key("/"), ifs.PathEntry{root, 0}) == nil {
+					syscalls.syscall_debug_print_userspace("alloc err for path insert ")
+				}
+				testErr := ifs_test(&disk, fileSystem.start, fileSystem.len, &diskAlloc, root)
+				if testErr == .None {
+					log.write(&adamLog, .Notice, testErr, fileSystem.start)
+				} else {
+					log.write(&adamLog, .Error, testErr, fileSystem.start)
+				}
+
+
 			}
 		}
 	}
@@ -130,4 +150,74 @@ alive_loop :: proc "c" () -> ! {
 		}
 		counter += 1
 	}
+}
+ifs_test :: proc(
+	disk: ^diskhelpers.Disk,
+	partStart, partBlocks: u64,
+	diskAlloc: ^ifs.DiskAllocator,
+	root: ifs.Slot,
+) -> (
+	err: shared.Error,
+) {
+	blockSize := u64(disk.blockSize)
+	dps := make([dynamic]diskhelpers.DiskPending, context.temp_allocator)
+
+	dirBufs, nameBufs := ifs.dirs_read(disk, partStart, partBlocks, {root}) or_return
+	dirBuf, nameBuf := dirBufs[0], nameBufs[0]
+	assert(nameBuf != nil)
+	_, slots := ifs.dir_parse(dirBuf) or_return
+	nameSlot := slots[0]
+
+	block := ifs.disk_alloc(diskAlloc, shared.PAGE_SIZE / blockSize) or_return
+	file := ifs.Slot{block * blockSize, shared.PAGE_SIZE}
+	fileIdx := ifs.dir_slot_set(dirBuf, file) or_return
+	ifs.name_insert(nameBuf, fileIdx, "hello.txt") or_return
+
+	data, aErr := make_aligned([]byte, shared.PAGE_SIZE, shared.PAGE_SIZE, context.temp_allocator)
+	if aErr != nil do return .OutOfMemory
+	for &b, i in data do b = u8(i)
+
+
+	ifs.files_io(
+		disk,
+		partStart,
+		.Write,
+		{file, root, nameSlot},
+		{0, 0, 0},
+		{data, dirBuf, nameBuf},
+		false,
+		&dps,
+	) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	clear(&dps)
+
+	back := ifs.slots_read(disk, partStart, {file}, &dps) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	clear(&dps)
+	assert(slice.equal(back[0], data))
+
+	pathmap := make(ifs.Pathmap, context.temp_allocator)
+	if map_insert(&pathmap, ifs.path_key("/"), ifs.PathEntry{root, 0}) == nil do return .OutOfMemory
+	entry := ifs.path_lookup(&pathmap, disk, partStart, partBlocks, "/hello.txt") or_return
+	assert(entry.slot == file && entry.slotIdx == fileIdx)
+
+	removedIdx := ifs.name_remove(nameBuf, "hello.txt") or_return
+	assert(removedIdx == fileIdx)
+	ifs.dir_slot_clear(dirBuf, fileIdx) or_return
+	ifs.files_io(
+		disk,
+		partStart,
+		.Write,
+		{root, nameSlot},
+		{0, 0},
+		{dirBuf, nameBuf},
+		false,
+		&dps,
+	) or_return
+	diskhelpers.wait_all(dps[:]) or_return
+	clear(&dps)
+	ifs.disk_free(diskAlloc, block, file.cap / blockSize) or_return
+
+	return .None
+
 }

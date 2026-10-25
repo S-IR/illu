@@ -17,13 +17,7 @@ syscall_return_noncanonical :: proc "c" () -> ! {
 }
 serialPrintLock: spinlock.Spinlock
 
-syscall_mmap :: proc(
-	regionsPtr: u64,
-	regionsCount: u64,
-) -> (
-	err: syscalls.MMapError,
-	phys: u64,
-) {
+syscall_mmap :: proc(regionsPtr: u64, regionsCount: u64) -> (err: syscalls.MMapError, phys: u64) {
 	domain := gs_read_cpustate().currentGrant.domain
 	assert(domain != nil)
 	if regionsCount == 0 || regionsCount > syscalls.MAX_REGIONS_PER_CALL do return .InvalidSize, 0
@@ -132,12 +126,7 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 		spinlock.lock(&serialPrintLock)
 		defer spinlock.unlock(&serialPrintLock)
 		print.serial_write("dbg: ")
-		print.serial_write(label)
-		print.serial_write(": ")
-		print.serial_write_u64(a3)
-		print.serial_write(" (")
-		print.serial_write_hex(a3)
-		print.serial_writeln(")")
+		print.serial_writeln(label)
 	}
 	return max(u64), max(u64)
 }

@@ -29,13 +29,15 @@ init :: proc(pciDevice: ^pci.Device) -> (device: Device, blockCount: u64, err: s
 	stride := doorbell_stride(cap)
 	if bar.size < u64(regDoorbells + 4 * stride) do return {}, 0, .NvmeBarTooSmall
 
-	pages := alloc.dma_pages(3) or_return
+	pagesBuf, aErr := make_aligned([]byte, 3 * shared.PAGE_SIZE, shared.PAGE_SIZE, context.allocator)
+	if aErr != nil do return {}, 0, .OutOfMemory
+	pages := u64(uintptr(raw_data(pagesBuf)))
 	adminSq := pages
 	adminCq := pages + shared.PAGE_SIZE
 	ident := pages + 2 * shared.PAGE_SIZE
 	defer if err != .None {
 		_ = controller_disable(regs, cap)
-		assert(syscalls.mem_free_userspace(pages) == .None)
+		delete(pagesBuf)
 	}
 
 	device.regs = regs
@@ -157,8 +159,15 @@ queue_pair_create :: proc(device: ^Device, msixRow: u16) -> (info: QueueInfo, er
 		(u64(device.queueDepth) * size_of(Command) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
 	cqPages :=
 		(u64(device.queueDepth) * size_of(Completion) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
-	pages := alloc.dma_pages(sqPages + cqPages) or_return
-	defer if err != .None do assert(syscalls.mem_free_userspace(pages) == .None)
+	pagesBuf, aErr := make_aligned(
+		[]byte,
+		(sqPages + cqPages) * shared.PAGE_SIZE,
+		shared.PAGE_SIZE,
+		context.allocator,
+	)
+	if aErr != nil do return {}, .OutOfMemory
+	pages := u64(uintptr(raw_data(pagesBuf)))
+	defer if err != .None do delete(pagesBuf)
 	sq := pages
 	cq := pages + sqPages * shared.PAGE_SIZE
 	sizeMinus1 := u16(device.queueDepth - 1)

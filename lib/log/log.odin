@@ -1,7 +1,12 @@
 package log
 import "../shared"
+import "../syscalls"
 import "base:intrinsics"
+import "base:runtime"
+import "core:fmt"
 import "core:math"
+import "core:strings"
+
 Severity :: enum u8 {
 	Emergency,
 	Alert,
@@ -52,6 +57,7 @@ write :: proc "contextless" (
 ) {
 	when severity > LOG_MAX_SEVERITY do return
 
+
 	assert_contextless(len(loc.file_path) <= int(max(u16)))
 	record := Record {
 		tsc      = u64(intrinsics.read_cycle_counter()),
@@ -64,4 +70,12 @@ write :: proc "contextless" (
 	assert_contextless(len(args) <= len(record.args))
 	copy(record.args[:], args)
 	ring_push(ring, record)
+	// when ODIN_DEBUG {
+	// 	context = runtime.default_context()
+	// 	file := loc.file_path[strings.last_index_byte(loc.file_path, '/') + 1:]
+	// 	lineBuf: [256]u8
+	// 	syscalls.syscall_debug_print_userspace(
+	// 		fmt.bprintf(lineBuf[:], "%s:%d %v %v %v", file, loc.line, severity, err, record.args),
+	// 	)
+	// }
 }
