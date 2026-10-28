@@ -5,6 +5,7 @@ import "../lib/pci"
 import "../lib/shared"
 import "../lib/syscalls"
 import "../lib/userschedule"
+import "base:intrinsics"
 import "core:mem"
 import "pmm"
 import "print"
@@ -55,6 +56,8 @@ adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
 			{.Volatile, .InterruptSource},
 			.DeviceMMIO,
 		)
+		pmm.map_kernel_mmio(configPage, shared.PAGE_SIZE, ._4KB)
+
 	}
 
 	devicesStart := u64(uintptr(raw_data(pciesPhys)))
@@ -109,9 +112,12 @@ adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
 			)
 			_, inserted := resource_insert(&pd.resources, resource)
 			print.kensure(inserted, "adam_init: failed to track PCI BAR resource")
+			pmm.map_kernel_mmio(barStart, barEnd - barStart, pageSize)
+
 			detached: [dynamic]u64
 			resource_map(pd.pml4, resource, &detached)
 			assert(len(detached) == 0)
+
 		}
 	}
 

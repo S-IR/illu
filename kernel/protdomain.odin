@@ -28,12 +28,6 @@ protDomainPool := struct {
 
 MEMORY_RESOURCES_STARTING_CAP :: 16
 
-ProtDomainTargetError :: enum {
-	None,
-	InvalidHandle,
-	NoPermission,
-}
-
 // Caller must hold protDomainPool.rwLock before calling this procedure and
 // must keep it held while using the returned domain.
 protdomain_resolve_target_DOESNT_LOCK :: proc(
@@ -41,7 +35,7 @@ protdomain_resolve_target_DOESNT_LOCK :: proc(
 	caller: ^ProtectionDomain,
 ) -> (
 	target: ^ProtectionDomain,
-	err: ProtDomainTargetError,
+	err: shared.Error,
 ) {
 	assert(caller != nil)
 
@@ -108,7 +102,7 @@ protdomain_publish :: proc(pd: ^ProtectionDomain) -> (idx: int, err: mem.Allocat
 	return len(protDomainPool.prots) - 1, nil
 }
 
-protdomain_destroy :: proc(idx: int, caller: ^ProtectionDomain) -> ProtDomainTargetError {
+protdomain_destroy :: proc(idx: int, caller: ^ProtectionDomain) -> shared.Error {
 	pd: ^ProtectionDomain
 	{
 		spinlock.rw_write_lock(&protDomainPool.rwLock)
@@ -129,7 +123,11 @@ protdomain_free :: proc(pd: ^ProtectionDomain) {
 	grant_kill_all(pd)
 	pmm.pml4_destroy(pd.pml4)
 	if pd.pcid != 0 do pcid_free(pd.pcid)
-	for resource in pd.resources do memory_underlay_release(resource.underlay)
+	for resource in pd.resources {
+		memory_underlay_release(resource.underlay)
+		delete(resource.rContractRules)
+		delete(resource.wContractRules)
+	}
 	delete_soa(pd.resources)
 	bit_array.destroy(&pd.grantCpus)
 	free(pd)
@@ -186,8 +184,15 @@ tlb_shootdown :: proc(domain: ^ProtectionDomain, gen: u64) {
 	}
 }
 
-cpu_tlb_stale :: #force_inline proc "contextless" (cpu: ^CpuState, domain: ^ProtectionDomain, gen: u64) -> bool {
-	return intrinsics.atomic_load(&cpu.currentGrant.domain) == domain && intrinsics.atomic_load(&cpu.tlbAckGen) < gen
+cpu_tlb_stale :: #force_inline proc "contextless" (
+	cpu: ^CpuState,
+	domain: ^ProtectionDomain,
+	gen: u64,
+) -> bool {
+	return(
+		intrinsics.atomic_load(&cpu.currentGrant.domain) == domain &&
+		intrinsics.atomic_load(&cpu.tlbAckGen) < gen \
+	)
 }
 
 tlb_sync :: proc "contextless" (cpu: ^CpuState) {
@@ -257,7 +262,7 @@ syscall_prot_domain_create :: proc(
 	authorityPtr: ^byte,
 	regionsPtr, count: u64,
 ) -> (
-	err: syscalls.ProtDomainCreateError,
+	err: shared.Error,
 	handle: int,
 ) {
 	callerDomain := gs_read_cpustate().currentGrant.domain
@@ -292,6 +297,7 @@ syscall_prot_domain_create :: proc(
 			ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !owned do return .NotOwned, 0
 			owner := callerDomain.resources[ownerIdx]
+			if resource_contracted(owner) do return .NotOwned, 0
 			if r.phys + r.size > owner.phys + owner.size do return .NotOwned, 0
 			if !region_flags_grantable(r.flags, owner.flags) do return .NotOwned, 0
 		}
@@ -321,7 +327,7 @@ syscall_prot_domain_edit :: proc(
 	handle: int,
 	regionsPtr, count, opRaw: u64,
 ) -> (
-	err: syscalls.ProtDomainEditError,
+	err: shared.Error,
 ) {
 	callerDomain := gs_read_cpustate().currentGrant.domain
 	assert(callerDomain != nil)
@@ -342,18 +348,15 @@ syscall_prot_domain_edit :: proc(
 	target: ^ProtectionDomain
 	tlbGen: u64
 	detached: [dynamic]u64
-	defer if tlbGen != 0 {
-		tlb_shootdown(target, tlbGen)
+	defer {
+		if tlbGen != 0 do tlb_shootdown(target, tlbGen)
 		for underlay in released[:releasedCount] do memory_underlay_release(underlay)
 		detached_tables_free(&detached)
 	}
 
 	spinlock.rw_read_lock(&protDomainPool.rwLock)
 	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
-	targetErr: ProtDomainTargetError
-	target, targetErr = protdomain_resolve_target_DOESNT_LOCK(handle, callerDomain)
-	if targetErr == .InvalidHandle do return .InvalidHandle
-	if targetErr == .NoPermission do return .NoPermission
+	target = protdomain_resolve_target_DOESNT_LOCK(handle, callerDomain) or_return
 
 	domains_write_lock(callerDomain, target)
 	defer domains_write_unlock(callerDomain, target)
@@ -376,6 +379,8 @@ syscall_prot_domain_edit :: proc(
 			ownerIdx, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !found do return .NotOwned
 			owner := callerDomain.resources[ownerIdx]
+			if resource_contracted(owner) do return .NotOwned
+
 			if r.phys + r.size > owner.phys + owner.size do return .NotOwned
 			if !region_flags_grantable(r.flags, owner.flags) do return .NotOwned
 			if resource_overlaps(target.resources[:], r.phys, r.size) do return .InvalidRegion
@@ -403,10 +408,15 @@ syscall_prot_domain_edit :: proc(
 		case .Delete:
 			removed, found := resource_remove(&target.resources, r.phys)
 			assert(found)
-			resource_unmap(target.pml4, removed)
+			delete(removed.rContractRules)
+			delete(removed.wContractRules)
 			released[releasedCount] = removed.underlay
 			releasedCount += 1
+			if removed.flags == {} do continue
+
+			resource_unmap(target.pml4, removed)
 			if tlbGen == 0 do tlbGen = domain_tlb_invalidate(target)
+
 		}
 	}
 
@@ -414,13 +424,8 @@ syscall_prot_domain_edit :: proc(
 }
 
 
-syscall_prot_domain_destroy :: proc(
-	handle: int,
-) -> (
-	err: syscalls.ProtDomainDestroyError,
-) {
+syscall_prot_domain_destroy :: proc(handle: int) -> (err: shared.Error) {
 	caller := gs_read_cpustate().currentGrant.domain
 	assert(caller != nil)
-	if protdomain_destroy(handle, caller) != .None do return .InvalidHandle
-	return .None
+	return protdomain_destroy(handle, caller)
 }

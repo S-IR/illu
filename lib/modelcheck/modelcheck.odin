@@ -14,10 +14,11 @@ Result :: struct($State: typeid) {
 	visited: int,
 }
 
+
 run :: proc(
 	inits: []$State,
-	next: proc(State) -> []Transition(State),
-	inv: proc(State) -> (bool, string),
+	next: proc(_: State) -> []Transition(State),
+	inv: proc(_: State) -> (bool, string),
 	max_states := 200000,
 ) -> Result(State) {
 	Frame :: struct {
@@ -56,9 +57,9 @@ run :: proc(
 		count += 1
 		if count > max_states {
 			return Result(State) {
-				ok      = false,
+				ok = false,
 				message = fmt.tprintf("exceeded %d states without terminating", max_states),
-				trace   = frame.path,
+				trace = frame.path,
 				visited = count,
 			}
 		}

@@ -15,7 +15,14 @@ user_copy_in :: proc "contextless" (domain: ^ProtectionDomain, dst: []$T, src: u
 	mem.copy(raw_data(dst), pmm.phys_to_ptr(src), int(bytes))
 	return true
 }
-
+user_copy_out :: proc "contextless" (domain: ^ProtectionDomain, dst: u64, src: []$T) -> bool {
+	bytes := u64(len(src) * size_of(T))
+	spinlock.rw_read_lock(&domain.lock)
+	defer spinlock.rw_read_unlock(&domain.lock)
+	if !user_range_accessible(domain, dst, bytes, true) do return false
+	mem.copy(pmm.phys_to_ptr(dst), raw_data(src), int(bytes))
+	return true
+}
 USER_ADDR_END :: u64(1) << 47
 
 page_size_usable :: proc "contextless" (size: lmem.PageSize) -> bool {

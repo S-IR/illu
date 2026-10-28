@@ -179,7 +179,7 @@ grant_spawn :: proc(
 	saveArea: ^userschedule.UserSaveArea,
 	entry: u64,
 	weight: u64,
-) -> syscalls.GrantError {
+) -> shared.Error {
 	assert(domain != nil)
 	assert(cpu != nil)
 
@@ -227,7 +227,7 @@ grant_spawn :: proc(
 	return .None
 }
 
-grant_edit :: proc(domain: ^ProtectionDomain, cpu: ^CpuState, weight: u64) -> syscalls.GrantError {
+grant_edit :: proc(domain: ^ProtectionDomain, cpu: ^CpuState, weight: u64) -> shared.Error {
 	assert(domain != nil)
 	assert(cpu != nil)
 
@@ -387,7 +387,7 @@ grant_wake_locked :: proc(cpu: ^CpuState) {
 			intrinsics.atomic_load((^u64)(pmm.phys_to_ptr(sleeper.addr))) != sleeper.oldValue
 		if !changed && now < sleeper.deadline do continue
 		saveArea := (^userschedule.UserSaveArea)(pmm.phys_to_ptr(u64(uintptr(sleeper.saveArea))))
-		result := syscalls.WaitOnError.None if changed else syscalls.WaitOnError.TimedOut
+		result := shared.Error.None if changed else shared.Error.Timeout
 		saveArea.rax = u64(result)
 		grant := sleeper.grant
 		if i64(grant.virtualTime - cpu.floorVirtualTime) < 0 do grant.virtualTime = cpu.floorVirtualTime
@@ -447,7 +447,7 @@ grant_switch_out :: proc(cpu: ^CpuState, wait: Maybe(WaitTarget)) -> ! {
 	run_abort()
 }
 
-syscall_wait_on :: proc(addr, oldValue, deadline: u64) -> syscalls.WaitOnError {
+syscall_wait_on :: proc(addr, oldValue, deadline: u64) -> shared.Error {
 	cpu := gs_read_cpustate()
 	grant := &cpu.currentGrant
 	domain := grant.domain
@@ -461,7 +461,7 @@ syscall_wait_on :: proc(addr, oldValue, deadline: u64) -> syscalls.WaitOnError {
 		if !user_range_accessible(domain, addr, 8, false) do return .InvalidAddress
 	}
 	if intrinsics.atomic_load((^u64)(pmm.phys_to_ptr(addr))) != oldValue do return .None
-	if ah.rdtsc_asm() >= deadline do return .TimedOut
+	if ah.rdtsc_asm() >= deadline do return .Timeout
 
 	saveArea := (^userschedule.UserSaveArea)(pmm.phys_to_ptr(u64(uintptr(grant.saveArea))))
 	if saveArea.control.restoring do return .InvalidSaveArea
@@ -504,7 +504,7 @@ grant_exit :: proc() -> ! {
 syscall_grant_spawn :: proc(
 	handle: int,
 	cpuIdx, saveAreaPtr, weight, entry: u64,
-) -> syscalls.GrantError {
+) -> shared.Error {
 	spinlock.rw_read_lock(&protDomainPool.rwLock)
 	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
 
@@ -513,7 +513,7 @@ syscall_grant_spawn :: proc(
 	return grant_spawn(target, targetCpu, saveArea, entry, weight)
 }
 
-syscall_grant_edit :: proc(handle: int, cpuIdx, weight: u64) -> syscalls.GrantError {
+syscall_grant_edit :: proc(handle: int, cpuIdx, weight: u64) -> shared.Error {
 	spinlock.rw_read_lock(&protDomainPool.rwLock)
 	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
 
@@ -527,19 +527,12 @@ grant_syscall_target_DOESNT_LOCK :: proc(
 ) -> (
 	target: ^ProtectionDomain,
 	targetCpu: ^CpuState,
-	err: syscalls.GrantError,
+	err: shared.Error,
 ) {
 	caller := gs_read_cpustate().currentGrant.domain
 	assert(caller != nil)
 	if cpuIdx >= u64(len(cpus)) do return nil, nil, .InvalidCpu
 
-	resolved, targetErr := protdomain_resolve_target_DOESNT_LOCK(handle, caller)
-	switch targetErr {
-	case .None:
-	case .InvalidHandle:
-		return nil, nil, .InvalidHandle
-	case .NoPermission:
-		return nil, nil, .NoPermission
-	}
-	return resolved, &cpus[cpuIdx], .None
+	target = protdomain_resolve_target_DOESNT_LOCK(handle, caller) or_return
+	return target, &cpus[cpuIdx], .None
 }

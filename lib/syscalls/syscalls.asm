@@ -36,6 +36,22 @@ SYSCALL_STUB  syscall_grant_edit, 5
 
 SYSCALL_STUB  syscall_wait_on, 6
 
+.global syscall_contract_create
+syscall_contract_create:
+    # System V arg4 is rcx; syscall arg4 is r10.
+    mov %rcx, %r10
+    movabs $(ILLU_SYSCALL_BIT + 7), %rax
+    syscall
+    ret
+
+.global syscall_contract_memory_access
+syscall_contract_memory_access:
+    # System V arg4 is rcx; syscall arg4 is r10.
+    mov %rcx, %r10
+    movabs $(ILLU_SYSCALL_BIT + 8), %rax
+    syscall
+    ret
+
 .global cpu_current_index
 cpu_current_index:
     rdtscp

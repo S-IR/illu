@@ -88,7 +88,7 @@ pe_run :: proc(
 	if authorityPtr == nil do return handle, .DomainCreateFailed
 
 
-	createErr: syscalls.ProtDomainCreateError
+	createErr: shared.Error
 	createErr, handle = syscalls.syscall_prot_domain_create_userspace(
 		authorityPtr,
 		bc.image.regions[:],

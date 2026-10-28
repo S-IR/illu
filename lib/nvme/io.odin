@@ -106,13 +106,9 @@ wait :: proc(p: Pending, deadline: u64) -> shared.Error {
 		old := intrinsics.volatile_load(word)
 		if (transmute(CompletionStatus)u32(old >> 32)).phase == q.phase do continue
 
-		switch syscalls.syscall_wait_on_userspace(word, old, deadline) {
-		case .None:
-		case .TimedOut:
-			return .Timeout
-		case .InvalidAddress, .InvalidSaveArea:
-			panic("nvme wait: wait_on rejected")
-		}
+		waitErr := syscalls.syscall_wait_on_userspace(word, old, deadline)
+		if waitErr == .Timeout do return .Timeout
+		assert(waitErr == .None, "nvme wait: wait_on rejected")
 	}
 	state := q.states[p.cid]
 	q.states[p.cid] = .Free

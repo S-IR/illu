@@ -1,6 +1,7 @@
 package pmm
 import ah "../../asm_helpers"
 import "../../lib/elf"
+import "../../lib/lmem"
 import "../../lib/shared"
 import "../../lib/spinlock"
 import "../../uefi"
@@ -46,7 +47,11 @@ men_init :: proc(
 		if desc.Type == .ConventionalMemory do haveConventional = true
 		if TRAMPOLINE_PHYS >= desc.PhysicalStart && TRAMPOLINE_PHYS < end {
 			#partial switch desc.Type {
-			case .ConventionalMemory, .BootServicesCode, .BootServicesData, .LoaderCode, .LoaderData:
+			case .ConventionalMemory,
+			     .BootServicesCode,
+			     .BootServicesData,
+			     .LoaderCode,
+			     .LoaderData:
 				trampolineUsable = true
 			}
 		}
@@ -81,7 +86,12 @@ men_init :: proc(
 	slice.fill(state.bitmap, max(u64))
 
 	bitmapPageStart := bitmapAddr / shared.PAGE_SIZE
-	bitmap_fill(&state, bitmapPageStart + bitmapPagesNeeded, bitmapPageStart + bitmapDesc.NumberOfPages, false)
+	bitmap_fill(
+		&state,
+		bitmapPageStart + bitmapPagesNeeded,
+		bitmapPageStart + bitmapDesc.NumberOfPages,
+		false,
+	)
 	for i in u64(0) ..< entryCount {
 		desc := mmap_desc(memoryMap, memoryMapDescSize, i)
 
@@ -257,4 +267,19 @@ mmap_desc :: #force_inline proc(
 	return (^uefi.EFI_MEMORY_DESCRIPTOR)(
 		uintptr(rawptr(memoryMap)) + uintptr(i * memoryMapDescSize),
 	)
+}
+map_kernel_mmio :: proc(phys, size: u64, pageSize: lmem.PageSize) {
+	LIMIT :: KERNEL_ENTRY_REGION - KERNEL_DIRECT_MAP
+	print.kensure(size <= LIMIT && phys <= LIMIT - size)
+	pageBytes := lmem.page_bytes(pageSize)
+	for offset: u64 = 0; offset < size; offset += pageBytes {
+		print.kassert(slot_available(kernelPML4, KERNEL_DIRECT_MAP + phys + offset, pageSize))
+		map_page(
+			kernelPML4,
+			phys + offset,
+			KERNEL_DIRECT_MAP + phys + offset,
+			pageSize,
+			lmem.PageFlags{.Present, .Write, .NX, .PCD, .PWT} + kernelGlobalFlag,
+		)
+	}
 }

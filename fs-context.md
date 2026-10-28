@@ -21,13 +21,5 @@
 - Batched create, one parent dir per call. The new name file gets the same cap as the old one; full = .FsDiskFileFull.
 - Mount = full scan for the allocator, batched per tree level. Pathmap is lazy, no eviction.
 
-## Code state (type-checks, NOT boot tested)
-- diskhelpers.disk_io is the only IO fn. files_io (ifs/io.odin) drains dps on error.
-- dir_parse: the slot 0 zero check is gone. dirs_read/mount/path_lookup skip a slot 0 that fails as a name file.
-- path_lookup("/") on a cache miss returns .NotFound (root must be inserted by adam).
-- ifs/ops.odin: create + create_named, written by Claude. User verdict: far too long, unacceptable. Redo it.
-  - Known bug: create_named waits with `wait_all or_return` while a drain defer exists, so a wait error waits the same pendings twice and trips the assert at nvme/io.odin:102.
-  - Bloat sources:
-    - The name file is made with create (slot k), which costs an extra clear write + wait.
-    - The pre-check of names on a temp copy exists only to avoid leaking slots on dup/full.
-- Boot test still pending (format, mount, and nvme paths all changed).
+## Code state
+- See claude-memory.md "ifs API".

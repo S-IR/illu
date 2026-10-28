@@ -22,7 +22,7 @@ when !ODIN_TEST {
 	}
 
 } else {
-	cpuid_asm :: proc(leaf: CPUIDLeaf, subleaf: u32, result: ^CPUIDResult) {
+	cpuid_asm :: proc "contextless" (leaf: CPUIDLeaf, subleaf: u32, result: ^CPUIDResult) {
 		result.eax = 0
 		result.ebx = 0
 		result.ecx = 0

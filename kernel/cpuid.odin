@@ -108,7 +108,10 @@ cpuid_init_speculation_mitigations :: proc() {
 
 cpu_enable_ssbd :: proc "contextless" () {
 	if !cpuHasSSBD do return
-	ah.wrmsr_asm(IA32_SPEC_CTRL_MSR, ah.rdmsr_asm(IA32_SPEC_CTRL_MSR) | (u64(1) << SSBD_SPEC_CTRL_BIT))
+	ah.wrmsr_asm(
+		IA32_SPEC_CTRL_MSR,
+		ah.rdmsr_asm(IA32_SPEC_CTRL_MSR) | (u64(1) << SSBD_SPEC_CTRL_BIT),
+	)
 }
 
 cpuHasPCID: bool
@@ -192,7 +195,10 @@ cpuid_init_xsave :: proc() {
 
 	features: ah.CPUIDResult
 	ah.cpuid_asm(.FEATURE_INFO, 0, &features)
-	print.kensure((features.ecx >> XSAVE_CPUID_BIT) & 1 == 1, "cpuid_init_xsave: xsave unsupported")
+	print.kensure(
+		(features.ecx >> XSAVE_CPUID_BIT) & 1 == 1,
+		"cpuid_init_xsave: xsave unsupported",
+	)
 
 	supportedRaw: ah.CPUIDResult
 	ah.cpuid_asm(.XSAVE_STATE, 0, &supportedRaw)
@@ -201,7 +207,9 @@ cpuid_init_xsave :: proc() {
 	xsaveMask = XSTATE_X87 | XSTATE_SSE
 	hasAVX := (features.ecx >> AVX_CPUID_BIT) & 1 == 1 && supported & XSTATE_AVX != 0
 	if hasAVX do xsaveMask |= XSTATE_AVX
-	if hasAVX && supported & XSTATE_AVX512 == XSTATE_AVX512 && cpuid_structured_ebx_bit(AVX512F_CPUID_BIT) {
+	if hasAVX &&
+	   supported & XSTATE_AVX512 == XSTATE_AVX512 &&
+	   cpuid_structured_ebx_bit(AVX512F_CPUID_BIT) {
 		xsaveMask |= XSTATE_AVX512
 	}
 
@@ -216,7 +224,10 @@ cpu_enable_xsave :: proc() {
 	ah.xsetbv_asm(0, xsaveMask)
 	sizes: ah.CPUIDResult
 	ah.cpuid_asm(.XSAVE_STATE, 0, &sizes)
-	print.kensure(u64(sizes.ebx) <= userschedule.XSAVE_AREA_BYTES, "cpu_enable_xsave: xsave area larger than the save area")
+	print.kensure(
+		u64(sizes.ebx) <= userschedule.XSAVE_AREA_BYTES,
+		"cpu_enable_xsave: xsave area larger than the save area",
+	)
 }
 
 cpuid_has_1gb_pages :: proc() -> bool {

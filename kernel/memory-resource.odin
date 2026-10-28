@@ -14,13 +14,14 @@ MemoryResourceFlag :: enum {
 MemoryResourceFlags :: bit_set[MemoryResourceFlag;u64]
 
 MemoryResource :: struct {
-	phys:          u64,
-	logical:       u64,
-	size:          u64,
-	flags:         lmem.PageFlags,
-	pageSize:      lmem.PageSize,
-	resourceFlags: MemoryResourceFlags,
-	underlay:      ^MemoryUnderlay,
+	phys:                           u64,
+	logical:                        u64,
+	size:                           u64,
+	flags:                          lmem.PageFlags,
+	pageSize:                       lmem.PageSize,
+	resourceFlags:                  MemoryResourceFlags,
+	rContractRules, wContractRules: []syscalls.ContractRule,
+	underlay:                       ^MemoryUnderlay,
 }
 
 resource_init :: proc(
@@ -42,6 +43,7 @@ resource_init :: proc(
 }
 
 resource_granted :: proc(owner: MemoryResource, r: syscalls.MemRegion) -> MemoryResource {
+	assert(!resource_contracted(owner))
 	assert(r.phys >= owner.phys && r.phys + r.size <= owner.phys + owner.size)
 	granted := owner
 	granted.phys = r.phys
@@ -88,4 +90,8 @@ region_flags_grantable :: proc "contextless" (want, have: lmem.PageFlags) -> boo
 	if want & cacheBits != have & cacheBits do return false
 	if .NX in have && .NX not_in want do return false
 	return want - {.NX} <= have - {.NX}
+}
+
+resource_contracted :: proc "contextless" (r: MemoryResource) -> bool {
+	return r.rContractRules != nil || r.wContractRules != nil
 }

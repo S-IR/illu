@@ -1,5 +1,6 @@
 package kernel
 import "../lib/lmem"
+import "../lib/shared"
 import "../lib/spinlock"
 import "../lib/syscalls"
 import "base:intrinsics"
@@ -17,7 +18,7 @@ syscall_return_noncanonical :: proc "c" () -> ! {
 }
 serialPrintLock: spinlock.Spinlock
 
-syscall_mmap :: proc(regionsPtr: u64, regionsCount: u64) -> (err: syscalls.MMapError, phys: u64) {
+syscall_mmap :: proc(regionsPtr: u64, regionsCount: u64) -> (err: shared.Error, phys: u64) {
 	domain := gs_read_cpustate().currentGrant.domain
 	assert(domain != nil)
 	if regionsCount == 0 || regionsCount > syscalls.MAX_REGIONS_PER_CALL do return .InvalidSize, 0
@@ -115,6 +116,11 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 
 	case .WaitOn:
 		return u64(syscall_wait_on(a1, a2, a3)), 0
+
+	case .ContractCreate:
+		return u64(syscall_contract_create(transmute(int)a1, a2, a3, a4)), 0
+	case .ContractMemoryAccess:
+		return u64(syscall_contract_memory_access(a1, a2, a3, a4)), 0
 
 	case .DebugPrint:
 		domain := cpu.currentGrant.domain

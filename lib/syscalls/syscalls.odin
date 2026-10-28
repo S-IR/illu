@@ -1,5 +1,6 @@
 package syscalls
 import "../lmem"
+import "../shared"
 import "../userschedule"
 import "base:intrinsics"
 import "core:mem"
@@ -22,7 +23,6 @@ SchedulerEnterReason :: enum u64 {
 }
 
 
-
 Syscall :: enum u64 {
 	MMap = ILLU_SYSCALL_BIT,
 	ProtDomainCreate,
@@ -31,67 +31,14 @@ Syscall :: enum u64 {
 	GrantSpawn,
 	GrantEdit,
 	WaitOn,
+	ContractCreate,
+	ContractMemoryAccess,
 	DebugPrint = ILLU_SYSCALL_BIT + 1000,
-}
-
-MMapError :: enum u64 {
-	None,
-	InvalidPageSize,
-	OutOfMemory,
-	InvalidSize,
-	AddressInUse,
-}
-
-
-
-ProtDomainCreateError :: enum u64 {
-	None,
-	NoPermission,
-	InvalidRegionCount,
-	InvalidRegion,
-	NotOwned,
-	OutOfMemory,
-	TrackingFailed,
 }
 
 MemRegionOp :: enum u8 {
 	Add,
 	Delete,
-}
-
-ProtDomainEditError :: enum u64 {
-	None,
-	NoPermission,
-	InvalidHandle,
-	InvalidRegionCount,
-	InvalidRegion,
-	NotOwned,
-	NotFound,
-	InvalidOp,
-	TrackingFailed,
-	OutOfMemory,
-}
-GrantError :: enum u64 {
-	None,
-	InvalidHandle,
-	NoPermission,
-	InvalidCpu,
-	InvalidSaveArea,
-	AlreadyOnCpu,
-	NotOnCpu,
-	InsufficientWeight,
-	OutOfMemory,
-	InvalidEntry,
-}
-ProtDomainDestroyError :: enum u64 {
-	None,
-	InvalidHandle,
-}
-WaitOnError :: enum u64 {
-	None,
-	TimedOut,
-	InvalidAddress,
-	InvalidSaveArea,
 }
 KERNEL_BUILD :: #config(KERNEL_BUILD, false)
 
@@ -108,6 +55,8 @@ when !ODIN_TEST {
 			syscall_wait_on :: proc(addr, oldValue, deadline: u64) -> (err: u64) ---
 			cpu_current_index :: proc() -> u32 ---
 			user_resume :: proc() ---
+			syscall_contract_create :: proc(handle, phys, size, descPtr: u64) -> (err: u64) ---
+			syscall_contract_memory_access :: proc(dst, buf, len, dir: u64) -> (err: u64) ---
 		}
 
 		syscall_grant_spawn_userspace :: proc "contextless" (
@@ -116,8 +65,8 @@ when !ODIN_TEST {
 			saveArea: ^userschedule.UserSaveArea,
 			weight: u64,
 			entry: u64,
-		) -> GrantError {
-			return GrantError(
+		) -> shared.Error {
+			return shared.Error(
 				syscall_grant_spawn(handle, u64(cpu), u64(uintptr(saveArea)), weight, entry),
 			)
 		}
@@ -126,13 +75,16 @@ when !ODIN_TEST {
 			handle: int,
 			cpu: u32,
 			weight: u64,
-		) -> GrantError {
-			return GrantError(syscall_grant_edit(handle, u64(cpu), weight))
+		) -> shared.Error {
+			return shared.Error(syscall_grant_edit(handle, u64(cpu), weight))
 		}
 
-		syscall_wait_on_userspace :: proc "contextless" (addr: ^u64, oldValue, deadline: u64) -> WaitOnError {
+		syscall_wait_on_userspace :: proc "contextless" (
+			addr: ^u64,
+			oldValue, deadline: u64,
+		) -> shared.Error {
 			assert_contextless(uintptr(addr) % 8 == 0)
-			return WaitOnError(syscall_wait_on(u64(uintptr(addr)), oldValue, deadline))
+			return shared.Error(syscall_wait_on(u64(uintptr(addr)), oldValue, deadline))
 		}
 
 		grant_exit :: proc "contextless" () -> ! {
@@ -152,16 +104,16 @@ when !ODIN_TEST {
 		syscall_mmap_userspace :: proc "contextless" (
 			regions: []MMapRegion,
 		) -> (
-			err: MMapError,
+			err: shared.Error,
 			addr: rawptr,
 		) {
 			if regions == nil || len(regions) == 0 do return .InvalidSize, nil
 
 			rawErr, rawAddr := syscall_mmap(u64(uintptr(raw_data(regions))), u64(len(regions)))
-			return MMapError(rawErr), rawptr(uintptr(rawAddr))
+			return shared.Error(rawErr), rawptr(uintptr(rawAddr))
 		}
 
-		mem_free_userspace :: proc "contextless" (phys: u64) -> ProtDomainEditError {
+		mem_free_userspace :: proc "contextless" (phys: u64) -> shared.Error {
 			regions := [1]MemRegion{{phys = phys}}
 			return syscall_prot_domain_edit_userspace(max(int), regions[:], .Delete)
 		}
@@ -170,7 +122,7 @@ when !ODIN_TEST {
 			authorityPtr: rawptr,
 			regions: []MemRegion,
 		) -> (
-			err: ProtDomainCreateError,
+			err: shared.Error,
 			handle: int,
 		) {
 			rawErr, rawHandle := syscall_prot_domain_create(
@@ -178,7 +130,7 @@ when !ODIN_TEST {
 				u64(uintptr(raw_data(regions))),
 				u64(len(regions)),
 			)
-			return ProtDomainCreateError(rawErr), rawHandle
+			return shared.Error(rawErr), rawHandle
 		}
 
 		syscall_prot_domain_edit_userspace :: proc "contextless" (
@@ -186,9 +138,9 @@ when !ODIN_TEST {
 			regions: []MemRegion,
 			op: MemRegionOp,
 		) -> (
-			err: ProtDomainEditError,
+			err: shared.Error,
 		) {
-			return ProtDomainEditError(
+			return shared.Error(
 				syscall_prot_domain_edit(
 					handle,
 					u64(uintptr(raw_data(regions))),
@@ -201,14 +153,17 @@ when !ODIN_TEST {
 		syscall_prot_domain_destroy_userspace :: proc "contextless" (
 			handle: int,
 		) -> (
-			err: ProtDomainDestroyError,
+			err: shared.Error,
 		) {
-			return ProtDomainDestroyError(syscall_prot_domain_destroy(handle))
+			return shared.Error(syscall_prot_domain_destroy(handle))
 		}
 
 	}
 } else {
-	syscall_wait_on_userspace :: proc "contextless" (addr: ^u64, oldValue, deadline: u64) -> WaitOnError {
+	syscall_wait_on_userspace :: proc "contextless" (
+		addr: ^u64,
+		oldValue, deadline: u64,
+	) -> shared.Error {
 		return .None
 	}
 }
