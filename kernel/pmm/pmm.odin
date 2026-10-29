@@ -196,8 +196,9 @@ order_for :: proc "contextless" (n: u64) -> (order: u8 = 0) {
 @(private)
 palloc :: proc "contextless" (sizeInBytes: u64) -> u64 {
 	print.kassert(sizeInBytes != 0, "palloc: zero-size allocation")
-	spinlock.lock(&state.lock)
-	defer spinlock.unlock(&state.lock)
+	pmmGuards := [][]u8{mem.ptr_to_bytes(&state), mem.slice_to_bytes(state.bitmap), mem.ptr_to_bytes(&freeLists)}
+	spinlock.lock(&state.lock, pmmGuards)
+	defer spinlock.unlock(&state.lock, pmmGuards)
 
 	pages := pages_needed(sizeInBytes)
 	order := order_for(pages)
@@ -227,8 +228,9 @@ pfree :: proc "contextless" (addr: u64, bytes: u64) {
 	print.kassert(addr != 0, "pfree: null physical address")
 	print.kassert(addr % shared.PAGE_SIZE == 0, "pfree: unaligned physical address")
 	print.kassert(bytes != 0, "pfree: zero-size allocation")
-	spinlock.lock(&state.lock)
-	defer spinlock.unlock(&state.lock)
+	pmmGuards := [][]u8{mem.ptr_to_bytes(&state), mem.slice_to_bytes(state.bitmap), mem.ptr_to_bytes(&freeLists)}
+	spinlock.lock(&state.lock, pmmGuards)
+	defer spinlock.unlock(&state.lock, pmmGuards)
 
 	end := addr / shared.PAGE_SIZE + pages_needed(bytes)
 	for page := addr / shared.PAGE_SIZE; page < end; {

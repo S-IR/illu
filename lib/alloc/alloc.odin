@@ -3,6 +3,7 @@ import "../shared"
 import "../spinlock"
 import "base:intrinsics"
 import "base:runtime"
+import "core:mem"
 
 HEAP_MAGIC :: u64(0x484541505F424C4B)
 HEAP_FREE_MAGIC :: u64(0x465245455F424C4B)
@@ -203,8 +204,9 @@ small_alloc :: proc(size: int, alignment: int, zeroed: bool) -> (rawptr, runtime
 	}
 
 	requested := align_up(u64(size), u64(BLOCK_HEADER_SIZE))
-	spinlock.lock(&heapLock)
-	defer spinlock.unlock(&heapLock)
+	heapGuards := [][]u8{mem.ptr_to_bytes(&heapFreeList)}
+	spinlock.lock(&heapLock, heapGuards)
+	defer spinlock.unlock(&heapLock, heapGuards)
 
 	block := find_free_block(requested)
 	if block == nil {
@@ -241,8 +243,9 @@ large_alloc :: proc(size: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error
 }
 
 small_resize_in_place :: proc(old: rawptr, size: u64) -> bool {
-	spinlock.lock(&heapLock)
-	defer spinlock.unlock(&heapLock)
+	heapGuards := [][]u8{mem.ptr_to_bytes(&heapFreeList)}
+	spinlock.lock(&heapLock, heapGuards)
+	defer spinlock.unlock(&heapLock, heapGuards)
 
 	block := block_from_payload(old)
 	assert(block.magic == HEAP_MAGIC, "heap: invalid small allocation pointer")
@@ -295,8 +298,9 @@ heap_free :: proc(p: rawptr, oldSize: int) {
 
 	switch block.magic {
 	case HEAP_MAGIC:
-		spinlock.lock(&heapLock)
-		defer spinlock.unlock(&heapLock)
+		heapGuards := [][]u8{mem.ptr_to_bytes(&heapFreeList)}
+		spinlock.lock(&heapLock, heapGuards)
+		defer spinlock.unlock(&heapLock, heapGuards)
 		free_small_block(block)
 	case HEAP_FREE_MAGIC:
 		assert(false, "heap: double free")

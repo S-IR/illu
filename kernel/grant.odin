@@ -102,9 +102,10 @@ grant_arm_slice :: proc "contextless" (cpu: ^CpuState) {
 
 grant_arm_slice_if_contended :: proc "contextless" (cpu: ^CpuState) {
 	if cpu.sliceArmed || cpu.currentGrant.domain == nil do return
-	spinlock.lock(&cpu.lock)
+	cpuGuards := [][]u8{mem.ptr_to_bytes(cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+	spinlock.lock(&cpu.lock, cpuGuards)
 	waiting := len(cpu.grants) > 0
-	spinlock.unlock(&cpu.lock)
+	spinlock.unlock(&cpu.lock, cpuGuards)
 	if waiting do grant_arm_slice(cpu)
 }
 
@@ -186,8 +187,9 @@ grant_spawn :: proc(
 	if saveArea == nil || uintptr(saveArea) % align_of(userschedule.UserSaveArea) != 0 do return .InvalidSaveArea
 	if entry == 0 || entry >= USER_ADDR_END do return .InvalidEntry
 
-	spinlock.rw_write_lock(&domain.lock)
-	defer spinlock.rw_write_unlock(&domain.lock)
+	domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+	spinlock.rw_write_lock(&domain.lock, domainGuards)
+	defer spinlock.rw_write_unlock(&domain.lock, domainGuards)
 
 	if bit_array.get(&domain.grantCpus, cpu_index(cpu)) do return .AlreadyOnCpu
 	if weight == 0 || weight > domain.weightFree do return .InsufficientWeight
@@ -203,8 +205,9 @@ grant_spawn :: proc(
 	if !intrinsics.atomic_load(&info.online) do return .InvalidCpu
 
 	{
-		spinlock.lock(&cpu.lock)
-		defer spinlock.unlock(&cpu.lock)
+		cpuGuards := [][]u8{mem.ptr_to_bytes(cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+		spinlock.lock(&cpu.lock, cpuGuards)
+		defer spinlock.unlock(&cpu.lock, cpuGuards)
 
 		grant := CpuGrant {
 			saveArea         = saveArea,
@@ -231,13 +234,15 @@ grant_edit :: proc(domain: ^ProtectionDomain, cpu: ^CpuState, weight: u64) -> sh
 	assert(domain != nil)
 	assert(cpu != nil)
 
-	spinlock.rw_write_lock(&domain.lock)
-	defer spinlock.rw_write_unlock(&domain.lock)
+	domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+	spinlock.rw_write_lock(&domain.lock, domainGuards)
+	defer spinlock.rw_write_unlock(&domain.lock, domainGuards)
 
 	if !bit_array.get(&domain.grantCpus, cpu_index(cpu)) do return .NotOnCpu
 
-	spinlock.lock(&cpu.lock)
-	defer spinlock.unlock(&cpu.lock)
+	cpuGuards := [][]u8{mem.ptr_to_bytes(cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+	spinlock.lock(&cpu.lock, cpuGuards)
+	defer spinlock.unlock(&cpu.lock, cpuGuards)
 
 	if weight == 0 {
 		grant_kill_locked(cpu, domain)
@@ -259,14 +264,16 @@ grant_edit :: proc(domain: ^ProtectionDomain, cpu: ^CpuState, weight: u64) -> sh
 grant_kill_all :: proc(domain: ^ProtectionDomain) {
 	assert(domain != nil)
 	{
-		spinlock.rw_write_lock(&domain.lock)
-		defer spinlock.rw_write_unlock(&domain.lock)
+		domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+		spinlock.rw_write_lock(&domain.lock, domainGuards)
+		defer spinlock.rw_write_unlock(&domain.lock, domainGuards)
 
 		for &cpu in cpus {
 			if !bit_array.get(&domain.grantCpus, cpu_index(&cpu)) do continue
-			spinlock.lock(&cpu.lock)
+			cpuGuards := [][]u8{mem.ptr_to_bytes(&cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+			spinlock.lock(&cpu.lock, cpuGuards)
 			grant_kill_locked(&cpu, domain)
-			spinlock.unlock(&cpu.lock)
+			spinlock.unlock(&cpu.lock, cpuGuards)
 		}
 		assert(domain.weightFree == userschedule.SCHED_WEIGHT_TOTAL)
 		domain.weightFree = 0
@@ -288,10 +295,11 @@ grant_leave_if_killed :: proc(cpu: ^CpuState) {
 }
 
 grant_drop_current :: proc(cpu: ^CpuState) {
-	spinlock.lock(&cpu.lock)
+	cpuGuards := [][]u8{mem.ptr_to_bytes(cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+	spinlock.lock(&cpu.lock, cpuGuards)
 	dropped := cpu.currentGrant
 	cpu.currentGrant = {}
-	spinlock.unlock(&cpu.lock)
+	spinlock.unlock(&cpu.lock, cpuGuards)
 	assert(dropped.weight == 0)
 	if dropped.saveAreaUnderlay != nil do memory_underlay_release(dropped.saveAreaUnderlay)
 }
@@ -311,8 +319,9 @@ grant_loop :: proc "c" () -> ! {
 }
 
 grant_pop :: proc(cpu: ^CpuState) -> (next: CpuGrant, contended, ok: bool) {
-	spinlock.lock(&cpu.lock)
-	defer spinlock.unlock(&cpu.lock)
+	cpuGuards := [][]u8{mem.ptr_to_bytes(cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+	spinlock.lock(&cpu.lock, cpuGuards)
+	defer spinlock.unlock(&cpu.lock, cpuGuards)
 	grant_wake_locked(cpu)
 	if len(cpu.grants) == 0 do return {}, false, false
 	next = pop(&cpu.grants)
@@ -361,8 +370,9 @@ sleep_target :: proc(
 	idleLevel: IdleLevel,
 ) {
 	info := cpu_info(cpu)
-	spinlock.lock(&cpu.lock)
-	defer spinlock.unlock(&cpu.lock)
+	cpuGuards := [][]u8{mem.ptr_to_bytes(cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+	spinlock.lock(&cpu.lock, cpuGuards)
+	defer spinlock.unlock(&cpu.lock, cpuGuards)
 	watched = &info.grantedWeight
 	watchedOld = intrinsics.atomic_load(watched)
 	deadline = max(u64)
@@ -425,8 +435,9 @@ grant_switch_out :: proc(cpu: ^CpuState, wait: Maybe(WaitTarget)) -> ! {
 	kernel_switch_cr3()
 	released: ^MemoryUnderlay
 	{
-		spinlock.lock(&cpu.lock)
-		defer spinlock.unlock(&cpu.lock)
+		cpuGuards := [][]u8{mem.ptr_to_bytes(cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+		spinlock.lock(&cpu.lock, cpuGuards)
+		defer spinlock.unlock(&cpu.lock, cpuGuards)
 		grant := cpu.currentGrant
 		killed := grant.weight == 0
 		switch {
@@ -456,8 +467,9 @@ syscall_wait_on :: proc(addr, oldValue, deadline: u64) -> shared.Error {
 
 	if addr % 8 != 0 do return .InvalidAddress
 	{
-		spinlock.rw_read_lock(&domain.lock)
-		defer spinlock.rw_read_unlock(&domain.lock)
+		domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+		spinlock.rw_read_lock(&domain.lock, domainGuards)
+		defer spinlock.rw_read_unlock(&domain.lock, domainGuards)
 		if !user_range_accessible(domain, addr, 8, false) do return .InvalidAddress
 	}
 	if intrinsics.atomic_load((^u64)(pmm.phys_to_ptr(addr))) != oldValue do return .None
@@ -491,11 +503,13 @@ grant_exit :: proc() -> ! {
 	cpu := gs_read_cpustate()
 	domain := cpu.currentGrant.domain
 	if domain != nil && intrinsics.atomic_load(&cpu.currentGrant.weight) != 0 {
-		spinlock.rw_write_lock(&domain.lock)
-		spinlock.lock(&cpu.lock)
+		domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+		spinlock.rw_write_lock(&domain.lock, domainGuards)
+		cpuGuards := [][]u8{mem.ptr_to_bytes(cpu), mem.slice_to_bytes(cpu.grants[:]), mem.slice_to_bytes(cpu.sleepers[:])}
+		spinlock.lock(&cpu.lock, cpuGuards)
 		if cpu.currentGrant.weight != 0 do grant_kill_locked(cpu, domain)
-		spinlock.unlock(&cpu.lock)
-		spinlock.rw_write_unlock(&domain.lock)
+		spinlock.unlock(&cpu.lock, cpuGuards)
+		spinlock.rw_write_unlock(&domain.lock, domainGuards)
 	}
 	grant_drop_current(cpu)
 	run_abort()
@@ -505,8 +519,9 @@ syscall_grant_spawn :: proc(
 	handle: int,
 	cpuIdx, saveAreaPtr, weight, entry: u64,
 ) -> shared.Error {
-	spinlock.rw_read_lock(&protDomainPool.rwLock)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
+	poolGuards := [][]u8{mem.ptr_to_bytes(&protDomainPool), mem.slice_to_bytes(protDomainPool.prots[:]), mem.slice_to_bytes(protDomainPool.freeSlots[:])}
+	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
 
 	target, targetCpu := grant_syscall_target_DOESNT_LOCK(handle, cpuIdx) or_return
 	saveArea := (^userschedule.UserSaveArea)(uintptr(saveAreaPtr))
@@ -514,8 +529,9 @@ syscall_grant_spawn :: proc(
 }
 
 syscall_grant_edit :: proc(handle: int, cpuIdx, weight: u64) -> shared.Error {
-	spinlock.rw_read_lock(&protDomainPool.rwLock)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
+	poolGuards := [][]u8{mem.ptr_to_bytes(&protDomainPool), mem.slice_to_bytes(protDomainPool.prots[:]), mem.slice_to_bytes(protDomainPool.freeSlots[:])}
+	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
 
 	target, targetCpu := grant_syscall_target_DOESNT_LOCK(handle, cpuIdx) or_return
 	return grant_edit(target, targetCpu, weight)

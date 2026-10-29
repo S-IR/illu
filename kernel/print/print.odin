@@ -9,14 +9,14 @@ when !ODIN_TEST {
 	serialLock: spinlock.Spinlock
 
 	serial_write :: proc "contextless" (s: string) {
-		spinlock.lock(&serialLock)
-		defer spinlock.unlock(&serialLock)
+		spinlock.lock(&serialLock, nil)
+		defer spinlock.unlock(&serialLock, nil)
 		for i := 0; i < len(s); i += 1 do ah.serial_write_byte_asm(s[i])
 	}
 
 	serial_write_hex :: proc "contextless" (value: u64) {
-		spinlock.lock(&serialLock)
-		defer spinlock.unlock(&serialLock)
+		spinlock.lock(&serialLock, nil)
+		defer spinlock.unlock(&serialLock, nil)
 		serial_write_locked("0x")
 		for i := 60; i >= 0; i -= 4 {
 			nibble := (value >> uint(i)) & 0xF
@@ -29,8 +29,8 @@ when !ODIN_TEST {
 	}
 
 	serial_write_u64 :: proc "contextless" (value: u64) {
-		spinlock.lock(&serialLock)
-		defer spinlock.unlock(&serialLock)
+		spinlock.lock(&serialLock, nil)
+		defer spinlock.unlock(&serialLock, nil)
 		divisor: u64 = 1_000_000_000_000_000_000
 		v := value
 		started := false
@@ -46,8 +46,8 @@ when !ODIN_TEST {
 	}
 
 	serial_writeln :: proc "contextless" (s: string) {
-		spinlock.lock(&serialLock)
-		defer spinlock.unlock(&serialLock)
+		spinlock.lock(&serialLock, nil)
+		defer spinlock.unlock(&serialLock, nil)
 		serial_write_locked(s)
 		ah.serial_write_byte_asm('\r')
 		ah.serial_write_byte_asm('\n')
@@ -61,8 +61,8 @@ when !ODIN_TEST {
 	serial_init_asm :: proc "contextless" () {ah.serial_init_asm()}
 	serial_write_byte_asm :: proc "contextless" (c: u8) {ah.serial_write_byte_asm(c)}
 	serial_write_bytes :: proc "contextless" (ptr: [^]u8, len: u64) {
-		spinlock.lock(&serialLock)
-		defer spinlock.unlock(&serialLock)
+		spinlock.lock(&serialLock, nil)
+		defer spinlock.unlock(&serialLock, nil)
 		for i in 0 ..< len do ah.serial_write_byte_asm(ptr[i])
 	}
 

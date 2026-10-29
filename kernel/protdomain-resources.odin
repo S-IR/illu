@@ -9,16 +9,18 @@ import "pmm"
 
 user_copy_in :: proc "contextless" (domain: ^ProtectionDomain, dst: []$T, src: u64) -> bool {
 	bytes := u64(len(dst) * size_of(T))
-	spinlock.rw_read_lock(&domain.lock)
-	defer spinlock.rw_read_unlock(&domain.lock)
+	domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+	spinlock.rw_read_lock(&domain.lock, domainGuards)
+	defer spinlock.rw_read_unlock(&domain.lock, domainGuards)
 	if !user_range_accessible(domain, src, bytes, false) do return false
 	mem.copy(raw_data(dst), pmm.phys_to_ptr(src), int(bytes))
 	return true
 }
 user_copy_out :: proc "contextless" (domain: ^ProtectionDomain, dst: u64, src: []$T) -> bool {
 	bytes := u64(len(src) * size_of(T))
-	spinlock.rw_read_lock(&domain.lock)
-	defer spinlock.rw_read_unlock(&domain.lock)
+	domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+	spinlock.rw_read_lock(&domain.lock, domainGuards)
+	defer spinlock.rw_read_unlock(&domain.lock, domainGuards)
 	if !user_range_accessible(domain, dst, bytes, true) do return false
 	mem.copy(pmm.phys_to_ptr(dst), raw_data(src), int(bytes))
 	return true

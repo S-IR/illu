@@ -45,8 +45,9 @@ protdomain_resolve_target_DOESNT_LOCK :: proc(
 	if target == nil do return nil, .InvalidHandle
 	assert(target.authorityPtr != nil)
 
-	spinlock.rw_read_lock(&caller.lock)
-	defer spinlock.rw_read_unlock(&caller.lock)
+	callerGuards := [][]u8{mem.ptr_to_bytes(caller), mem.slice_to_bytes(caller.grantCpus.bits[:])}
+	spinlock.rw_read_lock(&caller.lock, callerGuards)
+	defer spinlock.rw_read_unlock(&caller.lock, callerGuards)
 	if !user_range_accessible(
 		caller,
 		u64(uintptr(target.authorityPtr)),
@@ -88,8 +89,9 @@ protdomain_new :: proc(authorityPtr: ^byte) -> (pd: ^ProtectionDomain, err: mem.
 
 protdomain_publish :: proc(pd: ^ProtectionDomain) -> (idx: int, err: mem.Allocator_Error) {
 	assert(pd != nil)
-	spinlock.rw_write_lock(&protDomainPool.rwLock)
-	defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
+	poolGuards := [][]u8{mem.ptr_to_bytes(&protDomainPool), mem.slice_to_bytes(protDomainPool.prots[:]), mem.slice_to_bytes(protDomainPool.freeSlots[:])}
+	spinlock.rw_write_lock(&protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_write_unlock(&protDomainPool.rwLock, poolGuards)
 
 	if len(protDomainPool.freeSlots) > 0 {
 		idx = pop(&protDomainPool.freeSlots)
@@ -105,8 +107,9 @@ protdomain_publish :: proc(pd: ^ProtectionDomain) -> (idx: int, err: mem.Allocat
 protdomain_destroy :: proc(idx: int, caller: ^ProtectionDomain) -> shared.Error {
 	pd: ^ProtectionDomain
 	{
-		spinlock.rw_write_lock(&protDomainPool.rwLock)
-		defer spinlock.rw_write_unlock(&protDomainPool.rwLock)
+		poolGuards := [][]u8{mem.ptr_to_bytes(&protDomainPool), mem.slice_to_bytes(protDomainPool.prots[:]), mem.slice_to_bytes(protDomainPool.freeSlots[:])}
+		spinlock.rw_write_lock(&protDomainPool.rwLock, poolGuards)
+		defer spinlock.rw_write_unlock(&protDomainPool.rwLock, poolGuards)
 		pd = protdomain_resolve_target_DOESNT_LOCK(idx, caller) or_return
 		if pd == caller do return .NoPermission
 		assert(protDomainPool.prots[idx] == pd)
@@ -135,24 +138,30 @@ protdomain_free :: proc(pd: ^ProtectionDomain) {
 
 domains_write_lock :: proc "contextless" (a, b: ^ProtectionDomain) {
 	if a == b {
-		spinlock.rw_write_lock(&a.lock)
+		aGuards := [][]u8{mem.ptr_to_bytes(a), mem.slice_to_bytes(a.grantCpus.bits[:])}
+		spinlock.rw_write_lock(&a.lock, aGuards)
 		return
 	}
 	first, second := a, b
 	if uintptr(a) > uintptr(b) do first, second = b, a
-	spinlock.rw_write_lock(&first.lock)
-	spinlock.rw_write_lock(&second.lock)
+	firstGuards := [][]u8{mem.ptr_to_bytes(first), mem.slice_to_bytes(first.grantCpus.bits[:])}
+	secondGuards := [][]u8{mem.ptr_to_bytes(second), mem.slice_to_bytes(second.grantCpus.bits[:])}
+	spinlock.rw_write_lock(&first.lock, firstGuards)
+	spinlock.rw_write_lock(&second.lock, secondGuards)
 }
 
 domains_write_unlock :: proc "contextless" (a, b: ^ProtectionDomain) {
 	if a == b {
-		spinlock.rw_write_unlock(&a.lock)
+		aGuards := [][]u8{mem.ptr_to_bytes(a), mem.slice_to_bytes(a.grantCpus.bits[:])}
+		spinlock.rw_write_unlock(&a.lock, aGuards)
 		return
 	}
 	first, second := a, b
 	if uintptr(a) > uintptr(b) do first, second = b, a
-	spinlock.rw_write_unlock(&second.lock)
-	spinlock.rw_write_unlock(&first.lock)
+	firstGuards := [][]u8{mem.ptr_to_bytes(first), mem.slice_to_bytes(first.grantCpus.bits[:])}
+	secondGuards := [][]u8{mem.ptr_to_bytes(second), mem.slice_to_bytes(second.grantCpus.bits[:])}
+	spinlock.rw_write_unlock(&second.lock, secondGuards)
+	spinlock.rw_write_unlock(&first.lock, firstGuards)
 }
 
 tlbGenCounter: u64
@@ -231,8 +240,9 @@ pcidAllocator := struct {
 
 pcid_alloc :: proc() -> u32 {
 	if !cpuHasPCID do return 0
-	spinlock.lock(&pcidAllocator.lock)
-	defer spinlock.unlock(&pcidAllocator.lock)
+	pcidGuards := [][]u8{mem.ptr_to_bytes(&pcidAllocator), mem.slice_to_bytes(pcidAllocator.free[:])}
+	spinlock.lock(&pcidAllocator.lock, pcidGuards)
+	defer spinlock.unlock(&pcidAllocator.lock, pcidGuards)
 	if len(pcidAllocator.free) > 0 do return pop(&pcidAllocator.free)
 	if pcidAllocator.next >= PCID_MAX do return 0
 	pcid := pcidAllocator.next
@@ -244,8 +254,9 @@ pcid_alloc :: proc() -> u32 {
 pcid_free :: proc(pcid: u32) {
 	if !cpuHasPCID do return
 	if pcid == 0 do return
-	spinlock.lock(&pcidAllocator.lock)
-	defer spinlock.unlock(&pcidAllocator.lock)
+	pcidGuards := [][]u8{mem.ptr_to_bytes(&pcidAllocator), mem.slice_to_bytes(pcidAllocator.free[:])}
+	spinlock.lock(&pcidAllocator.lock, pcidGuards)
+	defer spinlock.unlock(&pcidAllocator.lock, pcidGuards)
 	append(&pcidAllocator.free, pcid)
 }
 
@@ -275,8 +286,9 @@ syscall_prot_domain_create :: proc(
 	if !user_copy_in(callerDomain, regions, regionsPtr) do return .InvalidRegionCount, 0
 	for &r in regions do r.flags += {.Present, .User}
 	{
-		spinlock.rw_read_lock(&callerDomain.lock)
-		defer spinlock.rw_read_unlock(&callerDomain.lock)
+		callerDomainGuards := [][]u8{mem.ptr_to_bytes(callerDomain), mem.slice_to_bytes(callerDomain.grantCpus.bits[:])}
+		spinlock.rw_read_lock(&callerDomain.lock, callerDomainGuards)
+		defer spinlock.rw_read_unlock(&callerDomain.lock, callerDomainGuards)
 		if !user_range_accessible(callerDomain, u64(uintptr(authorityPtr)), 1, true) do return .NoPermission, 0
 	}
 
@@ -354,8 +366,9 @@ syscall_prot_domain_edit :: proc(
 		detached_tables_free(&detached)
 	}
 
-	spinlock.rw_read_lock(&protDomainPool.rwLock)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
+	poolGuards := [][]u8{mem.ptr_to_bytes(&protDomainPool), mem.slice_to_bytes(protDomainPool.prots[:]), mem.slice_to_bytes(protDomainPool.freeSlots[:])}
+	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
 	target = protdomain_resolve_target_DOESNT_LOCK(handle, callerDomain) or_return
 
 	domains_write_lock(callerDomain, target)

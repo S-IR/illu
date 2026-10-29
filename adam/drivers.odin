@@ -8,6 +8,7 @@ import "../lib/spinlock"
 import "../lib/syscalls"
 import "../lib/userschedule"
 import "base:intrinsics"
+import "core:mem"
 import "gs"
 DriverResult :: enum {
 	Ignored,
@@ -77,8 +78,9 @@ adam_dispatch_pci_device :: proc(
 
 			disk: diskhelpers.Disk
 			{
-				spinlock.lock(&gs.nextMadeUpAddr.lock)
-				defer spinlock.unlock(&gs.nextMadeUpAddr.lock)
+				addrGuards := [][]u8{mem.ptr_to_bytes(&gs.nextMadeUpAddr)}
+				spinlock.lock(&gs.nextMadeUpAddr.lock, addrGuards)
+				defer spinlock.unlock(&gs.nextMadeUpAddr.lock, addrGuards)
 				used: int
 				disk, used = diskhelpers.disk_new(
 					nvmeDisk,
@@ -91,8 +93,9 @@ adam_dispatch_pci_device :: proc(
 				gs.nextMadeUpAddr.v += u64(used)
 			}
 			{
-				spinlock.lock(&disks.lock)
-				defer spinlock.unlock(&disks.lock)
+				diskGuards := [][]u8{mem.ptr_to_bytes(&disks), mem.slice_to_bytes(disks.v[:])}
+				spinlock.lock(&disks.lock, diskGuards)
+				defer spinlock.unlock(&disks.lock, diskGuards)
 				if _, err := append(&disks.v, disk); err != nil do return .Failed, .OutOfMemory
 			}
 

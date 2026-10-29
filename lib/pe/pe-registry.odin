@@ -1,5 +1,6 @@
 package pe
 import "../spinlock"
+import "core:mem"
 
 Bytecode :: struct {
 	base:  u64,
@@ -22,15 +23,17 @@ load :: proc(data: []u8) -> (bc: Bytecode, ok: bool) {
 }
 
 store :: proc(name: string, bc: Bytecode) {
-	spinlock.lock(&registry.lock)
+	registryGuards := [][]u8{mem.ptr_to_bytes(&registry)}
+	spinlock.lock(&registry.lock, registryGuards)
 	registry.data[name] = bc
-	spinlock.unlock(&registry.lock)
+	spinlock.unlock(&registry.lock, registryGuards)
 }
 
 get :: proc(name: string) -> (bc: Bytecode, found: bool) {
-	spinlock.lock(&registry.lock)
+	registryGuards := [][]u8{mem.ptr_to_bytes(&registry)}
+	spinlock.lock(&registry.lock, registryGuards)
 	bc, found = registry.data[name]
-	spinlock.unlock(&registry.lock)
+	spinlock.unlock(&registry.lock, registryGuards)
 	return
 }
 

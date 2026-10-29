@@ -52,8 +52,9 @@ networkRegistry := struct {
 	lock:  spinlock.Spinlock,
 }{}
 wifi_register :: proc(device: WifiDevice) -> (err: runtime.Allocator_Error) {
-	spinlock.lock(&networkRegistry.lock)
-	defer spinlock.unlock(&networkRegistry.lock)
+	registryGuards := [][]u8{mem.ptr_to_bytes(&networkRegistry), mem.slice_to_bytes(networkRegistry.wifis[:])}
+	spinlock.lock(&networkRegistry.lock, registryGuards)
+	defer spinlock.unlock(&networkRegistry.lock, registryGuards)
 
 	if networkRegistry.wifis == nil {
 		networkRegistry.wifis, err = make([dynamic]WifiDevice, 0, 1)
@@ -107,8 +108,9 @@ rtl8822be_send :: proc(state: ^RTL8822BE_State, frame: []u8) -> WifiError {
 	}
 	if u32(len(frame)) + 48 > state.txSlotSize do return .InvalidFrame
 
-	spinlock.lock(&state.txLock)
-	defer spinlock.unlock(&state.txLock)
+	txGuards := [][]u8{mem.ptr_to_bytes(&state.txHead), mem.byte_slice(state.txDma, int(state.txSlots) * (16 + int(state.txSlotSize)))}
+	spinlock.lock(&state.txLock, txGuards)
+	defer spinlock.unlock(&state.txLock, txGuards)
 
 	nextHead := (state.txHead + 1) % state.txSlots
 	slot := uintptr(state.txHead)
@@ -135,8 +137,9 @@ rtl8822be_poll :: proc(state: ^RTL8822BE_State, buffer: []u8) -> (WifiError, int
 	}
 	if len(buffer) == 0 do return .InvalidFrame, 0
 
-	spinlock.lock(&state.rxLock)
-	defer spinlock.unlock(&state.rxLock)
+	rxGuards := [][]u8{mem.ptr_to_bytes(&state.rxTail), mem.byte_slice(state.rxDma, int(state.rxSlots) * (8 + int(state.rxSlotSize)))}
+	spinlock.lock(&state.rxLock, rxGuards)
+	defer spinlock.unlock(&state.rxLock, rxGuards)
 
 	hardwareHead := u16((ah.mmio_read_u32(rawptr(uintptr(state.mmio) + 0x3B4)) >> 16) & 0x0FFF)
 	if state.rxTail == hardwareHead % state.rxSlots do return .NoPacket, 0

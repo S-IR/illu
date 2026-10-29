@@ -4,6 +4,7 @@ import "../lib/shared"
 import "../lib/spinlock"
 import "../lib/syscalls"
 import "base:intrinsics"
+import "core:mem"
 import "pmm"
 
 import "print"
@@ -51,8 +52,9 @@ syscall_mmap :: proc(regionsPtr: u64, regionsCount: u64) -> (err: shared.Error, 
 		detached_tables_free(&detached)
 	}
 
-	spinlock.rw_write_lock(&domain.lock)
-	defer spinlock.rw_write_unlock(&domain.lock)
+	domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+	spinlock.rw_write_lock(&domain.lock, domainGuards)
+	defer spinlock.rw_write_unlock(&domain.lock, domainGuards)
 
 	assert(!resource_overlaps(domain.resources[:], allocatedPhys, totalBytes))
 	for r, i in regions {
@@ -124,13 +126,14 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 
 	case .DebugPrint:
 		domain := cpu.currentGrant.domain
-		spinlock.rw_read_lock(&domain.lock)
-		defer spinlock.rw_read_unlock(&domain.lock)
+		domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
+		spinlock.rw_read_lock(&domain.lock, domainGuards)
+		defer spinlock.rw_read_unlock(&domain.lock, domainGuards)
 		if !user_range_accessible(domain, a1, a2, false) do return max(u64), max(u64)
 
 		label := string(([^]u8)(pmm.phys_to_ptr(a1))[:a2])
-		spinlock.lock(&serialPrintLock)
-		defer spinlock.unlock(&serialPrintLock)
+		spinlock.lock(&serialPrintLock, nil)
+		defer spinlock.unlock(&serialPrintLock, nil)
 		print.serial_write("dbg: ")
 		print.serial_writeln(label)
 	}

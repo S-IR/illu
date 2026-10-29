@@ -1,95 +1,97 @@
 package modelcheck
 
 import "../spinlock"
+import "core:fmt"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 
-RWState :: struct {
-	lock:    spinlock.RWLock,
-	writers: int,
-	readers: int,
-}
-
-rw_reset :: proc(data: rawptr) {
-	(^RWState)(data)^ = {}
-}
-
-rw_inv :: proc(data: rawptr) -> bool {
-	st := (^RWState)(data)
-	assert(st.writers >= 0)
-	assert(st.readers >= 0)
-	return st.writers == 0 || (st.writers == 1 && st.readers == 0)
+Shared :: struct {
+	rw:    spinlock.RWLock,
+	lock:  spinlock.Spinlock,
+	value: int,
 }
 
 rw_writer :: proc(data: rawptr) {
-	st := (^RWState)(data)
-	spinlock.rw_write_lock(&st.lock)
-	st.writers += 1
-	spinlock.point(.Atomic, nil)
-	st.writers -= 1
-	spinlock.rw_write_unlock(&st.lock)
+	s := (^Shared)(data)
+	spinlock.rw_write_lock(&s.rw, {mem.ptr_to_bytes(&s.value)})
+	s.value += 1
+	spinlock.rw_write_unlock(&s.rw, {mem.ptr_to_bytes(&s.value)})
 }
 
 rw_reader :: proc(data: rawptr) {
-	st := (^RWState)(data)
-	spinlock.rw_read_lock(&st.lock)
-	st.readers += 1
-	spinlock.point(.Atomic, nil)
-	st.readers -= 1
-	spinlock.rw_read_unlock(&st.lock)
+	s := (^Shared)(data)
+	spinlock.rw_read_lock(&s.rw, {mem.ptr_to_bytes(&s.value)})
+	assert(s.value >= 0)
+	spinlock.rw_read_unlock(&s.rw, {mem.ptr_to_bytes(&s.value)})
 }
 
 rw_nested_reader :: proc(data: rawptr) {
-	st := (^RWState)(data)
-	spinlock.rw_read_lock(&st.lock)
-	st.readers += 1
-	spinlock.point(.Atomic, nil)
-	spinlock.rw_read_lock(&st.lock)
-	st.readers += 1
-	spinlock.point(.Atomic, nil)
-	st.readers -= 2
-	spinlock.rw_read_unlock(&st.lock)
-	spinlock.rw_read_unlock(&st.lock)
+	s := (^Shared)(data)
+	spinlock.rw_read_lock(&s.rw, {mem.ptr_to_bytes(&s.value)})
+	spinlock.rw_read_lock(&s.rw, {mem.ptr_to_bytes(&s.value)})
+	spinlock.rw_read_unlock(&s.rw, {mem.ptr_to_bytes(&s.value)})
+	spinlock.rw_read_unlock(&s.rw, {mem.ptr_to_bytes(&s.value)})
 }
 
-rw_check :: proc(bodies: []proc(data: rawptr)) -> Result(RaceState) {
-	st: RWState
-	test := Test {
-		bodies = bodies,
-		data   = &st,
-		reset  = rw_reset,
-		inv    = rw_inv,
-	}
-	return race_check(&test)
+rw_reader_writes :: proc(data: rawptr) {
+	s := (^Shared)(data)
+	spinlock.rw_read_lock(&s.rw, {mem.ptr_to_bytes(&s.value)})
+	s.value += 1
+	spinlock.rw_read_unlock(&s.rw, {mem.ptr_to_bytes(&s.value)})
 }
 
-@(test)
-rw_writer_writer :: proc(t: ^testing.T) {
-	r := rw_check({rw_writer, rw_writer})
+spin_writer :: proc(data: rawptr) {
+	s := (^Shared)(data)
+	spinlock.lock(&s.lock, {mem.ptr_to_bytes(&s.value)})
+	s.value += 1
+	spinlock.unlock(&s.lock, {mem.ptr_to_bytes(&s.value)})
+}
+
+unguarded_writer :: proc(data: rawptr) {
+	s := (^Shared)(data)
+	s.value += 1
+}
+
+check :: proc(bodies: []proc(data: rawptr)) -> Result(RaceState) {
+	s: Shared
+	return race_check({bodies = bodies, data = mem.ptr_to_bytes(&s)})
+}
+
+expect_pass :: proc(t: ^testing.T, bodies: []proc(data: rawptr)) {
+	r := check(bodies)
 	testing.expectf(t, r.ok, "%s %v", r.message, r.trace)
 }
 
-@(test)
-rw_writer_reader :: proc(t: ^testing.T) {
-	r := rw_check({rw_writer, rw_reader})
-	testing.expectf(t, r.ok, "%s %v", r.message, r.trace)
-}
-
-@(test)
-rw_reader_reader :: proc(t: ^testing.T) {
-	r := rw_check({rw_reader, rw_reader})
-	testing.expectf(t, r.ok, "%s %v", r.message, r.trace)
-}
-
-@(test)
-rw_writer_reader_reader :: proc(t: ^testing.T) {
-	r := rw_check({rw_writer, rw_reader, rw_reader})
-	testing.expectf(t, r.ok, "%s %v", r.message, r.trace)
-}
-
-@(test)
-rw_nested_reader_writer_deadlocks :: proc(t: ^testing.T) {
-	r := rw_check({rw_nested_reader, rw_writer})
+expect_fail :: proc(t: ^testing.T, bodies: []proc(data: rawptr), err: RaceError) {
+	r := check(bodies)
 	testing.expect(t, !r.ok)
-	testing.expectf(t, strings.contains(r.message, "Deadlock"), "%s", r.message)
+	testing.expectf(t, strings.has_prefix(r.message, fmt.tprint(err)), "%s", r.message)
 }
+
+@(test)
+spin_writer_writer :: proc(t: ^testing.T) {expect_pass(t, {spin_writer, spin_writer})}
+
+@(test)
+spin_writer_writer_writer :: proc(t: ^testing.T) {expect_pass(t, {spin_writer, spin_writer, spin_writer})}
+
+@(test)
+rw_writer_writer :: proc(t: ^testing.T) {expect_pass(t, {rw_writer, rw_writer})}
+
+@(test)
+rw_writer_reader :: proc(t: ^testing.T) {expect_pass(t, {rw_writer, rw_reader})}
+
+@(test)
+rw_reader_reader :: proc(t: ^testing.T) {expect_pass(t, {rw_reader, rw_reader})}
+
+@(test)
+rw_writer_reader_reader :: proc(t: ^testing.T) {expect_pass(t, {rw_writer, rw_reader, rw_reader})}
+
+@(test)
+rw_nested_reader_writer_deadlocks :: proc(t: ^testing.T) {expect_fail(t, {rw_nested_reader, rw_writer}, .Deadlock)}
+
+@(test)
+rw_reader_write_races :: proc(t: ^testing.T) {expect_fail(t, {rw_reader_writes, rw_reader}, .Race)}
+
+@(test)
+unguarded_write_races :: proc(t: ^testing.T) {expect_fail(t, {unguarded_writer, spin_writer}, .Race)}

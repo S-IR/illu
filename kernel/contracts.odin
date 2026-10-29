@@ -24,8 +24,9 @@ syscall_contract_create :: proc(handle: int, phys, size, descPtr: u64) -> (err: 
 
 	wRules := contract_rules_copy_in(caller, desc[0].wPtr, desc[0].wCount, true) or_return
 	defer if err != .None do delete(wRules)
-	spinlock.rw_read_lock(&protDomainPool.rwLock)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock)
+	poolGuards := [][]u8{mem.ptr_to_bytes(&protDomainPool), mem.slice_to_bytes(protDomainPool.prots[:]), mem.slice_to_bytes(protDomainPool.freeSlots[:])}
+	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
 
 	target := protdomain_resolve_target_DOESNT_LOCK(handle, caller) or_return
 	domains_write_lock(caller, target)
@@ -71,8 +72,9 @@ syscall_contract_memory_access :: proc(dst, buf, bufLen, dirRaw: u64) -> (err: s
 	slot := slotBuf[:bufLen]
 	if dir == .Write && !user_copy_in(caller, slot, buf) do return .InvalidAddress
 	{
-		spinlock.rw_read_lock(&caller.lock)
-		defer spinlock.rw_read_unlock(&caller.lock)
+		callerGuards := [][]u8{mem.ptr_to_bytes(caller), mem.slice_to_bytes(caller.grantCpus.bits[:])}
+		spinlock.rw_read_lock(&caller.lock, callerGuards)
+		defer spinlock.rw_read_unlock(&caller.lock, callerGuards)
 
 		idx, found := resource_find_containing(caller.resources[:], dst)
 		if !found do return .NotContracted

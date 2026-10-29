@@ -180,7 +180,7 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		return
 	}
 	if userMode {
-		spinlock.lock(&serialPrintLock)
+		spinlock.lock(&serialPrintLock, nil)
 		print.serial_write("domain fault: ")
 		print.serial_write(exceptionNames[frame.interruptNumber])
 		print.serial_write(" at rip=")
@@ -192,7 +192,7 @@ exception_handler :: proc "c" (frame: ^InterruptFrame) {
 		print.serial_write(" domain.pml4=")
 		print.serial_write_hex(gs_read_cpustate().currentGrant.domain.pml4)
 		print.serial_writeln("")
-		spinlock.unlock(&serialPrintLock)
+		spinlock.unlock(&serialPrintLock, nil)
 		grant_fault(gs_read_cpustate(), frame)
 	}
 
