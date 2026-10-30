@@ -4,26 +4,37 @@ import "../lib/spinlock"
 import "../lib/syscalls"
 import "../lib/userschedule"
 import "base:intrinsics"
+import "base:runtime"
 import "core:mem"
 import "pmm"
-
-user_copy_in :: proc "contextless" (domain: ^ProtectionDomain, dst: []$T, src: u64) -> bool {
+user_copy_in_NO_LOCK :: proc "contextless" (
+	domain: ^ProtectionDomain,
+	dst: []$T,
+	src: u64,
+) -> bool {
 	bytes := u64(len(dst) * size_of(T))
-	domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
-	spinlock.rw_read_lock(&domain.lock, domainGuards)
-	defer spinlock.rw_read_unlock(&domain.lock, domainGuards)
-	if !user_range_accessible(domain, src, bytes, false) do return false
+	if !user_range_accessible_NO_LOCK(domain, src, bytes, false) do return false
 	mem.copy(raw_data(dst), pmm.phys_to_ptr(src), int(bytes))
 	return true
 }
-user_copy_out :: proc "contextless" (domain: ^ProtectionDomain, dst: u64, src: []$T) -> bool {
+user_copy_in :: proc "contextless" (domain: ^ProtectionDomain, dst: []$T, src: u64) -> bool {
+	domain_read_lock(domain)
+	return user_copy_in_NO_LOCK(domain, dst, src)
+}
+user_copy_out_NO_LOCK :: proc "contextless" (
+	domain: ^ProtectionDomain,
+	dst: u64,
+	src: []$T,
+) -> bool {
 	bytes := u64(len(src) * size_of(T))
-	domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
-	spinlock.rw_read_lock(&domain.lock, domainGuards)
-	defer spinlock.rw_read_unlock(&domain.lock, domainGuards)
-	if !user_range_accessible(domain, dst, bytes, true) do return false
+	if !user_range_accessible_NO_LOCK(domain, dst, bytes, true) do return false
 	mem.copy(pmm.phys_to_ptr(dst), raw_data(src), int(bytes))
 	return true
+}
+
+user_copy_out :: proc "contextless" (domain: ^ProtectionDomain, dst: u64, src: []$T) -> bool {
+	domain_read_lock(domain)
+	return user_copy_out_NO_LOCK(domain, dst, src)
 }
 USER_ADDR_END :: u64(1) << 47
 
@@ -49,6 +60,17 @@ mem_region_valid :: proc "contextless" (r: syscalls.MemRegion) -> bool {
 	return !resource_ranges_overlap(r.logical, r.size, userschedule.CPU_INFO_ADDR, cpuInfoBytes)
 }
 
+
+resources_backing_bytes :: proc "contextless" (resources: ^#soa[dynamic]MemoryResource) -> []u8 {
+	FIELDS :: intrinsics.type_struct_field_count(MemoryResource)
+	capacity := cap(resources^)
+	if capacity == 0 do return nil
+	columns := ([^]uintptr)(resources)[:FIELDS]
+	for i in 1 ..< FIELDS do assert_contextless(columns[i] > columns[i - 1])
+	info := runtime.type_info_base(type_info_of(MemoryResource)).variant.(runtime.Type_Info_Struct)
+	end := columns[FIELDS - 1] + uintptr(capacity * info.types[FIELDS - 1].size)
+	return ([^]u8)(rawptr(columns[0]))[:end - columns[0]]
+}
 
 resource_upper_bound :: proc "contextless" (resources: #soa[]MemoryResource, phys: u64) -> int {
 	low, high := 0, len(resources)
@@ -91,7 +113,7 @@ resource_find_containing :: proc "contextless" (
 // Callers dereference phys directly. Without meltdown isolation that happens on the
 // domain's page tables, so a domain's own logical mapping at phys can redirect the
 // access. Safe: domains can only map memory they own, so it only hits itself.
-user_range_accessible :: proc "contextless" (
+user_range_accessible_NO_LOCK :: proc "contextless" (
 	domain: ^ProtectionDomain,
 	phys, size: u64,
 	write: bool,

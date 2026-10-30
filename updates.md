@@ -9,7 +9,7 @@ Order: secure + parallel ifs first. Updates come only after that.
 2. Kernel ring attach point: ring_create / ring_submit / ring_reap. The kernel owns slots, tail, slot states, doorbells, and CQ reads. CqPhase completion only.
 3. Pins: pinCount on MemoryResource, `.Busy` on edits, a zombie list on domain destroy.
 4. Adam writes the nvme contract: allowed opcodes, disk range from perms, PRP checks.
-5. Per-program nvme SQ/CQ pair guarded by the contract. Parallel: no shared queue, no lock.
+5. nvme SQ/CQ pairs shared by all programs that use the disk, guarded by the contract. The kernel tracks which domain owns each slot. Drives expose few queue pairs (often 8-128), so pairs are never per program.
 6. Disk perms as a fake phys window (`DISK_BASE | diskId<<44 | lba<<bs`). Adam mounts, then grants per-file extents to programs.
 7. ProtDomainEdit Transfer + the disk pool domain (os-design.md). ifs disk_alloc moves onto it.
 

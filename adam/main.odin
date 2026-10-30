@@ -55,6 +55,8 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 	context.temp_allocator = mem.dynamic_arena_allocator(&tempArena)
 	context.assertion_failure_proc = adam_assertion_failure_handler
 
+	ring_test()
+
 	for &device in pcies {
 		result, code := adam_dispatch_pci_device(&device)
 
@@ -66,6 +68,8 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 		case .Ignored, .Unsupported:
 		}
 	}
+
+	if len(disks.v) > 0 do ring_nvme_test(&disks.v[0])
 
 	ifsPathmap := make(ifs.Pathmap)
 

@@ -24,11 +24,15 @@ syscall_contract_create :: proc(handle: int, phys, size, descPtr: u64) -> (err: 
 
 	wRules := contract_rules_copy_in(caller, desc[0].wPtr, desc[0].wCount, true) or_return
 	defer if err != .None do delete(wRules)
-	poolGuards := [][]u8{mem.ptr_to_bytes(&protDomainPool), mem.slice_to_bytes(protDomainPool.prots[:]), mem.slice_to_bytes(protDomainPool.freeSlots[:])}
+	poolGuards := [][]u8 {
+		mem.ptr_to_bytes(&protDomainPool),
+		mem.slice_to_bytes(protDomainPool.prots[:]),
+		mem.slice_to_bytes(protDomainPool.freeSlots[:]),
+	}
 	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
 	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
 
-	target := protdomain_resolve_target_DOESNT_LOCK(handle, caller) or_return
+	target := protdomain_resolve_target_NO_LOCK(handle, caller) or_return
 	domains_write_lock(caller, target)
 	defer domains_write_unlock(caller, target)
 
@@ -47,8 +51,12 @@ syscall_contract_create :: proc(handle: int, phys, size, descPtr: u64) -> (err: 
 	contracted.phys, contracted.logical = phys, phys
 	contracted.size = size
 	contracted.flags = {}
-	contracted.rContractRules = rRules
-	contracted.wContractRules = wRules
+	contracted.contract = new(ContractRules)
+	if contracted.contract == nil do return .OutOfMemory
+	contracted.contract^ = {
+		r = rRules,
+		w = wRules,
+	}
 	_, inserted := resource_insert(&target.resources, contracted)
 	assert(inserted)
 
@@ -72,9 +80,7 @@ syscall_contract_memory_access :: proc(dst, buf, bufLen, dirRaw: u64) -> (err: s
 	slot := slotBuf[:bufLen]
 	if dir == .Write && !user_copy_in(caller, slot, buf) do return .InvalidAddress
 	{
-		callerGuards := [][]u8{mem.ptr_to_bytes(caller), mem.slice_to_bytes(caller.grantCpus.bits[:])}
-		spinlock.rw_read_lock(&caller.lock, callerGuards)
-		defer spinlock.rw_read_unlock(&caller.lock, callerGuards)
+		domain_read_lock(caller)
 
 		idx, found := resource_find_containing(caller.resources[:], dst)
 		if !found do return .NotContracted
@@ -82,7 +88,7 @@ syscall_contract_memory_access :: proc(dst, buf, bufLen, dirRaw: u64) -> (err: s
 		if !resource_contracted(res) do return .NotContracted
 		end, overflow := intrinsics.overflow_add(dst, bufLen)
 		if overflow || end > res.phys + res.size do return .OutOfBounds
-		rules := res.wContractRules if dir == .Write else res.rContractRules
+		rules := res.contract.w if dir == .Write else res.contract.r
 
 		if len(rules) == 0 do return .Denied
 		if !contract_run_NO_LOCK(rules, slot, dst - res.phys, caller) do return .Denied
@@ -233,7 +239,7 @@ contract_run_NO_LOCK :: proc(
 			if r[rule.a] >= r[rule.b] do next = int(rule.imm)
 
 		case .HasPermR, .HasPermW:
-			if !user_range_accessible(domain, r[rule.a], r[rule.b], rule.op == .HasPermW) do return false
+			if !user_range_accessible_NO_LOCK(domain, r[rule.a], r[rule.b], rule.op == .HasPermW) do return false
 		case .Accept:
 			return true
 		case .Copy, .ListR, .ListW:
@@ -245,4 +251,11 @@ contract_run_NO_LOCK :: proc(
 		pc = next
 	}
 	return false
+}
+
+contract_rules_free :: proc(c: ^ContractRules) {
+	if c == nil do return
+	delete(c.r)
+	delete(c.w)
+	free(c)
 }

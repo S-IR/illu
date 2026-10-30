@@ -52,6 +52,26 @@ syscall_contract_memory_access:
     syscall
     ret
 
+SYSCALL_STUB  syscall_ring_create, 9
+
+.global syscall_ring_submit
+syscall_ring_submit:
+    # System V arg4 is rcx; syscall arg4 is r10.
+    mov %rcx, %r10
+    movabs $(ILLU_SYSCALL_BIT + 10), %rax
+    syscall
+    ret
+
+.global syscall_ring_reap
+syscall_ring_reap:
+    # System V arg4 is rcx; syscall arg4 is r10.
+    mov %rcx, %r10
+    movabs $(ILLU_SYSCALL_BIT + 11), %rax
+    syscall
+    ret
+
+SYSCALL_STUB  syscall_ring_destroy, 12
+
 .global cpu_current_index
 cpu_current_index:
     rdtscp

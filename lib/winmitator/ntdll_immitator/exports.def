@@ -5,6 +5,9 @@ EXPORTS
     GetStdHandle
     HeapAlloc
     HeapFree
+    memcpy
+    memmove
+    memset
     RtlAllocateHeap
     RtlCopyMemory
     RtlExitUserProcess

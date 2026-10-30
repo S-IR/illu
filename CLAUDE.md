@@ -11,9 +11,11 @@ DO NOT WRITE ANY CODE IN ANY FILES YOURSELF UNLESS I LITERALLY ASK YOU TO MODIFY
 BE WAY WAY WAY LESS VERBOSE
 read the mds in the root dir of this project
 ALL claude memory / context for this project goes in .md files in the root dir of this project (claude-memory.md). never write hidden memory or context files anywhere else.
+I do decisions about where to go. you only implement or help me implement. if you stumble on having to decide what kind of logic to write and you are not sure you ask me.
 
 # CODE STANDARDS
 
+- data oriented code predominantly
 - simple code
 - remove dead code
 - use pure fns unless you can't. libs hold no globals; fns return results instead of editing global state. global state lives only in the program that owns it (e.g. adam)
@@ -24,6 +26,7 @@ ALL claude memory / context for this project goes in .md files in the root dir o
 - be very careful with assembly. write #assert where you are assuming an odin lang struct layout. when having kernel issues first check the alignment problems then the argument order passings
 - returned errors from fns imply either the returned variable or the modified input variables are undefined thus you should never read vars before checking errors
 - we don't really do tests. we buiild so that we can prove that software is not buggy through our tlb like lib/modelcheck library. when we finished wrting a component that we know wont change a lot anymore we prove that it doesn't have bugs.
+- STOP PUTTING u8 WHEN YOU MEAN BYTES. USE BYTE for BYTE TYPE
   DO NOT ADD THINGS UNLESS NEEDED
   DO NOT WRITE ANY CODE IN ANY FILES YOURSELF. PRINT HERE IN THIS CHAT STEP BY STEP CHANGES OF THE CODEBASE + CODE UNLESS I LITERALLY ASK YOU TO MODIFY FILES
   YOU PRESENT STEP BY STEP INSTRUCTIONS ON WHAT TO DO. SMALL BITE SIZED INSTRUCTIONS WITH PSEUDOCODE . YOU WILL BY DEFAULT GET ME TO UNDERSTAND THE PROBLEM AND WRITE THE CODE BY HAND AND ONLY PRINT CODE IF I ASK

@@ -33,6 +33,10 @@ Syscall :: enum u64 {
 	WaitOn,
 	ContractCreate,
 	ContractMemoryAccess,
+	RingCreate,
+	RingSubmit,
+	RingReap,
+	RingDestroy,
 	DebugPrint = ILLU_SYSCALL_BIT + 1000,
 }
 
@@ -57,6 +61,10 @@ when !ODIN_TEST {
 			user_resume :: proc() ---
 			syscall_contract_create :: proc(handle, phys, size, descPtr: u64) -> (err: u64) ---
 			syscall_contract_memory_access :: proc(dst, buf, len, dir: u64) -> (err: u64) ---
+			syscall_ring_create :: proc(descPtr: u64) -> (err: u64, handle: int) ---
+			syscall_ring_submit :: proc(handle: int, entriesPtr, n, tokensOutPtr: u64) -> (err: u64, accepted: u64) ---
+			syscall_ring_reap :: proc(handle: int, tokensPtr, n, outPtr, waitPtr: u64) -> (err: u64, finished: u64) ---
+			syscall_ring_destroy :: proc(handle: int) -> (err: u64) ---
 		}
 
 		syscall_grant_spawn_userspace :: proc "contextless" (

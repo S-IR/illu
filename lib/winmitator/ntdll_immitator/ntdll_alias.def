@@ -6,6 +6,7 @@ EXPORTS
     HeapAlloc
     HeapFree
     WriteFile
+    memcpy
     memmove
     memset
     unimplemented_stub

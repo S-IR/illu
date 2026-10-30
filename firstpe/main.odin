@@ -1,4 +1,5 @@
 package firstpe
+import "../lib/syscalls"
 
 foreign import ntdll "ntdll.lib"
 foreign ntdll {
@@ -14,6 +15,7 @@ foreign _ {
 
 @(export)
 _start :: proc "c" () {
+	syscalls.syscall_debug_print_userspace("fpe: start", 0)
 	tebSelf := gs_read_u64(0x30)
 	pebPtr := gs_read_u64(0x60)
 	selfCheck := (^u64)(rawptr(uintptr(tebSelf + 0x30)))^
@@ -41,5 +43,7 @@ _start :: proc "c" () {
 	if writeOk do code |= 16
 	if freed != 0 do code |= 32
 
+	syscalls.syscall_debug_print_userspace("fpe: heap test code", u64(code))
+	ring_test_client(&ringTestParams)
 	ExitProcess(code)
 }

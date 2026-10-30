@@ -1,37 +1,62 @@
 # claude memory (terse)
 
-## Work rules (user, 2026-10-26)
+## Work rules (user)
+
 - Never invent limits or design and present them as fact. Facts: cite file:line or spec. Proposals: label them, the user decides.
-- Context = files in the working tree only. Never read git history (deleted files) as context.
+- Context = files in the working tree only. Read git history only when the user asks.
 - Don't flip-flop. Pick one recommendation and keep it unless the user changes it.
-- Print code only when asked. Write files only when explicitly asked.
-- Teaching: user gets it from concrete line-by-line trace tables. Explain with traces.
+- Default: step-by-step pseudocode, user writes code. Write files only when explicitly asked. No comments in code.
+- Keep answers SHORT (user begs). Explain with concrete trace tables.
+- Check plan lines against the design's purpose before building on them.
+- APIs are batched + async by default, never block. Sync helpers only as wrappers over the async API.
+- err is always the LAST return value. Exception: syscall_dispatch / raw foreign decls keep err first (rax). Old violators: syscall_mmap, syscall_prot_domain_create.
+- Error returned = other outputs garbage. Exceptions allowed when they make sense.
+- Never boot qemu. The user runs `.zed/debug.sh` / `.zed/prod.sh`. Build with `odin run . -debug` at most.
+- _NO_LOCK fns take no locks at all; the syscall takes every lock up front. Never nest domain read locks (writer bit between = deadlock).
+- To debug: get data first (prints), then hunt the bug.
 
-## Errors (2026-10-27)
-All syscall errors = shared.Error (SYSCALL range 0x400). Kernel and userland return shared.Error, use or_return.
+## Kernel facts
 
-## Locks
-spinlock lock/unlock take `guards: [][]u8` (memory the lock guards). Same g for lock and unlock.
-`g := [][]u8{mem.ptr_to_bytes(&x.a), mem.slice_to_bytes(arr[:])}; lock(&x.lock, g); defer unlock(&x.lock, g)`. Build g after any realloc.
+- All syscall errors = shared.Error (SYSCALL range 0x400). DebugPrint prints label + value.
+- Locks take `guards: [][]u8`, same g for lock and unlock. Helpers with @(deferred_out): domain_read/write_lock, domain_guards (kernel/protdomain.odin), ring_pool_read/write_lock, ring_lock (kernel/ring.odin). protDomainPool and cpu guards are still inline.
+- MemoryResource: #soa kept (bench lib/soabench). Rules in `contract: ^ContractRules{r, w}`.
+- user_copy_in/out(_NO_LOCK), user_range_accessible_NO_LOCK in kernel/protdomain-resources.odin.
+- wait_on(addr, old, deadline) kernel/grant.odin: futex-like, needs R on 8-aligned u64. If the cpu can't mwait (idleCount == 0, e.g. KVM), sleep_target polls sleepers every tscTicksPerMs / SLEEPER_POLLS_PER_MS.
+- Contracts: kernel/contracts.odin (create, memory_access, validate, contract_run_NO_LOCK). Design in contracts.md.
 
-## Contracts (in progress)
-Design: contracts.md "CONTRACT" section. Work order: updates.md section 1.
+## Ring (kernel/ring.odin, lib/syscalls/ring.odin) — v1 done, tested on real nvme
 
-Done:
-- lib/syscalls/contracts.odin: ContractOp, ContractRule (16B #assert), ContractDesc, ContractAccessDir, CONTRACT_ACCESS_MAX, userspace wrappers.
-- lib/syscalls/syscalls.asm: nr 7 (create), nr 8 (access), 4 args (rcx -> r10). Syscall enum + dispatch in kernel/syscall.odin.
-- kernel/memory-resource.odin: MemoryResource.rContractRules, wContractRules.
-- kernel/contracts.odin: syscall_contract_create, contract_rules_copy_in, contract_validate, contract_run_NO_LOCK
-  (Load/Store64/Imm/Add/Sub/Shl/Shr/And/J*/HasPerm/Accept; Copy/List = unreachable), syscall_contract_memory_access
-  (copy in before lock, caller read lock over find + run + device access, len 4/8 = one volatile op, copy out after lock).
-- user_copy_out in kernel/protdomain-resources.odin.
-- resource_contracted helper; grant refusal in prot_domain_create + edit Add; assert in resource_granted (regrant = refused).
-- Edit Delete: frees rules, always releases underlay, skips unmap/tlb for flags {}. protdomain_free frees rules.
-- pmm.map_kernel_mmio: BARs + pcie config pages mapped UC into kernel direct map in adam_init.
-- Decision: replacing rules = Delete + Create, no in-place replace.
+Purpose: ONE ring SHARED by mutually untrusted programs; kernel mediation makes it safe. Adam makes queue pairs + rings (policy, userland).
+v1: nvme only, TailDoorbell + CqPhase, no pins / Copy / List.
 
-Open / next:
-- Proposal (undecided): Volatile resource + len not 4/8 -> InvalidSize.
-- contracts.md still says "caller owns with W"; now W only needed for wRules.
-- Copy buffers design, pins, ring (tail replay / in-flight overwrite / unpin-during-DMA holes stay until then).
-- ifs forged-slot problem at boot scan: undecided (option c = per-subtree ranges in adam config, a = reject overlaps).
+- create: depths 2..65536, sq.entrySize <= 64, fields fit, doorbells %4, domainCap 1..depth-1, cq.phys/entrySize %8, SQ/CQ/doorbell ranges disjoint. Caller W on authority byte + the 4 ranges (underlay increment each). cqPhase starts 1 (CQ zeroed).
+- Lock order: ringPool -> caller domain -> ring. Handle = pool index; resolve checks W on authority byte.
+- Slots: token = index into slots{owner, Free/InFlight/Done, status} + free-token stack. Full if inFlight == depth-1 || no free token || caller owns domainCap.
+- submit: n <= depth; per entry copy in, contract, stamp token, write SQ; one fence + doorbell. accepted > 0 -> .None.
+- reap: ring_cq_drain_NO_LOCK, then per token RingReapEntry{status, done}; RingWait{addr, old} (addr 0 = drain hit cap, reap again).
+- destroy: pool WRITE lock, drain, inFlight > 0 -> .Busy, reserve-then-unlink, release underlays.
+- ring_domain_orphan(pd) in protdomain_free: frees Done, owner = nil on InFlight.
+- Decided: anyone with W on SQ memory/doorbell bypasses the contract = adam's problem for v1 (pins later).
+
+## Throwaway ring tests (passed debug + prod 2026-10-30, marked THROWAWAY, user decides later)
+
+- adam/ringtest.odin (fake device), adam/ringtest-nvme.odin + firstpe/ringtest.odin (real nvme, firstpe client, exported `ringTestParams` handoff). Called from adam_start.
+- firstpe builds only in debug; prod embeds the last debug firstpe.exe.
+
+## Next (user's order)
+
+1. Talk about proving what we wrote: ring, contracts, nvme, ifs. Tool: lib/modelcheck. The user decides the plan.
+
+## Later
+
+- Adam per core: nvme queue pair + ring with the nvme contract, grant clients W on authority + R on CQ.
+- nvme contract (contracts.md "nvme"): disk range via DISK_BASE perm window (updates.md 1.6), PRP lists need Copy/List.
+- lib/nvme client path through the ring (lib/nvme/io.odin).
+- Pins (updates.md 1.3). Perf: submit's O(depth) `owned` scan -> per-owner count (measure first).
+
+## Open (undecided)
+
+- How programs get device access: spawn args struct with ptrs per device kind, or an upcall to adam that decides dynamically (user leans upcall).
+- contracts.md says "caller owns with W"; now W only needed for wRules.
+- contract memory_access Volatile + len not 4/8 -> InvalidSize.
+- ifs forged-slot problem at boot scan.

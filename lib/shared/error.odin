@@ -54,4 +54,7 @@ Error :: enum u64 {
 	NotContracted,
 	OutOfBounds,
 	Denied,
+	InvalidRing,
+	RingFull,
+	Busy,
 }

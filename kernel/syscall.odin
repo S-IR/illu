@@ -52,9 +52,7 @@ syscall_mmap :: proc(regionsPtr: u64, regionsCount: u64) -> (err: shared.Error, 
 		detached_tables_free(&detached)
 	}
 
-	domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
-	spinlock.rw_write_lock(&domain.lock, domainGuards)
-	defer spinlock.rw_write_unlock(&domain.lock, domainGuards)
+	domain_write_lock(domain)
 
 	assert(!resource_overlaps(domain.resources[:], allocatedPhys, totalBytes))
 	for r, i in regions {
@@ -124,18 +122,31 @@ syscall_dispatch :: proc "sysv" (nr, a1, a2, a3, a4, a5, a6: u64) -> (err: u64, 
 	case .ContractMemoryAccess:
 		return u64(syscall_contract_memory_access(a1, a2, a3, a4)), 0
 
+	case .RingCreate:
+		handle, err := syscall_ring_create(a1)
+		return u64(err), transmute(u64)handle
+	case .RingSubmit:
+		accepted, err := syscall_ring_submit(transmute(int)a1, a2, a3, a4)
+		return u64(err), accepted
+	case .RingReap:
+		finished, err := syscall_ring_reap(transmute(int)a1, a2, a3, a4, a5)
+		return u64(err), finished
+	case .RingDestroy:
+		return u64(syscall_ring_destroy(transmute(int)a1)), 0
+
 	case .DebugPrint:
 		domain := cpu.currentGrant.domain
-		domainGuards := [][]u8{mem.ptr_to_bytes(domain), mem.slice_to_bytes(domain.grantCpus.bits[:])}
-		spinlock.rw_read_lock(&domain.lock, domainGuards)
-		defer spinlock.rw_read_unlock(&domain.lock, domainGuards)
-		if !user_range_accessible(domain, a1, a2, false) do return max(u64), max(u64)
+		domain_read_lock(domain)
+		if !user_range_accessible_NO_LOCK(domain, a1, a2, false) do return max(u64), max(u64)
 
 		label := string(([^]u8)(pmm.phys_to_ptr(a1))[:a2])
 		spinlock.lock(&serialPrintLock, nil)
 		defer spinlock.unlock(&serialPrintLock, nil)
 		print.serial_write("dbg: ")
-		print.serial_writeln(label)
+		print.serial_write(label)
+		print.serial_write(" ")
+		print.serial_write_hex(a3)
+		print.serial_writeln("")
 	}
 	return max(u64), max(u64)
 }

@@ -12,7 +12,7 @@ BUILD_KERNEL :: #config(BUILD_KERNEL, true)
 BUILD_ADAM :: #config(BUILD_ADAM, true)
 
 BUILD_NTDLL_IMMITATOR :: #config(BUILD_NTDLL_IMMITATOR, true)
-BUILD_FIRSTPE :: #config(BUILD_FIRSTPE, ODIN_DEBUG)
+BUILD_FIRSTPE :: #config(BUILD_FIRSTPE, true)
 TEST_NO_MELTDOWN :: #config(TEST_NO_MELTDOWN, false)
 
 main :: proc() {

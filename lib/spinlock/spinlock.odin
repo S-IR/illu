@@ -15,7 +15,12 @@ when ODIN_TEST {
 	schedHook: proc "contextless" (kind: PointKind, addr: ^u32, value: u32, guards: [][]u8) = nil
 }
 
-point :: #force_inline proc "contextless" (kind: PointKind, addr: ^u32, value: u32 = 0, guards: [][]u8 = nil) {
+point :: #force_inline proc "contextless" (
+	kind: PointKind,
+	addr: ^u32,
+	value: u32 = 0,
+	guards: [][]u8 = nil,
+) {
 	when ODIN_TEST {
 		if schedHook != nil do schedHook(kind, addr, value, guards)
 	}
@@ -59,7 +64,7 @@ RWLock :: struct {
 RW_WRITER_BIT :: u32(0x8000_0000)
 RW_READERS_MASK :: RW_WRITER_BIT - 1
 
-rw_read_lock :: #force_inline proc "contextless" (l: ^RWLock, guards: [][]u8) {
+rw_read_lock :: #force_inline proc "contextless" (l: ^RWLock, guards: [][]byte) {
 	point(.Atomic, &l.state)
 	for {
 		s := intrinsics.atomic_load_explicit(&l.state, .Relaxed)
@@ -71,7 +76,13 @@ rw_read_lock :: #force_inline proc "contextless" (l: ^RWLock, guards: [][]u8) {
 		}
 		assert_contextless(s & RW_READERS_MASK != RW_READERS_MASK)
 		point(.Atomic, &l.state)
-		old, ok := intrinsics.atomic_compare_exchange_weak_explicit(&l.state, s, s + 1, .Acquire, .Relaxed)
+		old, ok := intrinsics.atomic_compare_exchange_weak_explicit(
+			&l.state,
+			s,
+			s + 1,
+			.Acquire,
+			.Relaxed,
+		)
 		point(.Result, &l.state, old)
 		if ok do break
 		point(.Atomic, &l.state)
@@ -97,7 +108,13 @@ rw_write_lock :: #force_inline proc "contextless" (l: ^RWLock, guards: [][]u8) {
 			continue
 		}
 		point(.Atomic, &l.state)
-		old, ok := intrinsics.atomic_compare_exchange_weak_explicit(&l.state, s, s | RW_WRITER_BIT, .Acquire, .Relaxed)
+		old, ok := intrinsics.atomic_compare_exchange_weak_explicit(
+			&l.state,
+			s,
+			s | RW_WRITER_BIT,
+			.Acquire,
+			.Relaxed,
+		)
 		point(.Result, &l.state, old)
 		if ok do break
 		point(.Atomic, &l.state)

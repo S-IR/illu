@@ -5,6 +5,7 @@ Core principles live in CLAUDE.md. Device security lives in contracts.md. This f
 Rule: always pick the exokernel design unless it is moronic. The kernel does protection, userland does strategy.
 
 ## Allocation of fake phys ranges (disk, VRAM, ports)
+
 - A pool is a protection domain with no threads, holding the free ranges. There is no new kernel object.
 - New ProtDomainEdit op `Transfer(from, to, range)`: needs W on `from`'s authority, and `to` = caller or W on `to`'s authority. Moves the range atomically.
 - Range not held by `from` -> `.NotOwned` (lost a race, retry). Pinned range -> `.Busy`.
@@ -14,6 +15,7 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
 - Why atomic in the kernel: without it two programs racing on one free range both end up with W and corrupt each other's files.
 
 ## ifs security
+
 - Adam mounts: at boot it holds the whole partition window, does the full scan, then builds the pool and grants.
 - Programs never mount. They get disk perms plus their subtree's root Slot, then use lazy path_lookup.
 - Grants are per-file extents for now. Merging adjacent ranges comes later, only if the resource table hurts.
@@ -22,6 +24,7 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
 - Who gets which subtree across reboots is policy and lives in adam's config. The kernel and ifs know nothing of it.
 
 ## Update requirements
+
 - Zero downtime: no reboot for any update except the kernel. Zero-downtime kernel updates are a later goal.
 - Zero friction: an update = write new code to disk + one atomic commit. No manual stopping of programs.
 - Crash safe: a crash at any point leaves the old or the new generation, never a mix.
@@ -29,12 +32,14 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
 - Running programs are never forced. Each one picks when it moves to new code.
 
 ## Why this is cheap here
+
 - Single address space + position independent code: new code loads at a new address, old pointers stay valid, nothing is relocated.
 - Libs hold no globals: swapping a lib = calling new code with the same state.
 - No daemons: no services to restart.
 - The one real cost: a lib defines the layout of state its program owns (e.g. nvme queue structs). A layout change needs migration.
 
 ## Code store and generations
+
 - `/code/<hash>`: immutable code blobs (libs, programs, drivers, adam, kernel). Never written in place.
 - One manifest = one generation: `name -> <hash>`. Commit is the A/B manifest write (see Storage formats).
 - Rollback: the other manifest is the previous generation.
@@ -43,6 +48,7 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
 - Windows apps are copied in as is with their own DLLs. Only our winmitator libs update through the manifest.
 
 ## Boot
+
 - The ESP holds only the bootloader.
 - The bootloader reads raw blocks through UEFI BlockIo and runs our fs libs read-only (pure libs, so the same code runs there). It scans every partition of every format it knows for the system folder.
 - Several system folders found: pick the valid manifest with the highest seq.
@@ -51,6 +57,7 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
 - Everything, the boot set included, is in one atomic generation. There is no second update path.
 
 ## Swapping code in a running program
+
 - Libs: the program reloads at a point it picks (e.g. the top of its main loop). No thread is in old code there, so the old code is unmapped right after.
 - Layout change: the lib ships a migrate fn (old version state -> new). State structs carry a `version: u32`.
 - Stateful owners (adam, device owners): handoff.
@@ -61,16 +68,19 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
 - Rule: all of a program's global state is one struct with a version field.
 
 ## Contracts swap
+
 - Contracts are data adam installs. Replace one only when its ring has nothing in flight.
 - Needs a kernel op: replace contract on an idle ring. Allowed for any caller holding the ring's memory.
 
 ## Syscall ABI
+
 - No syscall exists for only one program. Every syscall is for all programs. What a call may touch is decided only by the caller's memory perms, never by who the caller is.
 - Programs call the kernel through our syscall lib, never with raw syscall instructions (Windows apps go through winmitator ntdll). The lib ships in the same generation as the kernel.
 - Programs never bundle the syscall lib, they load the current generation's.
 - The kernel exports `[minAbi, maxAbi]`. Libs assert their ABI is in range. Syscalls are removed after a deprecation window.
 
 ## Kernel swap (later goal, not now)
+
 - The kernel state is small and known: pmm, protdomains, grants, rings, pins. Page tables are plain memory and stay in place.
 - Steps:
   1. Adam loads the new kernel image at a new address (position independent).
@@ -87,6 +97,7 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
 - Between steps 2 and 4 the state must not change: either migrate after quiescing, or re-run migrate on the delta. Decide when implementing.
 
 ## Storage formats
+
 - ifs is preferred, not required. Any format works: a fs is just a lib a program loads (ntfs, ext4, fat, ...).
 - The system volume can be any format the bootloader has a read-only reader for.
 - The generation commit needs no fs feature: two manifest files A and B, each {seq, checksum, name -> hash list}.
@@ -95,7 +106,12 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
   - Works on fat, ntfs, ext4, ifs, raw blocks.
 
 ## TODO
+
 - ifs has no security: disk access must go through nvme contracts (contracts.md). Not done.
 - ifs parallelism: per-program nvme queues, concurrent writers. Not done.
 - Bootloader read-only fs reader.
 - Code store + A/B manifest layout.
+
+## Undecided:
+
+- how programs get device access. Options the user named: a spawn args struct with ptrs per device kind (disk, mouse, gpu...), or a userland upcall to adam ("give me the struct to access the disk") where adam decides perms dynamically. User leans to the upcall. Not decided.

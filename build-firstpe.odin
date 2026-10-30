@@ -56,6 +56,7 @@ build_firstpe :: proc() {
 		"lld-link",
 		"-subsystem:console",
 		"-entry:_start",
+		"-export:ringTestParams,DATA",
 		"-libpath:diskimg",
 		ntdllLib,
 		"-out:" + out,

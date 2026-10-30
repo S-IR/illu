@@ -11,17 +11,22 @@ MemoryResourceFlag :: enum {
 	InterruptSource,
 }
 
-MemoryResourceFlags :: bit_set[MemoryResourceFlag;u64]
+MemoryResourceFlags :: bit_set[MemoryResourceFlag;u8]
 
 MemoryResource :: struct {
-	phys:                           u64,
-	logical:                        u64,
-	size:                           u64,
-	flags:                          lmem.PageFlags,
-	pageSize:                       lmem.PageSize,
-	resourceFlags:                  MemoryResourceFlags,
-	rContractRules, wContractRules: []syscalls.ContractRule,
-	underlay:                       ^MemoryUnderlay,
+	phys:          u64,
+	logical:       u64,
+	size:          u64,
+	flags:         lmem.PageFlags,
+	pageSize:      lmem.PageSize,
+	resourceFlags: MemoryResourceFlags,
+	contract:      ^ContractRules,
+	underlay:      ^MemoryUnderlay,
+}
+#assert(size_of(MemoryResource) <= 64)
+
+ContractRules :: struct {
+	r, w: []syscalls.ContractRule,
 }
 
 resource_init :: proc(
@@ -93,5 +98,5 @@ region_flags_grantable :: proc "contextless" (want, have: lmem.PageFlags) -> boo
 }
 
 resource_contracted :: proc "contextless" (r: MemoryResource) -> bool {
-	return r.rContractRules != nil || r.wContractRules != nil
+	return r.contract != nil
 }

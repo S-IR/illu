@@ -1,7 +1,7 @@
 package lmem
 
 
-PageSize :: enum {
+PageSize :: enum u8 {
 	_4KB,
 	_2MB,
 	_1GB,
