@@ -54,6 +54,7 @@ phys_to_slice :: proc "contextless" (s: []$T) -> []T {
 }
 
 paging_init :: proc(
+	p: ^PMM,
 	kernelImg: elf.ElfImage,
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize: u64,
@@ -64,15 +65,15 @@ paging_init :: proc(
 	kernelImgGlobal = kernelImg
 	kernelGlobalFlag = {.Global} if globalKernel else {}
 	pages1GB = has1GBPages
-	print.kensure(state.totalPages * shared.PAGE_SIZE <= KERNEL_ENTRY_REGION - KERNEL_DIRECT_MAP, "paging_init: ram larger than the direct map")
+	print.kensure(p.totalPages * shared.PAGE_SIZE <= KERNEL_ENTRY_REGION - KERNEL_DIRECT_MAP, "paging_init: ram larger than the direct map")
 
 	enable_nxe()
-	kernelPML4 = early_alloc_zeroed_page(u64(4) * u64(mem.Gigabyte))
+	kernelPML4 = early_alloc_zeroed_page(p, u64(4) * u64(mem.Gigabyte))
 	print.kensure(kernelPML4 != 0, "paging_init: no page below 4 GiB for kernel PML4")
 
 	pml4 := ([^]u64)(phys_to_ptr(kernelPML4))
 	for i in KERNEL_HALF_FIRST_PML4_INDEX ..< PT_ENTRIES {
-		table := early_alloc_zeroed_page()
+		table := early_alloc_zeroed_page(p)
 		print.kensure(table != 0, "paging_init: out of memory for kernel half")
 		pml4[i] = table | transmute(u64)lmem.PageFlags{.Present, .Write}
 	}
@@ -82,16 +83,16 @@ paging_init :: proc(
 		desc := mmap_desc(memoryMap, memoryMapDescSize, i)
 		if !is_good_ram(desc.Type) do continue
 		end := desc.PhysicalStart + desc.NumberOfPages * shared.PAGE_SIZE
-		print.kassert(end / shared.PAGE_SIZE <= state.totalPages)
+		print.kassert(end / shared.PAGE_SIZE <= p.totalPages)
 		for phys := desc.PhysicalStart; phys < end; {
 			size := largest_page_fitting(phys, end)
-			map_page(kernelPML4, phys, KERNEL_DIRECT_MAP + phys, size, directFlags, bootstrap = true)
+			map_page(p, kernelPML4, phys, KERNEL_DIRECT_MAP + phys, size, directFlags, bootstrap = true)
 			phys += lmem.page_bytes(size)
 		}
 	}
 
-	map_kernel_image(kernelPML4, bootstrap = true)
-	map_page(kernelPML4, TRAMPOLINE_PHYS, TRAMPOLINE_PHYS, ._4KB, {.Present, .Write}, bootstrap = true)
+	map_kernel_image(p, kernelPML4, bootstrap = true)
+	map_page(p, kernelPML4, TRAMPOLINE_PHYS, TRAMPOLINE_PHYS, ._4KB, {.Present, .Write}, bootstrap = true)
 
 	ah.write_cr3(kernelPML4)
 	cr4 := ah.read_cr4()
@@ -99,7 +100,7 @@ paging_init :: proc(
 	ah.write_cr4(cr4 | CR4_PGE)
 
 	directMapBase = KERNEL_DIRECT_MAP
-	state.bitmap = phys_to_slice(state.bitmap)
+	p.bitmap = phys_to_slice(p.bitmap)
 }
 
 largest_page_fitting :: proc "contextless" (addr, end: u64) -> lmem.PageSize {
@@ -111,14 +112,14 @@ largest_page_fitting :: proc "contextless" (addr, end: u64) -> lmem.PageSize {
 	return ._4KB
 }
 
-map_kernel_image :: proc(dstPML4: u64, bootstrap := false) {
+map_kernel_image :: proc(p: ^PMM, dstPML4: u64, bootstrap := false) {
 	for seg in kernelImgGlobal.segments {
 		flags := lmem.PageFlags{.Present, .NX} + kernelGlobalFlag
 		if .W in seg.perms do flags += {.Write}
 		if .X in seg.perms do flags -= {.NX}
 		for page := addr_round_down_to_page(seg.base); page < seg.end; page += shared.PAGE_SIZE {
 			print.kensure(slot_available(dstPML4, page, ._4KB), "map_kernel_image: two segments share a page")
-			map_page(dstPML4, page, page, ._4KB, flags, bootstrap)
+			map_page(p, dstPML4, page, page, ._4KB, flags, bootstrap)
 		}
 	}
 }
@@ -133,16 +134,16 @@ pml4_share_kernel_half :: proc "contextless" (dstPML4: u64, entryRegionOnly: boo
 	copy(dst[KERNEL_HALF_FIRST_PML4_INDEX:PT_ENTRIES], src[KERNEL_HALF_FIRST_PML4_INDEX:PT_ENTRIES])
 }
 
-entry_region_alloc :: proc(bytes: u64, guard: bool) -> u64 {
+entry_region_alloc :: proc(p: ^PMM, bytes: u64, guard: bool) -> u64 {
 	print.kassert(bytes > 0 && bytes % shared.PAGE_SIZE == 0)
 	if guard do entryRegionNext += shared.PAGE_SIZE
 	start := entryRegionNext
 	entryRegionNext += bytes
 	print.kensure(entryRegionNext <= KERNEL_ENTRY_REGION_END, "entry_region_alloc: region exhausted")
 	for offset := u64(0); offset < bytes; offset += shared.PAGE_SIZE {
-		phys := alloc_zeroed(shared.PAGE_SIZE)
+		phys := alloc_zeroed(p, shared.PAGE_SIZE)
 		print.kensure(phys != 0, "entry_region_alloc: out of memory")
-		map_page(kernelPML4, phys, start + offset, ._4KB, {.Present, .Write, .NX} + kernelGlobalFlag)
+		map_page(p, kernelPML4, phys, start + offset, ._4KB, {.Present, .Write, .NX} + kernelGlobalFlag)
 	}
 	return start
 }
@@ -160,6 +161,7 @@ leaf_shift :: #force_inline proc "contextless" (size: lmem.PageSize) -> u64 {
 }
 
 map_page :: proc "contextless" (
+	p: ^PMM,
 	pml4Phys: u64,
 	phys, logical: u64,
 	size: lmem.PageSize,
@@ -176,7 +178,7 @@ map_page :: proc "contextless" (
 	table := ([^]u64)(phys_to_ptr(pml4Phys))
 	leafShift := leaf_shift(size)
 	for shift := PT_SHIFT_PML4; shift > leafShift; shift -= 9 {
-		table = ensure_table(table, (logical >> shift) & PT_INDEX_MASK, lowerHalf, lowerHalf || .Write in flags, bootstrap)
+		table = ensure_table(p, table, (logical >> shift) & PT_INDEX_MASK, lowerHalf, lowerHalf || .Write in flags, bootstrap)
 	}
 	idx := (logical >> leafShift) & PT_INDEX_MASK
 	print.kassert(.Present not_in transmute(lmem.PageFlags)table[idx], "map_page: slot already mapped")
@@ -271,13 +273,14 @@ tables_collect :: proc(entry: u64, level: int, out: ^[dynamic]u64) {
 }
 
 ensure_table :: #force_inline proc "contextless" (
+	p: ^PMM,
 	parent: [^]u64,
 	index: u64,
 	user, write, bootstrap: bool,
 ) -> [^]u64 {
 	print.kassert(.PS not_in transmute(lmem.PageFlags)parent[index], "ensure_table: large-page mapping conflicts")
 	if .Present not_in transmute(lmem.PageFlags)parent[index] {
-		page := early_alloc_zeroed_page() if bootstrap else alloc_zeroed(shared.PAGE_SIZE)
+		page := early_alloc_zeroed_page(p) if bootstrap else alloc_zeroed(p, shared.PAGE_SIZE)
 		if page == 0 do panic_contextless("ensure_table: out of page-table memory")
 		parent[index] = page | transmute(u64)lmem.PageFlags{.Present, .Write}
 	}
@@ -287,15 +290,12 @@ ensure_table :: #force_inline proc "contextless" (
 }
 
 @(private)
-earlyAllocNextPage: u64
-
-@(private)
-early_alloc_zeroed_page :: proc "contextless" (limitPhys := max(u64)) -> u64 {
-	limitPage := min(limitPhys / shared.PAGE_SIZE, state.totalPages)
-	for i in earlyAllocNextPage ..< limitPage {
-		if is_used(&state, i) do continue
-		kset(&state, i)
-		earlyAllocNextPage = i + 1
+early_alloc_zeroed_page :: proc "contextless" (p: ^PMM, limitPhys := max(u64)) -> u64 {
+	limitPage := min(limitPhys / shared.PAGE_SIZE, p.totalPages)
+	for i in p.earlyAllocNextPage ..< limitPage {
+		if is_used(p, i) do continue
+		kset(p, i)
+		p.earlyAllocNextPage = i + 1
 		phys := i * shared.PAGE_SIZE
 		mem.zero(phys_to_ptr(phys), shared.PAGE_SIZE)
 		return phys

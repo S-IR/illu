@@ -56,7 +56,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
 			{.Volatile, .InterruptSource},
 			.DeviceMMIO,
 		)
-		pmm.map_kernel_mmio(configPage, shared.PAGE_SIZE, ._4KB)
+		pmm.map_kernel_mmio(&kernelState.pmm, configPage, shared.PAGE_SIZE, ._4KB)
 
 	}
 
@@ -71,7 +71,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
 		.ExternalPhysical,
 	)
 
-	stackPhys := pmm.alloc_zeroed(ADAM_STACK_SIZE + shared.PAGE_SIZE)
+	stackPhys := pmm.alloc_zeroed(&kernelState.pmm, ADAM_STACK_SIZE + shared.PAGE_SIZE)
 	print.kensure(stackPhys != 0, "adam_init: stack alloc failed")
 	usableStart := stackPhys + shared.PAGE_SIZE
 	adam_track_pages(pd, stackPhys, usableStart, {}, {}, .AllocatedRAM)
@@ -112,7 +112,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
 			)
 			_, inserted := resource_insert(&pd.resources, resource)
 			print.kensure(inserted, "adam_init: failed to track PCI BAR resource")
-			pmm.map_kernel_mmio(barStart, barEnd - barStart, pageSize)
+			pmm.map_kernel_mmio(&kernelState.pmm, barStart, barEnd - barStart, pageSize)
 
 			detached: [dynamic]u64
 			resource_map(pd.pml4, resource, &detached)
@@ -122,7 +122,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
 	}
 
 	#assert(size_of(userschedule.UserSaveArea) <= shared.PAGE_SIZE)
-	saveAreaPhys := pmm.alloc_zeroed(shared.PAGE_SIZE)
+	saveAreaPhys := pmm.alloc_zeroed(&kernelState.pmm, shared.PAGE_SIZE)
 	print.kensure(saveAreaPhys != 0, "adam_init: save area alloc failed")
 	adam_track_pages(
 		pd,
@@ -141,7 +141,7 @@ adam_init :: proc(adamImg: elf.ElfImage, pciesPhys: []pci.Device) {
 	area.rcx = saveAreaPhys
 
 	userArea := (^userschedule.UserSaveArea)(uintptr(saveAreaPhys))
-	grantErr := grant_spawn(pd, &cpus[0], userArea, adamImg.entry, userschedule.SCHED_WEIGHT_TOTAL)
+	grantErr := grant_spawn(pd, &kernelState.cpus[0], userArea, adamImg.entry, userschedule.SCHED_WEIGHT_TOTAL)
 	print.kensure(grantErr == .None, "adam_init: failed to spawn initial grant")
 
 }
@@ -155,7 +155,7 @@ adam_track_pages :: proc(
 ) {
 	assert(start % shared.PAGE_SIZE == 0 && end % shared.PAGE_SIZE == 0 && start <= end)
 	for page := start; page < end; page += shared.PAGE_SIZE {
-		pmm.map_page(pd.pml4, page, page, ._4KB, flags)
+		pmm.map_page(&kernelState.pmm, pd.pml4, page, page, ._4KB, flags)
 		resource := resource_init(page, shared.PAGE_SIZE, ._4KB, flags, resourceFlags, backend)
 		_, inserted := resource_insert(&pd.resources, resource)
 		print.kensure(inserted, "adam_init: page tracked twice")

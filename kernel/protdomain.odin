@@ -20,15 +20,15 @@ ProtectionDomain :: struct {
 	pcid:         u32,
 }
 
-protDomainPool := struct {
+ProtDomainPool :: struct {
 	rwLock:    spinlock.RWLock,
 	prots:     [dynamic]^ProtectionDomain,
 	freeSlots: [dynamic]int,
-}{}
+}
 
 MEMORY_RESOURCES_STARTING_CAP :: 16
 
-// Caller must hold protDomainPool.rwLock before calling this procedure and
+// Caller must hold kernelState.protDomainPool.rwLock before calling this procedure and
 // must keep it held while using the returned domain.
 protdomain_resolve_target_NO_LOCK :: proc(
 	handle: int,
@@ -40,8 +40,8 @@ protdomain_resolve_target_NO_LOCK :: proc(
 	assert(caller != nil)
 
 	if handle == max(int) do return caller, .None
-	if handle < 0 || handle >= len(protDomainPool.prots) do return nil, .InvalidHandle
-	target = protDomainPool.prots[handle]
+	if handle < 0 || handle >= len(kernelState.protDomainPool.prots) do return nil, .InvalidHandle
+	target = kernelState.protDomainPool.prots[handle]
 	if target == nil do return nil, .InvalidHandle
 	assert(target.authorityPtr != nil)
 
@@ -59,7 +59,7 @@ protdomain_resolve_target_NO_LOCK :: proc(
 }
 
 protdomain_new :: proc(authorityPtr: ^byte) -> (pd: ^ProtectionDomain, err: mem.Allocator_Error) {
-	assert(len(cpus) > 0)
+	assert(len(kernelState.cpus) > 0)
 	assert(authorityPtr != nil)
 
 	newPD := new(ProtectionDomain) or_return
@@ -70,14 +70,14 @@ protdomain_new :: proc(authorityPtr: ^byte) -> (pd: ^ProtectionDomain, err: mem.
 	newPD.resources = make(#soa[dynamic]MemoryResource, 0, MEMORY_RESOURCES_STARTING_CAP) or_return
 	defer if err != nil do delete_soa(newPD.resources)
 
-	newPD.pml4 = pmm.alloc_zeroed(shared.PAGE_SIZE)
+	newPD.pml4 = pmm.alloc_zeroed(&kernelState.pmm, shared.PAGE_SIZE)
 	if newPD.pml4 == 0 do return nil, .Out_Of_Memory
-	defer if err != nil do pmm.pml4_destroy(newPD.pml4)
+	defer if err != nil do pmm.pml4_destroy(&kernelState.pmm, newPD.pml4)
 
 	newPD.weightFree = userschedule.SCHED_WEIGHT_TOTAL
-	if !bit_array.init(&newPD.grantCpus, len(cpus)) do return nil, .Out_Of_Memory
+	if !bit_array.init(&newPD.grantCpus, len(kernelState.cpus)) do return nil, .Out_Of_Memory
 
-	pmm.map_kernel_image(newPD.pml4)
+	pmm.map_kernel_image(&kernelState.pmm, newPD.pml4)
 	pmm.pml4_share_kernel_half(newPD.pml4, entryRegionOnly = cpuMeltdownVulnerable)
 	cpu_info_map(newPD.pml4)
 	newPD.pcid = pcid_alloc()
@@ -88,39 +88,39 @@ protdomain_new :: proc(authorityPtr: ^byte) -> (pd: ^ProtectionDomain, err: mem.
 protdomain_publish :: proc(pd: ^ProtectionDomain) -> (idx: int, err: mem.Allocator_Error) {
 	assert(pd != nil)
 	poolGuards := [][]u8 {
-		mem.ptr_to_bytes(&protDomainPool),
-		mem.slice_to_bytes(protDomainPool.prots[:]),
-		mem.slice_to_bytes(protDomainPool.freeSlots[:]),
+		mem.ptr_to_bytes(&kernelState.protDomainPool),
+		mem.slice_to_bytes(kernelState.protDomainPool.prots[:]),
+		mem.slice_to_bytes(kernelState.protDomainPool.freeSlots[:]),
 	}
-	spinlock.rw_write_lock(&protDomainPool.rwLock, poolGuards)
-	defer spinlock.rw_write_unlock(&protDomainPool.rwLock, poolGuards)
+	spinlock.rw_write_lock(&kernelState.protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_write_unlock(&kernelState.protDomainPool.rwLock, poolGuards)
 
-	if len(protDomainPool.freeSlots) > 0 {
-		idx = pop(&protDomainPool.freeSlots)
-		assert(idx >= 0 && idx < len(protDomainPool.prots))
-		assert(protDomainPool.prots[idx] == nil)
-		protDomainPool.prots[idx] = pd
+	if len(kernelState.protDomainPool.freeSlots) > 0 {
+		idx = pop(&kernelState.protDomainPool.freeSlots)
+		assert(idx >= 0 && idx < len(kernelState.protDomainPool.prots))
+		assert(kernelState.protDomainPool.prots[idx] == nil)
+		kernelState.protDomainPool.prots[idx] = pd
 		return idx, nil
 	}
-	append(&protDomainPool.prots, pd) or_return
-	return len(protDomainPool.prots) - 1, nil
+	append(&kernelState.protDomainPool.prots, pd) or_return
+	return len(kernelState.protDomainPool.prots) - 1, nil
 }
 
 protdomain_destroy :: proc(idx: int, caller: ^ProtectionDomain) -> shared.Error {
 	pd: ^ProtectionDomain
 	{
 		poolGuards := [][]u8 {
-			mem.ptr_to_bytes(&protDomainPool),
-			mem.slice_to_bytes(protDomainPool.prots[:]),
-			mem.slice_to_bytes(protDomainPool.freeSlots[:]),
+			mem.ptr_to_bytes(&kernelState.protDomainPool),
+			mem.slice_to_bytes(kernelState.protDomainPool.prots[:]),
+			mem.slice_to_bytes(kernelState.protDomainPool.freeSlots[:]),
 		}
-		spinlock.rw_write_lock(&protDomainPool.rwLock, poolGuards)
-		defer spinlock.rw_write_unlock(&protDomainPool.rwLock, poolGuards)
+		spinlock.rw_write_lock(&kernelState.protDomainPool.rwLock, poolGuards)
+		defer spinlock.rw_write_unlock(&kernelState.protDomainPool.rwLock, poolGuards)
 		pd = protdomain_resolve_target_NO_LOCK(idx, caller) or_return
 		if pd == caller do return .NoPermission
-		assert(protDomainPool.prots[idx] == pd)
-		protDomainPool.prots[idx] = nil
-		append(&protDomainPool.freeSlots, idx)
+		assert(kernelState.protDomainPool.prots[idx] == pd)
+		kernelState.protDomainPool.prots[idx] = nil
+		append(&kernelState.protDomainPool.freeSlots, idx)
 	}
 	protdomain_free(pd)
 	return .None
@@ -131,7 +131,7 @@ protdomain_free :: proc(pd: ^ProtectionDomain) {
 	assert(pd.pml4 != 0)
 	grant_kill_all(pd)
 	ring_domain_orphan(pd)
-	pmm.pml4_destroy(pd.pml4)
+	pmm.pml4_destroy(&kernelState.pmm, pd.pml4)
 	if pd.pcid != 0 do pcid_free(pd.pcid)
 	for resource in pd.resources {
 		memory_underlay_release(resource.underlay)
@@ -202,10 +202,8 @@ domains_write_unlock :: proc "contextless" (a, b: ^ProtectionDomain) {
 	spinlock.rw_write_unlock(&first.lock, firstGuards[:])
 }
 
-tlbGenCounter: u64
-
 tlb_gen_next :: proc "contextless" () -> u64 {
-	return intrinsics.atomic_add(&tlbGenCounter, 1) + 1
+	return intrinsics.atomic_add(&kernelState.tlbGenCounter, 1) + 1
 }
 
 domain_tlb_invalidate :: proc "contextless" (domain: ^ProtectionDomain) -> u64 {
@@ -218,10 +216,10 @@ tlb_shootdown :: proc(domain: ^ProtectionDomain, gen: u64) {
 	assert(gen != 0)
 	self := gs_read_cpustate()
 	tlb_sync(self)
-	for &cpu in cpus {
+	for &cpu in kernelState.cpus {
 		if &cpu != self && cpu_tlb_stale(&cpu, domain, gen) do send_ipi(cpu_info(&cpu).apicId, VECTOR_APIC_IPI)
 	}
-	for &cpu in cpus {
+	for &cpu in kernelState.cpus {
 		if &cpu == self do continue
 		for cpu_tlb_stale(&cpu, domain, gen) {
 			tlb_sync(self)
@@ -268,26 +266,24 @@ domain_cr3 :: proc "contextless" (cpu: ^CpuState, domain: ^ProtectionDomain) -> 
 KERNEL_PCID :: u32(1)
 PCID_MAX :: u32(4096)
 
-pcidAllocator := struct {
+PcidAllocator :: struct {
 	lock: spinlock.Spinlock,
 	next: u32,
 	free: [dynamic]u32,
-} {
-	next = 2,
 }
 
 pcid_alloc :: proc() -> u32 {
 	if !cpuHasPCID do return 0
 	pcidGuards := [][]u8 {
-		mem.ptr_to_bytes(&pcidAllocator),
-		mem.slice_to_bytes(pcidAllocator.free[:]),
+		mem.ptr_to_bytes(&kernelState.pcidAllocator),
+		mem.slice_to_bytes(kernelState.pcidAllocator.free[:]),
 	}
-	spinlock.lock(&pcidAllocator.lock, pcidGuards)
-	defer spinlock.unlock(&pcidAllocator.lock, pcidGuards)
-	if len(pcidAllocator.free) > 0 do return pop(&pcidAllocator.free)
-	if pcidAllocator.next >= PCID_MAX do return 0
-	pcid := pcidAllocator.next
-	pcidAllocator.next += 1
+	spinlock.lock(&kernelState.pcidAllocator.lock, pcidGuards)
+	defer spinlock.unlock(&kernelState.pcidAllocator.lock, pcidGuards)
+	if len(kernelState.pcidAllocator.free) > 0 do return pop(&kernelState.pcidAllocator.free)
+	if kernelState.pcidAllocator.next >= PCID_MAX do return 0
+	pcid := kernelState.pcidAllocator.next
+	kernelState.pcidAllocator.next += 1
 	return pcid
 }
 
@@ -296,12 +292,12 @@ pcid_free :: proc(pcid: u32) {
 	if !cpuHasPCID do return
 	if pcid == 0 do return
 	pcidGuards := [][]u8 {
-		mem.ptr_to_bytes(&pcidAllocator),
-		mem.slice_to_bytes(pcidAllocator.free[:]),
+		mem.ptr_to_bytes(&kernelState.pcidAllocator),
+		mem.slice_to_bytes(kernelState.pcidAllocator.free[:]),
 	}
-	spinlock.lock(&pcidAllocator.lock, pcidGuards)
-	defer spinlock.unlock(&pcidAllocator.lock, pcidGuards)
-	append(&pcidAllocator.free, pcid)
+	spinlock.lock(&kernelState.pcidAllocator.lock, pcidGuards)
+	defer spinlock.unlock(&kernelState.pcidAllocator.lock, pcidGuards)
+	append(&kernelState.pcidAllocator.free, pcid)
 }
 
 PCID_NOFLUSH_BIT :: u64(1) << 63
@@ -409,12 +405,12 @@ syscall_prot_domain_edit :: proc(
 	}
 
 	poolGuards := [][]u8 {
-		mem.ptr_to_bytes(&protDomainPool),
-		mem.slice_to_bytes(protDomainPool.prots[:]),
-		mem.slice_to_bytes(protDomainPool.freeSlots[:]),
+		mem.ptr_to_bytes(&kernelState.protDomainPool),
+		mem.slice_to_bytes(kernelState.protDomainPool.prots[:]),
+		mem.slice_to_bytes(kernelState.protDomainPool.freeSlots[:]),
 	}
-	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
+	spinlock.rw_read_lock(&kernelState.protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_read_unlock(&kernelState.protDomainPool.rwLock, poolGuards)
 	target = protdomain_resolve_target_NO_LOCK(handle, callerDomain) or_return
 
 	domains_write_lock(callerDomain, target)

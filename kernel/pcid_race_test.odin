@@ -15,10 +15,10 @@ pcid_alloc_free :: proc(data: rawptr) {
 @(test)
 TestPcidRace :: proc(t: ^testing.T) {
 	cpuHasPCID = true
-	pcidAllocator.next = 2
-	pcidAllocator.free = nil
+	kernelState.pcidAllocator.next = 2
+	kernelState.pcidAllocator.free = nil
 	r := modelcheck.race_check(
-		{bodies = {pcid_alloc_free, pcid_alloc_free}, data = mem.ptr_to_bytes(&pcidAllocator)},
+		{bodies = {pcid_alloc_free, pcid_alloc_free}, data = mem.ptr_to_bytes(&kernelState.pcidAllocator)},
 	)
 	if !r.ok do fmt.println(r.trace)
 	testing.expect(t, r.ok, r.message)

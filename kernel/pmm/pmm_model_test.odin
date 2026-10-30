@@ -12,6 +12,9 @@ TEST_PAGES :: 8
 TEST_POOL_BYTES :: TEST_PAGES * shared.PAGE_SIZE
 TEST_BITMAP_WORDS :: (TEST_PAGES + 63) / 64
 
+@(thread_local)
+testPmm: PMM
+
 TEST_State :: struct {
 	pool:      [TEST_POOL_BYTES]u8,
 	freeLists: [PMM_BUDDY_MAX_ORDER]FreeBlock,
@@ -29,17 +32,17 @@ init_state :: proc() -> (testState: TEST_State) {
 
 	bitmapMem := make([]u64, TEST_BITMAP_WORDS)
 
-	freeLists = {}
-	state.bitmap = bitmapMem
-	state.totalPages = TEST_PAGES
-	for i in 0 ..< TEST_BITMAP_WORDS do state.bitmap[i] = max(u64)
-	for pg in u64(1) ..< TEST_PAGES do kclear(&state, pg)
+	testPmm = {}
+	testPmm.bitmap = bitmapMem
+	testPmm.totalPages = TEST_PAGES
+	for i in 0 ..< TEST_BITMAP_WORDS do testPmm.bitmap[i] = max(u64)
+	for pg in u64(1) ..< TEST_PAGES do kclear(&testPmm, pg)
 
-	buddy_init()
+	buddy_init(&testPmm)
 	s: TEST_State
-	s.freeLists = freeLists
+	s.freeLists = testPmm.freeLists
 	mem.copy(&s.pool, rawptr(aligned), TEST_POOL_BYTES)
-	copy(s.bitmap[:], state.bitmap)
+	copy(s.bitmap[:], testPmm.bitmap)
 	for i in 0 ..< 4 do s.outAddr[i] = max(u64)
 	return s
 
@@ -62,7 +65,7 @@ buddy_next :: proc(s: TEST_State) -> []modelcheck.Transition(TEST_State) {
 	if slot != -1 {
 		for order in u8(0) ..< TEST_NUM_ORDERS {
 			restore(s)
-			addr := buddy_alloc(order)
+			addr := buddy_alloc(&testPmm, order)
 			if addr == 0 do continue
 			ns := snapshot(s.outAddr, s.outOrder)
 			ns.outAddr[slot] = addr
@@ -78,7 +81,7 @@ buddy_next :: proc(s: TEST_State) -> []modelcheck.Transition(TEST_State) {
 		if s.outAddr[i] == max(u64) do continue
 		restore(s)
 
-		buddy_free(s.outAddr[i], s.outOrder[i])
+		buddy_free(&testPmm, s.outAddr[i], s.outOrder[i])
 		ns := snapshot(s.outAddr, s.outOrder)
 		ns.outAddr[i] = max(u64)
 		append(
@@ -95,9 +98,11 @@ buddy_next :: proc(s: TEST_State) -> []modelcheck.Transition(TEST_State) {
 inv :: proc(s: TEST_State) -> (ok: bool, msg: string) {
 	bitmap := s.bitmap
 	localPMM := PMM {
-		bitmap     = bitmap[:],
-		totalPages = TEST_PAGES,
-		lock       = {},
+		bitmap             = bitmap[:],
+		totalPages         = TEST_PAGES,
+		lock               = {},
+		freeLists          = {},
+		earlyAllocNextPage = 0,
 	}
 
 	expectedUsed: [TEST_PAGES]bool
@@ -142,15 +147,15 @@ TestBuddyModel :: proc(t: ^testing.T) {
 }
 restore :: proc(s: TEST_State) {
 	local := s
-	freeLists = local.freeLists
-	copy(state.bitmap, local.bitmap[:])
+	testPmm.freeLists = local.freeLists
+	copy(testPmm.bitmap, local.bitmap[:])
 	mem.copy(rawptr(uintptr(directMapBase)), &local.pool, TEST_POOL_BYTES)
 }
 
 snapshot :: proc(outAddr: [4]u64, outOrder: [4]u8) -> TEST_State {
 	ns: TEST_State
-	ns.freeLists = freeLists
-	copy(ns.bitmap[:], state.bitmap)
+	ns.freeLists = testPmm.freeLists
+	copy(ns.bitmap[:], testPmm.bitmap)
 	mem.copy(&ns.pool, rawptr(uintptr(directMapBase)), TEST_POOL_BYTES)
 	ns.outAddr = outAddr
 	ns.outOrder = outOrder

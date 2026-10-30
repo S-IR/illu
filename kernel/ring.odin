@@ -36,42 +36,42 @@ Ring :: struct {
 		freeCount:  u64,
 	},
 }
-ringPool: struct {
+RingPool :: struct {
 	rwLock:    spinlock.RWLock,
 	rings:     [dynamic]^Ring,
 	freeSlots: [dynamic]int,
-} = {}
+}
 
 ring_pool_guards :: proc "contextless" () -> [3][]byte {
 	return {
-		mem.ptr_to_bytes(&ringPool),
-		mem.slice_to_bytes(ringPool.rings[:]),
-		mem.slice_to_bytes(ringPool.freeSlots[:]),
+		mem.ptr_to_bytes(&kernelState.ringPool),
+		mem.slice_to_bytes(kernelState.ringPool.rings[:]),
+		mem.slice_to_bytes(kernelState.ringPool.freeSlots[:]),
 	}
 }
 
 @(deferred_out = ring_pool_read_unlock)
 ring_pool_read_lock :: proc "contextless" () -> [3][]byte {
 	guards := ring_pool_guards()
-	spinlock.rw_read_lock(&ringPool.rwLock, guards[:])
+	spinlock.rw_read_lock(&kernelState.ringPool.rwLock, guards[:])
 	return guards
 }
 
 ring_pool_read_unlock :: proc "contextless" (g: [3][]byte) {
 	guards := g
-	spinlock.rw_read_unlock(&ringPool.rwLock, guards[:])
+	spinlock.rw_read_unlock(&kernelState.ringPool.rwLock, guards[:])
 }
 
 @(deferred_out = ring_pool_write_unlock)
 ring_pool_write_lock :: proc "contextless" () -> [3][]byte {
 	guards := ring_pool_guards()
-	spinlock.rw_write_lock(&ringPool.rwLock, guards[:])
+	spinlock.rw_write_lock(&kernelState.ringPool.rwLock, guards[:])
 	return guards
 }
 
 ring_pool_write_unlock :: proc "contextless" (g: [3][]byte) {
 	guards := g
-	spinlock.rw_write_unlock(&ringPool.rwLock, guards[:])
+	spinlock.rw_write_unlock(&kernelState.ringPool.rwLock, guards[:])
 }
 
 ring_guards :: proc "contextless" (r: ^Ring) -> [3][]byte {
@@ -184,14 +184,14 @@ syscall_ring_create :: proc(descPtr: u64) -> (handle: int, err: shared.Error) {
 	ring_pool_write_lock()
 
 
-	if len(ringPool.freeSlots) > 0 {
-		idx := pop(&ringPool.freeSlots)
-		assert(ringPool.rings[idx] == nil)
-		ringPool.rings[idx] = ring
+	if len(kernelState.ringPool.freeSlots) > 0 {
+		idx := pop(&kernelState.ringPool.freeSlots)
+		assert(kernelState.ringPool.rings[idx] == nil)
+		kernelState.ringPool.rings[idx] = ring
 		return idx, .None
 	}
-	_, aErr = append(&ringPool.rings, ring); if aErr != nil do return 0, .OutOfMemory
-	return len(ringPool.rings) - 1, .None
+	_, aErr = append(&kernelState.ringPool.rings, ring); if aErr != nil do return 0, .OutOfMemory
+	return len(kernelState.ringPool.rings) - 1, .None
 }
 field_fits :: proc(offset, width, size: u64) -> bool {
 	return size >= width && offset <= size - width
@@ -352,7 +352,7 @@ ring_domain_orphan :: proc(pd: ^ProtectionDomain) {
 	assert(pd != nil)
 	ring_pool_read_lock()
 
-	for ring in ringPool.rings {
+	for ring in kernelState.ringPool.rings {
 		if ring == nil do continue
 		ring_lock(ring)
 
@@ -381,11 +381,11 @@ syscall_ring_destroy :: proc(handle: int) -> (err: shared.Error) {
 	ring_cq_drain_NO_LOCK(ring)
 
 	if ring.mutable.inFlight > 0 do return .Busy
-	if reserve(&ringPool.freeSlots, len(ringPool.freeSlots) + 1) != nil do return .OutOfMemory
+	if reserve(&kernelState.ringPool.freeSlots, len(kernelState.ringPool.freeSlots) + 1) != nil do return .OutOfMemory
 
-	assert(ringPool.rings[handle] == ring)
-	ringPool.rings[handle] = nil
-	_, aErr := append(&ringPool.freeSlots, handle)
+	assert(kernelState.ringPool.rings[handle] == ring)
+	kernelState.ringPool.rings[handle] = nil
+	_, aErr := append(&kernelState.ringPool.freeSlots, handle)
 	assert(aErr == .None)
 
 	for u in ring.underlays do memory_underlay_release(u)
@@ -404,9 +404,9 @@ ring_resolve_NO_LOCK :: proc(
 	err: shared.Error,
 ) {
 	assert(caller != nil)
-	if handle < 0 || handle >= len(ringPool.rings) do return nil, .InvalidHandle
-	if ringPool.rings[handle] == nil do return nil, .InvalidHandle
-	ring = ringPool.rings[handle]
+	if handle < 0 || handle >= len(kernelState.ringPool.rings) do return nil, .InvalidHandle
+	if kernelState.ringPool.rings[handle] == nil do return nil, .InvalidHandle
+	ring = kernelState.ringPool.rings[handle]
 	assert(ring.authorityPtr != nil)
 	if !user_range_accessible_NO_LOCK(caller, u64(uintptr(ring.authorityPtr)), size_of(byte), true) do return nil, .NoPermission
 	return ring, .None

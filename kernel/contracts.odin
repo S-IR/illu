@@ -25,12 +25,12 @@ syscall_contract_create :: proc(handle: int, phys, size, descPtr: u64) -> (err: 
 	wRules := contract_rules_copy_in(caller, desc[0].wPtr, desc[0].wCount, true) or_return
 	defer if err != .None do delete(wRules)
 	poolGuards := [][]u8 {
-		mem.ptr_to_bytes(&protDomainPool),
-		mem.slice_to_bytes(protDomainPool.prots[:]),
-		mem.slice_to_bytes(protDomainPool.freeSlots[:]),
+		mem.ptr_to_bytes(&kernelState.protDomainPool),
+		mem.slice_to_bytes(kernelState.protDomainPool.prots[:]),
+		mem.slice_to_bytes(kernelState.protDomainPool.freeSlots[:]),
 	}
-	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
+	spinlock.rw_read_lock(&kernelState.protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_read_unlock(&kernelState.protDomainPool.rwLock, poolGuards)
 
 	target := protdomain_resolve_target_NO_LOCK(handle, caller) or_return
 	domains_write_lock(caller, target)

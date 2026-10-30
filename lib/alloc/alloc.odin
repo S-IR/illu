@@ -1,4 +1,5 @@
 package alloc
+import "../../kernel/pmm"
 import "../shared"
 import "../spinlock"
 import "base:intrinsics"
@@ -16,12 +17,15 @@ HeapBlock :: struct {
 	next, prev: ^HeapBlock,
 	page:       ^HeapBlock,
 }
-heapFreeList: ^HeapBlock
-heapLock: spinlock.Spinlock
+Heap :: struct {
+	freeList: ^HeapBlock,
+	lock:     spinlock.Spinlock,
+	pmm:      ^pmm.PMM,
+}
 
-
-heap_allocator :: proc() -> runtime.Allocator {
-	return {procedure = heap_proc}
+heap_allocator :: proc(heap: ^Heap) -> runtime.Allocator {
+	assert(heap != nil)
+	return {procedure = heap_proc, data = heap}
 }
 align_up :: proc(value, alignment: u64) -> u64 {
 	return (value + alignment - 1) & ~(alignment - 1)
@@ -36,7 +40,7 @@ block_from_payload :: proc(p: rawptr) -> ^HeapBlock {
 }
 
 
-remove_free_block :: proc(block: ^HeapBlock) {
+remove_free_block :: proc(heap: ^Heap, block: ^HeapBlock) {
 	assert(block != nil, "heap: removing nil free block")
 	assert(block.magic == HEAP_FREE_MAGIC, "heap: removing allocated block")
 	assert(block.page != nil, "heap: free block has no owning page")
@@ -46,7 +50,7 @@ remove_free_block :: proc(block: ^HeapBlock) {
 	if block.prev != nil {
 		block.prev.next = block.next
 	} else {
-		heapFreeList = block.next
+		heap.freeList = block.next
 	}
 	if block.next != nil {
 		block.next.prev = block.prev
@@ -56,7 +60,7 @@ remove_free_block :: proc(block: ^HeapBlock) {
 
 
 }
-insert_free_block :: proc(block: ^HeapBlock) {
+insert_free_block :: proc(heap: ^Heap, block: ^HeapBlock) {
 	assert(block != nil, "heap: inserting nil free block")
 	assert(block.magic == HEAP_FREE_MAGIC, "heap: inserting allocated block")
 	assert(block.page != nil, "heap: free block has no owning page")
@@ -64,15 +68,15 @@ insert_free_block :: proc(block: ^HeapBlock) {
 
 	block.magic = HEAP_FREE_MAGIC
 	block.prev = nil
-	block.next = heapFreeList
+	block.next = heap.freeList
 
-	if heapFreeList != nil {
-		heapFreeList.prev = block
+	if heap.freeList != nil {
+		heap.freeList.prev = block
 	}
-	heapFreeList = block
+	heap.freeList = block
 }
-new_heap_page :: proc() -> ^HeapBlock {
-	addr := backend_alloc_pages(1)
+new_heap_page :: proc(heap: ^Heap) -> ^HeapBlock {
+	addr := backend_alloc_pages(heap.pmm, 1)
 	if addr == 0 do return nil
 
 	block := (^HeapBlock)(uintptr(addr))
@@ -82,10 +86,10 @@ new_heap_page :: proc() -> ^HeapBlock {
 	block.next = nil
 	block.prev = nil
 	block.page = block
-	insert_free_block(block)
+	insert_free_block(heap, block)
 	return block
 }
-split_block :: proc(block: ^HeapBlock, requested: u64) {
+split_block :: proc(heap: ^Heap, block: ^HeapBlock, requested: u64) {
 	assert(block != nil, "heap: splitting nil block")
 	assert(
 		block.magic == HEAP_FREE_MAGIC || block.magic == HEAP_MAGIC,
@@ -114,11 +118,11 @@ split_block :: proc(block: ^HeapBlock, requested: u64) {
 	next.page = block.page
 
 	block.size = requested
-	insert_free_block(next)
+	insert_free_block(heap, next)
 }
 
-find_free_block :: proc(size: u64) -> ^HeapBlock {
-	block := heapFreeList
+find_free_block :: proc(heap: ^Heap, size: u64) -> ^HeapBlock {
+	block := heap.freeList
 
 	for block != nil {
 		assert(block.magic == HEAP_FREE_MAGIC, "heap: allocated block in free list")
@@ -167,7 +171,7 @@ find_adjacent_blocks :: proc(block: ^HeapBlock) -> (prev, next: ^HeapBlock) {
 	return prev, next
 }
 
-free_small_block :: proc(block: ^HeapBlock) {
+free_small_block :: proc(heap: ^Heap, block: ^HeapBlock) {
 	assert(block.magic == HEAP_MAGIC, "heap: invalid small allocation pointer")
 	assert(block.page != nil, "heap: block has no owning page")
 	current := block
@@ -179,45 +183,45 @@ free_small_block :: proc(block: ^HeapBlock) {
 	prev, next := find_adjacent_blocks(current)
 
 	if next != nil && next.magic == HEAP_FREE_MAGIC {
-		remove_free_block(next)
+		remove_free_block(heap, next)
 		current.size += u64(BLOCK_HEADER_SIZE) + next.size
 	}
 
 	if prev != nil && prev.magic == HEAP_FREE_MAGIC {
-		remove_free_block(prev)
+		remove_free_block(heap, prev)
 		prev.size += u64(BLOCK_HEADER_SIZE) + current.size
 		current = prev
 	}
 
 	if current == current.page && current.size == u64(shared.PAGE_SIZE) - u64(BLOCK_HEADER_SIZE) {
 		assert(current.next == nil && current.prev == nil, "heap: reclaimed block still linked")
-		backend_free_pages(u64(uintptr(current.page)), 1)
+		backend_free_pages(heap.pmm, u64(uintptr(current.page)), 1)
 		return
 	}
 
-	insert_free_block(current)
+	insert_free_block(heap, current)
 }
-small_alloc :: proc(size: int, alignment: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error) {
+small_alloc :: proc(heap: ^Heap, size: int, alignment: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error) {
 	align := u64(max(alignment, 1))
 	if align > u64(BLOCK_HEADER_SIZE) {
 		return nil, .Out_Of_Memory
 	}
 
 	requested := align_up(u64(size), u64(BLOCK_HEADER_SIZE))
-	heapGuards := [][]u8{mem.ptr_to_bytes(&heapFreeList)}
-	spinlock.lock(&heapLock, heapGuards)
-	defer spinlock.unlock(&heapLock, heapGuards)
+	heapGuards := [][]u8{mem.ptr_to_bytes(&heap.freeList)}
+	spinlock.lock(&heap.lock, heapGuards)
+	defer spinlock.unlock(&heap.lock, heapGuards)
 
-	block := find_free_block(requested)
+	block := find_free_block(heap, requested)
 	if block == nil {
-		block = new_heap_page()
+		block = new_heap_page(heap)
 		if block == nil do return nil, .Out_Of_Memory
-		block = find_free_block(requested)
+		block = find_free_block(heap, requested)
 		if block == nil do return nil, .Out_Of_Memory
 	}
 
-	remove_free_block(block)
-	split_block(block, requested)
+	remove_free_block(heap, block)
+	split_block(heap, block, requested)
 
 	block.magic = HEAP_MAGIC
 
@@ -226,12 +230,12 @@ small_alloc :: proc(size: int, alignment: int, zeroed: bool) -> (rawptr, runtime
 	return p, nil
 }
 
-large_alloc :: proc(size: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error) {
+large_alloc :: proc(heap: ^Heap, size: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error) {
 	assert(size > 0)
 
 	pages := max(u64(1), (u64(size) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE)
 
-	addr := backend_alloc_pages(pages)
+	addr := backend_alloc_pages(heap.pmm, pages)
 
 	if addr == 0 do return nil, .Out_Of_Memory
 
@@ -242,10 +246,10 @@ large_alloc :: proc(size: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error
 	return p, nil
 }
 
-small_resize_in_place :: proc(old: rawptr, size: u64) -> bool {
-	heapGuards := [][]u8{mem.ptr_to_bytes(&heapFreeList)}
-	spinlock.lock(&heapLock, heapGuards)
-	defer spinlock.unlock(&heapLock, heapGuards)
+small_resize_in_place :: proc(heap: ^Heap, old: rawptr, size: u64) -> bool {
+	heapGuards := [][]u8{mem.ptr_to_bytes(&heap.freeList)}
+	spinlock.lock(&heap.lock, heapGuards)
+	defer spinlock.unlock(&heap.lock, heapGuards)
 
 	block := block_from_payload(old)
 	assert(block.magic == HEAP_MAGIC, "heap: invalid small allocation pointer")
@@ -255,11 +259,11 @@ small_resize_in_place :: proc(old: rawptr, size: u64) -> bool {
 		return false
 	}
 
-	split_block(block, requested)
+	split_block(heap, block, requested)
 	return true
 }
 
-heap_alloc :: proc(size: int, alignment: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error) {
+heap_alloc :: proc(heap: ^Heap, size: int, alignment: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error) {
 	if size == 0 {
 		return nil, nil
 	}
@@ -274,23 +278,23 @@ heap_alloc :: proc(size: int, alignment: int, zeroed: bool) -> (rawptr, runtime.
 	}
 
 	if u64(size) < u64(shared.PAGE_SIZE) && u64(max(alignment, 1)) <= u64(BLOCK_HEADER_SIZE) {
-		p, err := small_alloc(size, alignment, zeroed)
+		p, err := small_alloc(heap, size, alignment, zeroed)
 
 		if err == nil {
 			return p, nil
 		}
 	}
 
-	return large_alloc(size, zeroed)
+	return large_alloc(heap, size, zeroed)
 }
 
-heap_free :: proc(p: rawptr, oldSize: int) {
+heap_free :: proc(heap: ^Heap, p: rawptr, oldSize: int) {
 	if p == nil do return
 
 	if uintptr(p) % uintptr(shared.PAGE_SIZE) == 0 {
 		when KERNEL_BUILD do assert(oldSize > 0, "heap: invalid page allocation size")
 		pages := max(u64(1), (u64(oldSize) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE)
-		backend_free_pages(u64(uintptr(p)), pages)
+		backend_free_pages(heap.pmm, u64(uintptr(p)), pages)
 		return
 	}
 
@@ -298,10 +302,10 @@ heap_free :: proc(p: rawptr, oldSize: int) {
 
 	switch block.magic {
 	case HEAP_MAGIC:
-		heapGuards := [][]u8{mem.ptr_to_bytes(&heapFreeList)}
-		spinlock.lock(&heapLock, heapGuards)
-		defer spinlock.unlock(&heapLock, heapGuards)
-		free_small_block(block)
+		heapGuards := [][]u8{mem.ptr_to_bytes(&heap.freeList)}
+		spinlock.lock(&heap.lock, heapGuards)
+		defer spinlock.unlock(&heap.lock, heapGuards)
+		free_small_block(heap, block)
 	case HEAP_FREE_MAGIC:
 		assert(false, "heap: double free")
 	case:
@@ -311,7 +315,7 @@ heap_free :: proc(p: rawptr, oldSize: int) {
 
 
 heap_proc :: proc(
-	_: rawptr,
+	data: rawptr,
 	mode: runtime.Allocator_Mode,
 	size, alignment: int,
 	old: rawptr,
@@ -321,9 +325,11 @@ heap_proc :: proc(
 	[]byte,
 	runtime.Allocator_Error,
 ) {
+	heap := (^Heap)(data)
+	assert(heap != nil)
 	switch mode {
 	case .Alloc:
-		p, err := heap_alloc(size, alignment, true)
+		p, err := heap_alloc(heap, size, alignment, true)
 
 		if err != {} {
 			return nil, err
@@ -332,7 +338,7 @@ heap_proc :: proc(
 		return ([^]byte)(p)[:size], nil
 
 	case .Alloc_Non_Zeroed:
-		p, err := heap_alloc(size, alignment, false)
+		p, err := heap_alloc(heap, size, alignment, false)
 
 		if err != {} {
 			return nil, err
@@ -341,16 +347,16 @@ heap_proc :: proc(
 		return ([^]byte)(p)[:size], nil
 
 	case .Free:
-		heap_free(old, old_size)
+		heap_free(heap, old, old_size)
 		return nil, nil
 
 	case .Resize:
 		if old == nil {
-			return heap_proc(nil, .Alloc, size, alignment, nil, 0, {})
+			return heap_proc(data, .Alloc, size, alignment, nil, 0, {})
 		}
 
 		if size == 0 {
-			heap_free(old, old_size)
+			heap_free(heap, old, old_size)
 			return nil, nil
 		}
 
@@ -361,12 +367,12 @@ heap_proc :: proc(
 				return ([^]byte)(old)[:size], nil
 			}
 		} else {
-			if small_resize_in_place(old, u64(size)) {
+			if small_resize_in_place(heap, old, u64(size)) {
 				return ([^]byte)(old)[:size], nil
 			}
 		}
 
-		p, err := heap_alloc(size, alignment, true)
+		p, err := heap_alloc(heap, size, alignment, true)
 
 		if err != {} {
 			return nil, err
@@ -374,17 +380,17 @@ heap_proc :: proc(
 
 		intrinsics.mem_copy(p, old, min(size, old_size))
 
-		heap_free(old, old_size)
+		heap_free(heap, old, old_size)
 
 		return ([^]byte)(p)[:size], nil
 
 	case .Resize_Non_Zeroed:
 		if old == nil {
-			return heap_proc(nil, .Alloc_Non_Zeroed, size, alignment, nil, 0, {})
+			return heap_proc(data, .Alloc_Non_Zeroed, size, alignment, nil, 0, {})
 		}
 
 		if size == 0 {
-			heap_free(old, old_size)
+			heap_free(heap, old, old_size)
 			return nil, nil
 		}
 
@@ -395,12 +401,12 @@ heap_proc :: proc(
 				return ([^]byte)(old)[:size], nil
 			}
 		} else {
-			if small_resize_in_place(old, u64(size)) {
+			if small_resize_in_place(heap, old, u64(size)) {
 				return ([^]byte)(old)[:size], nil
 			}
 		}
 
-		p, err := heap_alloc(size, alignment, false)
+		p, err := heap_alloc(heap, size, alignment, false)
 
 		if err != {} {
 			return nil, err
@@ -408,7 +414,7 @@ heap_proc :: proc(
 
 		intrinsics.mem_copy(p, old, min(size, old_size))
 
-		heap_free(old, old_size)
+		heap_free(heap, old, old_size)
 
 		return ([^]byte)(p)[:size], nil
 

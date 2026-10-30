@@ -42,7 +42,7 @@ memory_underlay_release :: proc(obj: ^MemoryUnderlay) {
 
 	switch obj.backend {
 	case .AllocatedRAM:
-		pmm.free_pages(obj.phys, obj.size)
+		pmm.free_pages(&kernelState.pmm, obj.phys, obj.size)
 	case .ExternalPhysical, .DeviceMMIO:
 	}
 	free(obj)

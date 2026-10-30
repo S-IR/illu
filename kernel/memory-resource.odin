@@ -72,12 +72,12 @@ resource_map :: proc(pml4: u64, r: MemoryResource, detached: ^[dynamic]u64) {
 	for offset := u64(0); offset < r.size; offset += pageBytes {
 		claimed := pmm.slot_claim(pml4, r.logical + offset, r.pageSize, detached)
 		print.kassert(claimed)
-		pmm.map_page(pml4, r.phys + offset, r.logical + offset, r.pageSize, r.flags)
+		pmm.map_page(&kernelState.pmm, pml4, r.phys + offset, r.logical + offset, r.pageSize, r.flags)
 	}
 }
 
 detached_tables_free :: proc(detached: ^[dynamic]u64) {
-	for table in detached do pmm.free_pages(table, shared.PAGE_SIZE)
+	for table in detached do pmm.free_pages(&kernelState.pmm, table, shared.PAGE_SIZE)
 	delete(detached^)
 	detached^ = nil
 }

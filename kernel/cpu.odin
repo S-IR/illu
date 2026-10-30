@@ -46,7 +46,6 @@ CpuState :: struct #align (64) {
 
 gKernelCtx: runtime.Context
 gdts: []GDT
-cpus: []CpuState
 CpuInfos: ^userschedule.CpuInfoPage
 cpuInfosPhys: u64
 apReady: u32
@@ -70,26 +69,26 @@ cpus_init :: proc(apicIds: []u32) {
 	cpuCount := len(apicIds)
 
 	gdtsBytes := pmm.addr_round_up_to_page(u64(cpuCount) * size_of(GDT))
-	gdts = ([^]GDT)(uintptr(pmm.entry_region_alloc(gdtsBytes, guard = false)))[:cpuCount]
+	gdts = ([^]GDT)(uintptr(pmm.entry_region_alloc(&kernelState.pmm, gdtsBytes, guard = false)))[:cpuCount]
 	cpusBytes := pmm.addr_round_up_to_page(u64(cpuCount) * size_of(CpuState))
-	cpus = ([^]CpuState)(uintptr(pmm.entry_region_alloc(cpusBytes, guard = false)))[:cpuCount]
+	kernelState.cpus = ([^]CpuState)(uintptr(pmm.entry_region_alloc(&kernelState.pmm, cpusBytes, guard = false)))[:cpuCount]
 
 	cpuInfosBytes := pmm.addr_round_up_to_page(cpu_infos_bytes(cpuCount))
-	cpuInfosPhys = pmm.alloc_zeroed(cpuInfosBytes)
+	cpuInfosPhys = pmm.alloc_zeroed(&kernelState.pmm, cpuInfosBytes)
 	print.kensure(cpuInfosPhys != 0, "cpus_init: cpu info alloc failed")
 	CpuInfos = (^userschedule.CpuInfoPage)(pmm.phys_to_ptr(cpuInfosPhys))
 	CpuInfos.cpuCount = u32(cpuCount)
 	print.kensure(tscTicksPerMs != 0, "cpus_init: lapic_init must calibrate the tsc first")
 	CpuInfos.tscTicksPerMs = tscTicksPerMs
 
-	for &cpu, idx in cpus {
+	for &cpu, idx in kernelState.cpus {
 		cpu_init(&cpu, apicIds[idx])
 	}
 
 	kernelCr3Value = pmm.kernelPML4 | (u64(KERNEL_PCID) | PCID_NOFLUSH_BIT if cpuHasPCID else 0)
 
-	cpu_setup(&cpus[0])
-	for &cpu in cpus[1:] {
+	cpu_setup(&kernelState.cpus[0])
+	for &cpu in kernelState.cpus[1:] {
 		install_trampoline(
 			rawptr(uintptr(pmm.TRAMPOLINE_PHYS)),
 			pmm.kernelPML4,
@@ -106,7 +105,7 @@ cpus_init :: proc(apicIds: []u32) {
 cpu_init :: proc(cpu: ^CpuState, apicId: u32) {
 	idx := cpu_index(cpu)
 	cpu.self = cpu
-	cpu.kernelStackTop = pmm.entry_region_alloc(KERNEL_STACK_PER_CPU_SIZE, guard = true) + KERNEL_STACK_PER_CPU_SIZE
+	cpu.kernelStackTop = pmm.entry_region_alloc(&kernelState.pmm, KERNEL_STACK_PER_CPU_SIZE, guard = true) + KERNEL_STACK_PER_CPU_SIZE
 	cpu_info(cpu).apicId = apicId
 
 	aErr: runtime.Allocator_Error
@@ -122,7 +121,7 @@ cpu_init :: proc(cpu: ^CpuState, apicId: u32) {
 	gdt := &gdts[idx]
 	gdt_tss_fill(gdt)
 	gdt.tss.rsp[0] = cpu.kernelStackTop
-	gdt.tss.ist[0] = pmm.entry_region_alloc(IST_STACK_SIZE, guard = true) + IST_STACK_SIZE
+	gdt.tss.ist[0] = pmm.entry_region_alloc(&kernelState.pmm, IST_STACK_SIZE, guard = true) + IST_STACK_SIZE
 }
 
 cpu_setup :: proc(cpu: ^CpuState) {
@@ -150,7 +149,7 @@ ap_init :: proc "c" (cpu: ^CpuState) -> ! {
 }
 
 cpu_index :: proc "contextless" (cpu: ^CpuState) -> int {
-	return int((uintptr(cpu) - uintptr(raw_data(cpus))) / size_of(CpuState))
+	return int((uintptr(cpu) - uintptr(raw_data(kernelState.cpus))) / size_of(CpuState))
 }
 
 cpu_info :: proc "contextless" (cpu: ^CpuState) -> ^userschedule.CpuInfo {
@@ -207,6 +206,7 @@ cpu_info_map :: proc(pml4: u64) {
 	bytes := cpu_infos_bytes(int(CpuInfos.cpuCount))
 	for offset := u64(0); offset < bytes; offset += shared.PAGE_SIZE {
 		pmm.map_page(
+			&kernelState.pmm,
 			pml4,
 			cpuInfosPhys + offset,
 			userschedule.CPU_INFO_ADDR + offset,

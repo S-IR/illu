@@ -31,6 +31,7 @@ kernel_main :: proc "sysv" (bootParams: ^uefi.KernelParams) {
 	idt_init()
 	lapic_init()
 	pmm.men_init(
+		&kernelState.pmm,
 		memoryMap = params.memoryMap,
 		memoryMapSize = params.memoryMapSize,
 		memoryMapDescSize = params.memoryMapDescSize,
@@ -41,7 +42,8 @@ kernel_main :: proc "sysv" (bootParams: ^uefi.KernelParams) {
 		has1GBPages = cpuid_has_1gb_pages(),
 	)
 
-	context.allocator = alloc.heap_allocator()
+	kernelState.heap.pmm = &kernelState.pmm
+	context.allocator = alloc.heap_allocator(&kernelState.heap)
 	gKernelCtx = context
 
 	cpus_init(pmm.phys_to_slice(params.apicIds))

@@ -41,9 +41,9 @@ syscall_mmap :: proc(regionsPtr: u64, regionsCount: u64) -> (err: shared.Error, 
 		totalBytes = end
 	}
 
-	allocatedPhys := pmm.alloc_zeroed(totalBytes)
+	allocatedPhys := pmm.alloc_zeroed(&kernelState.pmm, totalBytes)
 	if allocatedPhys == 0 do return .OutOfMemory, 0
-	defer if err != .None do pmm.free_pages(allocatedPhys, totalBytes)
+	defer if err != .None do pmm.free_pages(&kernelState.pmm, allocatedPhys, totalBytes)
 
 	tlbGen: u64
 	detached: [dynamic]u64

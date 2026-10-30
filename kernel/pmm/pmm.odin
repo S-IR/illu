@@ -9,20 +9,16 @@ import "../print"
 import "core:mem"
 import "core:slice"
 PMM :: struct #all_or_none {
-	bitmap:     []u64,
-	totalPages: u64,
-	lock:       spinlock.Spinlock,
-}
-when ODIN_TEST {
-	@(thread_local)
-	state: PMM
-} else {
-	state: PMM
-
+	bitmap:             []u64,
+	totalPages:         u64,
+	lock:               spinlock.Spinlock,
+	freeLists:          [PMM_BUDDY_MAX_ORDER]FreeBlock,
+	earlyAllocNextPage: u64,
 }
 TRAMPOLINE_PHYS :: u64(0x8000)
 
 men_init :: proc(
+	p: ^PMM,
 	memoryMap: [^]uefi.EFI_MEMORY_DESCRIPTOR,
 	memoryMapSize: u64,
 	memoryMapDescSize: u64,
@@ -81,13 +77,13 @@ men_init :: proc(
 	print.kensure(bitmapDesc != nil, "no region large enough for pmm bitmap")
 	assert(bitmapAddr % shared.PAGE_SIZE == 0, "pmm bitmap not page-aligned")
 
-	state.bitmap = mem.slice_ptr(cast(^u64)uintptr(bitmapAddr), int(bitmapWords))
-	state.totalPages = totalPages
-	slice.fill(state.bitmap, max(u64))
+	p.bitmap = mem.slice_ptr(cast(^u64)uintptr(bitmapAddr), int(bitmapWords))
+	p.totalPages = totalPages
+	slice.fill(p.bitmap, max(u64))
 
 	bitmapPageStart := bitmapAddr / shared.PAGE_SIZE
 	bitmap_fill(
-		&state,
+		p,
 		bitmapPageStart + bitmapPagesNeeded,
 		bitmapPageStart + bitmapDesc.NumberOfPages,
 		false,
@@ -101,33 +97,33 @@ men_init :: proc(
 		if isConventional && desc.PhysicalStart == bitmapAddr do continue
 
 		pageStart := desc.PhysicalStart / shared.PAGE_SIZE
-		bitmap_fill(&state, max(pageStart, 1), pageStart + desc.NumberOfPages, false)
+		bitmap_fill(p, max(pageStart, 1), pageStart + desc.NumberOfPages, false)
 	}
 
 
 	for img in ([]elf.ElfImage{kernelImg, adamImg}) {
-		bitmap_fill(&state, img.base / shared.PAGE_SIZE, pages_needed(img.end), true)
+		bitmap_fill(p, img.base / shared.PAGE_SIZE, pages_needed(img.end), true)
 	}
-	kset(&state, TRAMPOLINE_PHYS / shared.PAGE_SIZE)
+	kset(p, TRAMPOLINE_PHYS / shared.PAGE_SIZE)
 
 	mmapBase := u64(uintptr(rawptr(memoryMap)))
 	mmapStart := mmapBase / shared.PAGE_SIZE
 	mmapEnd := pages_needed(mmapBase + memoryMapSize)
-	bitmap_fill(&state, mmapStart, mmapEnd, true)
+	bitmap_fill(p, mmapStart, mmapEnd, true)
 
 	for r in reserved {
 		base := u64(uintptr(raw_data(r)))
-		bitmap_fill(&state, base / shared.PAGE_SIZE, pages_needed(base + u64(len(r))), true)
+		bitmap_fill(p, base / shared.PAGE_SIZE, pages_needed(base + u64(len(r))), true)
 	}
 
-	buddyMetaStart := u64(uintptr(&freeLists[0])) / shared.PAGE_SIZE
-	buddyMetaEnd := pages_needed(u64(uintptr(&freeLists[0])) + size_of(freeLists))
-	bitmap_fill(&state, buddyMetaStart, buddyMetaEnd, true)
-	paging_init(kernelImg, memoryMap, memoryMapSize, memoryMapDescSize, globalKernel, has1GBPages)
-	buddy_init()
+	buddyMetaStart := u64(uintptr(&p.freeLists[0])) / shared.PAGE_SIZE
+	buddyMetaEnd := pages_needed(u64(uintptr(&p.freeLists[0])) + size_of(p.freeLists))
+	bitmap_fill(p, buddyMetaStart, buddyMetaEnd, true)
+	paging_init(p, kernelImg, memoryMap, memoryMapSize, memoryMapDescSize, globalKernel, has1GBPages)
+	buddy_init(p)
 
 
-	buddy_release_range(mmapStart, mmapEnd)
+	buddy_release_range(p, mmapStart, mmapEnd)
 
 	print.serial_writeln("pmm: loaded")
 
@@ -194,24 +190,24 @@ order_for :: proc "contextless" (n: u64) -> (order: u8 = 0) {
 	return order
 }
 @(private)
-palloc :: proc "contextless" (sizeInBytes: u64) -> u64 {
+palloc :: proc "contextless" (p: ^PMM, sizeInBytes: u64) -> u64 {
 	print.kassert(sizeInBytes != 0, "palloc: zero-size allocation")
-	pmmGuards := [][]u8{mem.ptr_to_bytes(&state), mem.slice_to_bytes(state.bitmap), mem.ptr_to_bytes(&freeLists)}
-	spinlock.lock(&state.lock, pmmGuards)
-	defer spinlock.unlock(&state.lock, pmmGuards)
+	pmmGuards := [][]u8{mem.ptr_to_bytes(p), mem.slice_to_bytes(p.bitmap)}
+	spinlock.lock(&p.lock, pmmGuards)
+	defer spinlock.unlock(&p.lock, pmmGuards)
 
 	pages := pages_needed(sizeInBytes)
 	order := order_for(pages)
-	addr := buddy_alloc(order)
+	addr := buddy_alloc(p, order)
 	if addr == 0 do return 0
 	tail := addr / shared.PAGE_SIZE + pages
 	blockEnd := addr / shared.PAGE_SIZE + (u64(1) << order)
-	if tail < blockEnd do buddy_release_range(tail, blockEnd)
+	if tail < blockEnd do buddy_release_range(p, tail, blockEnd)
 	return addr
 }
 @(private)
-palloc_zeroed :: proc "contextless" (bytes: u64) -> u64 {
-	addr := palloc(bytes)
+palloc_zeroed :: proc "contextless" (p: ^PMM, bytes: u64) -> u64 {
+	addr := palloc(p, bytes)
 	if addr == 0 do return 0
 	print.kassert(addr % shared.PAGE_SIZE == 0, "palloc_zeroed: unaligned allocation")
 	NON_TEMPORAL_ZERO_MIN :: 256 * mem.Kilobyte
@@ -224,33 +220,33 @@ palloc_zeroed :: proc "contextless" (bytes: u64) -> u64 {
 }
 
 @(private)
-pfree :: proc "contextless" (addr: u64, bytes: u64) {
+pfree :: proc "contextless" (p: ^PMM, addr: u64, bytes: u64) {
 	print.kassert(addr != 0, "pfree: null physical address")
 	print.kassert(addr % shared.PAGE_SIZE == 0, "pfree: unaligned physical address")
 	print.kassert(bytes != 0, "pfree: zero-size allocation")
-	pmmGuards := [][]u8{mem.ptr_to_bytes(&state), mem.slice_to_bytes(state.bitmap), mem.ptr_to_bytes(&freeLists)}
-	spinlock.lock(&state.lock, pmmGuards)
-	defer spinlock.unlock(&state.lock, pmmGuards)
+	pmmGuards := [][]u8{mem.ptr_to_bytes(p), mem.slice_to_bytes(p.bitmap)}
+	spinlock.lock(&p.lock, pmmGuards)
+	defer spinlock.unlock(&p.lock, pmmGuards)
 
 	end := addr / shared.PAGE_SIZE + pages_needed(bytes)
 	for page := addr / shared.PAGE_SIZE; page < end; {
 		order := largest_block_order(page, end)
-		buddy_free(page * shared.PAGE_SIZE, order)
+		buddy_free(p, page * shared.PAGE_SIZE, order)
 		page += u64(1) << order
 	}
 }
 
-alloc_pages :: proc "contextless" (bytes: u64) -> u64 {
-	return palloc(bytes)
+alloc_pages :: proc "contextless" (p: ^PMM, bytes: u64) -> u64 {
+	return palloc(p, bytes)
 }
 
-free_pages :: proc "contextless" (addr, bytes: u64) {
-	pfree(addr, bytes)
+free_pages :: proc "contextless" (p: ^PMM, addr, bytes: u64) {
+	pfree(p, addr, bytes)
 }
 
-alloc_zeroed :: proc "contextless" (bytes: u64) -> u64 {
+alloc_zeroed :: proc "contextless" (p: ^PMM, bytes: u64) -> u64 {
 	print.kassert(bytes != 0, "alloc_zeroed: zero-size allocation")
-	return palloc_zeroed(bytes)
+	return palloc_zeroed(p, bytes)
 }
 is_good_ram :: #force_inline proc "contextless" (t: uefi.EFI_MEMORY_TYPE) -> bool {
 	return(
@@ -270,13 +266,14 @@ mmap_desc :: #force_inline proc(
 		uintptr(rawptr(memoryMap)) + uintptr(i * memoryMapDescSize),
 	)
 }
-map_kernel_mmio :: proc(phys, size: u64, pageSize: lmem.PageSize) {
+map_kernel_mmio :: proc(p: ^PMM, phys, size: u64, pageSize: lmem.PageSize) {
 	LIMIT :: KERNEL_ENTRY_REGION - KERNEL_DIRECT_MAP
 	print.kensure(size <= LIMIT && phys <= LIMIT - size)
 	pageBytes := lmem.page_bytes(pageSize)
 	for offset: u64 = 0; offset < size; offset += pageBytes {
 		print.kassert(slot_available(kernelPML4, KERNEL_DIRECT_MAP + phys + offset, pageSize))
 		map_page(
+			p,
 			kernelPML4,
 			phys + offset,
 			KERNEL_DIRECT_MAP + phys + offset,

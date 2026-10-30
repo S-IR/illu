@@ -274,7 +274,7 @@ grant_kill_all :: proc(domain: ^ProtectionDomain) {
 	{
 		domain_write_lock(domain)
 
-		for &cpu in cpus {
+		for &cpu in kernelState.cpus {
 			if !bit_array.get(&domain.grantCpus, cpu_index(&cpu)) do continue
 			cpuGuards := [][]u8 {
 				mem.ptr_to_bytes(&cpu),
@@ -290,7 +290,7 @@ grant_kill_all :: proc(domain: ^ProtectionDomain) {
 	}
 
 	self := gs_read_cpustate()
-	for &cpu in cpus {
+	for &cpu in kernelState.cpus {
 		for intrinsics.atomic_load(&cpu.currentGrant.domain) == domain {
 			grant_leave_if_killed(self)
 			intrinsics.cpu_relax()
@@ -543,12 +543,12 @@ grant_exit :: proc() -> ! {
 
 syscall_grant_spawn :: proc(handle: int, cpuIdx, saveAreaPtr, weight, entry: u64) -> shared.Error {
 	poolGuards := [][]u8 {
-		mem.ptr_to_bytes(&protDomainPool),
-		mem.slice_to_bytes(protDomainPool.prots[:]),
-		mem.slice_to_bytes(protDomainPool.freeSlots[:]),
+		mem.ptr_to_bytes(&kernelState.protDomainPool),
+		mem.slice_to_bytes(kernelState.protDomainPool.prots[:]),
+		mem.slice_to_bytes(kernelState.protDomainPool.freeSlots[:]),
 	}
-	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
+	spinlock.rw_read_lock(&kernelState.protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_read_unlock(&kernelState.protDomainPool.rwLock, poolGuards)
 
 	target, targetCpu := grant_syscall_target_NO_LOCK(handle, cpuIdx) or_return
 	saveArea := (^userschedule.UserSaveArea)(uintptr(saveAreaPtr))
@@ -557,12 +557,12 @@ syscall_grant_spawn :: proc(handle: int, cpuIdx, saveAreaPtr, weight, entry: u64
 
 syscall_grant_edit :: proc(handle: int, cpuIdx, weight: u64) -> shared.Error {
 	poolGuards := [][]u8 {
-		mem.ptr_to_bytes(&protDomainPool),
-		mem.slice_to_bytes(protDomainPool.prots[:]),
-		mem.slice_to_bytes(protDomainPool.freeSlots[:]),
+		mem.ptr_to_bytes(&kernelState.protDomainPool),
+		mem.slice_to_bytes(kernelState.protDomainPool.prots[:]),
+		mem.slice_to_bytes(kernelState.protDomainPool.freeSlots[:]),
 	}
-	spinlock.rw_read_lock(&protDomainPool.rwLock, poolGuards)
-	defer spinlock.rw_read_unlock(&protDomainPool.rwLock, poolGuards)
+	spinlock.rw_read_lock(&kernelState.protDomainPool.rwLock, poolGuards)
+	defer spinlock.rw_read_unlock(&kernelState.protDomainPool.rwLock, poolGuards)
 
 	target, targetCpu := grant_syscall_target_NO_LOCK(handle, cpuIdx) or_return
 	return grant_edit(target, targetCpu, weight)
@@ -578,8 +578,8 @@ grant_syscall_target_NO_LOCK :: proc(
 ) {
 	caller := gs_read_cpustate().currentGrant.domain
 	assert(caller != nil)
-	if cpuIdx >= u64(len(cpus)) do return nil, nil, .InvalidCpu
+	if cpuIdx >= u64(len(kernelState.cpus)) do return nil, nil, .InvalidCpu
 
 	target = protdomain_resolve_target_NO_LOCK(handle, caller) or_return
-	return target, &cpus[cpuIdx], .None
+	return target, &kernelState.cpus[cpuIdx], .None
 }

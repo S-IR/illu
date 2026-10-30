@@ -7,47 +7,40 @@ FreeBlock :: struct {
 	free:       bool,
 	order:      u8,
 }
-when ODIN_TEST {
-	@(thread_local)
-freeLists: [PMM_BUDDY_MAX_ORDER]FreeBlock
-} else {
-	freeLists: [PMM_BUDDY_MAX_ORDER]FreeBlock
-}
-
 @(private)
-buddy_init :: proc() {
+buddy_init :: proc(p: ^PMM) {
 	for i in 0 ..< PMM_BUDDY_MAX_ORDER {
-		freeLists[i].next = &freeLists[i]
-		freeLists[i].prev = &freeLists[i]
+		p.freeLists[i].next = &p.freeLists[i]
+		p.freeLists[i].prev = &p.freeLists[i]
 	}
-	p: u64 = 0
+	page: u64 = 0
 
-	for p < state.totalPages {
-		if is_used(&state, p) {
-			p += 1
+	for page < p.totalPages {
+		if is_used(p, page) {
+			page += 1
 			continue
 		}
-		end := p + 1
-		for end < state.totalPages && !is_used(&state, end) {
+		end := page + 1
+		for end < p.totalPages && !is_used(p, end) {
 			end += 1
 		}
-		buddy_add_range(p, end)
-		p = end
+		buddy_add_range(p, page, end)
+		page = end
 
 	}
 }
 @(private)
-buddy_alloc :: proc "contextless" (order: u8) -> u64 {
+buddy_alloc :: proc "contextless" (p: ^PMM, order: u8) -> u64 {
 	found := order
 	for found < u8(PMM_BUDDY_MAX_ORDER) {
-		if freeLists[found].next != &freeLists[found] do break
+		if p.freeLists[found].next != &p.freeLists[found] do break
 		found += 1
 	}
 	if found >= u8(PMM_BUDDY_MAX_ORDER) do return 0
 
-	blk := freeLists[found].next
+	blk := p.freeLists[found].next
 
-	print.kassert(blk != &freeLists[found])
+	print.kassert(blk != &p.freeLists[found])
 	print.kassert(blk.free)
 
 	list_remove(blk)
@@ -56,20 +49,20 @@ buddy_alloc :: proc "contextless" (order: u8) -> u64 {
 
 	for found > order {
 		found -= 1
-		list_add(found, page + (u64(1) << found))
+		list_add(p, found, page + (u64(1) << found))
 	}
 
-	bitmap_fill(&state, page, page + (u64(1) << order), true)
+	bitmap_fill(p, page, page + (u64(1) << order), true)
 	return page * shared.PAGE_SIZE
 
 }
 @(private)
-buddy_free :: proc "contextless" (addr: u64, order: u8) {
+buddy_free :: proc "contextless" (p: ^PMM, addr: u64, order: u8) {
 	page := addr / shared.PAGE_SIZE
 	print.kassert(page % (u64(1) << order) == 0, "buddy_free: block misaligned for order")
-	print.kassert(page + (u64(1) << order) <= state.totalPages, "buddy_free: block past end")
-	when ODIN_DEBUG do print.kassert(bitmap_all_used(&state, page, page + (u64(1) << order)), "buddy_free: page already free")
-	bitmap_fill(&state, page, page + (u64(1) << order), false)
+	print.kassert(page + (u64(1) << order) <= p.totalPages, "buddy_free: block past end")
+	when ODIN_DEBUG do print.kassert(bitmap_all_used(p, page, page + (u64(1) << order)), "buddy_free: page already free")
+	bitmap_fill(p, page, page + (u64(1) << order), false)
 
 	currPage := page
 	currOrder := order
@@ -77,8 +70,8 @@ buddy_free :: proc "contextless" (addr: u64, order: u8) {
 	for currOrder < u8(PMM_BUDDY_MAX_ORDER) - 1 {
 		buddyPage := currPage ~ (u64(1) << currOrder)
 		if buddyPage == 0 do break
-		if buddyPage + (u64(1) << currOrder) > state.totalPages do break
-		if is_used(&state, buddyPage) do break
+		if buddyPage + (u64(1) << currOrder) > p.totalPages do break
+		if is_used(p, buddyPage) do break
 
 
 		buddyBlk := (^FreeBlock)(page_to_rawptr(buddyPage))
@@ -89,27 +82,27 @@ buddy_free :: proc "contextless" (addr: u64, order: u8) {
 		currPage = min(currPage, buddyPage)
 		currOrder += 1
 	}
-	list_add(order = currOrder, page = currPage)
+	list_add(p, order = currOrder, page = currPage)
 
 }
 // Release pages that were reserved outside the buddy allocator.  Unlike
 // buddy_free, this must not round the range up: the pages may be adjacent to
 // blocks that are already on a free list.
-buddy_release_range :: proc "contextless" (start, end: u64) {
+buddy_release_range :: proc "contextless" (p: ^PMM, start, end: u64) {
 	print.kassert(start != 0)
 	print.kassert(start < end)
-	print.kassert(end <= state.totalPages)
+	print.kassert(end <= p.totalPages)
 
-	bitmap_fill(&state, start, end, false)
-	buddy_add_range(start, end)
+	bitmap_fill(p, start, end, false)
+	buddy_add_range(p, start, end)
 }
 
 @(private)
-buddy_add_range :: proc "contextless" (start, end: u64) {
-	for p := start; p < end; {
-		order := largest_block_order(p, end)
-		list_add(order, p)
-		p += u64(1) << order
+buddy_add_range :: proc "contextless" (p: ^PMM, start, end: u64) {
+	for page := start; page < end; {
+		order := largest_block_order(page, end)
+		list_add(p, order, page)
+		page += u64(1) << order
 	}
 }
 
@@ -125,14 +118,14 @@ largest_block_order :: proc "contextless" (page, end: u64) -> u8 {
 	return order
 }
 @(private)
-list_add :: proc "contextless" (order: u8, page: u64) {
+list_add :: proc "contextless" (p: ^PMM, order: u8, page: u64) {
 	print.kassert(page != 0, "list_add: page 0 handed out")
 
 	blk := (^FreeBlock)(page_to_rawptr(page))
 	blk.free = true
 	blk.order = order
 
-	head := &freeLists[order]
+	head := &p.freeLists[order]
 	blk.next = head.next
 	blk.prev = head
 	head.next.prev = blk

@@ -33,10 +33,12 @@ GetProcessHeap :: proc "c" () -> rawptr {
 	return rawptr(uintptr(1))
 }
 
+processHeap: alloc.Heap
+
 @(export)
 HeapAlloc :: proc "c" (heap: rawptr, flags: u32, size: uint) -> rawptr {
 	context = runtime.default_context()
-	p, err := alloc.heap_alloc(int(size), 0, true)
+	p, err := alloc.heap_alloc(&processHeap, int(size), 0, true)
 	if err != {} do return nil
 	return p
 }
@@ -44,7 +46,7 @@ HeapAlloc :: proc "c" (heap: rawptr, flags: u32, size: uint) -> rawptr {
 @(export)
 HeapFree :: proc "c" (heap: rawptr, flags: u32, mem: rawptr) -> i32 {
 	context = runtime.default_context()
-	alloc.heap_free(mem, 0)
+	alloc.heap_free(&processHeap, mem, 0)
 	return 1
 }
 

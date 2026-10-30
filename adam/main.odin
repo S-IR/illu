@@ -44,13 +44,15 @@ adam_entry :: proc "c" (
 	unreachable()
 }
 
+adamHeap: alloc.Heap
+
 adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 	adamLog.records = adamLogRecords[:]
 	log.write(&adamLog, .Debug, .None, u64(uintptr(rawptr(adam_start))))
 	context = runtime.default_context()
-	context.allocator = alloc.heap_allocator()
+	context.allocator = alloc.heap_allocator(&adamHeap)
 	tempArena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&tempArena, alloc.heap_allocator(), alloc.heap_allocator())
+	mem.dynamic_arena_init(&tempArena, alloc.heap_allocator(&adamHeap), alloc.heap_allocator(&adamHeap))
 
 	context.temp_allocator = mem.dynamic_arena_allocator(&tempArena)
 	context.assertion_failure_proc = adam_assertion_failure_handler
