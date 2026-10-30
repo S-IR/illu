@@ -105,13 +105,34 @@ Rule: always pick the exokernel design unless it is moronic. The kernel does pro
   - Boot: pick the valid-checksum manifest with the highest seq. A torn write fails its checksum, so the other one wins.
   - Works on fat, ntfs, ext4, ifs, raw blocks.
 
+## Device queues
+
+- A raw nvme queue pair = authority over the whole disk. Each command carries its own NSID and LBA, and the device can't limit which LBAs a queue may send. So only a program trusted with the whole disk (adam) gets a raw queue.
+- Everyone else goes through a kernel-mediated ring (contracts.md). That costs one syscall per batch.
+
+## DMA safety (notes, not decided)
+
+- A contract checks PRP perms at submit. The device writes later. If a domain frees or drops a buffer while its command is in flight, the page can be reused by another domain, and the DMA lands in that domain's memory.
+- So pins (updates.md 1.3) must cover PRP targets, not only ring memory. ring_destroy's `.Busy` only protects ring memory.
+- IOMMU (VT-d) as a second layer: a device can only DMA into memory granted to that device. Then a contract bug can't corrupt the whole machine.
+
+## Windows compat (notes, not decided)
+
+- Hand-writing ntdll + kernel32 + user32 + gdi32 + d3d is the size of the Wine project.
+- Plan: write the minimum ntdll plus a host-side backend so Wine's PE-built DLLs (kernel32, user32, gdi32, ...) run as-is. Wine's PE DLLs sit on ntdll and call the host through `__wine_unix_call`. LGPL is fine for loading them dynamically.
+- Once Wine runs, replace pieces with our own where it pays off.
+
 ## TODO
 
 - ifs has no security: disk access must go through nvme contracts (contracts.md). Not done.
-- ifs parallelism: per-program nvme queues, concurrent writers. Not done.
+- ifs parallelism: concurrent writers through the shared kernel-mediated rings. Not done.
 - Bootloader read-only fs reader.
 - Code store + A/B manifest layout.
 
 ## Undecided:
 
 - how programs get device access. Options the user named: a spawn args struct with ptrs per device kind (disk, mouse, gpu...), or a userland upcall to adam ("give me the struct to access the disk") where adam decides perms dynamically. User leans to the upcall. Not decided.
+  - Claude's proposal: device access is just a set of memory grants (authority byte, R on CQ, disk window range).
+    - Static part: at spawn the parent grants a subset of what it holds, plus a table page at a known address in the child (like auxv): {kind, ranges, handles}. New device kinds = new table entry kinds.
+    - Dynamic part (file dialogs, hotplug, plugins, so not knowable statically): the child asks whoever delegated to it, through a shared request page + wait_on. That delegator then grants with ProtDomainEdit Add.
+    - Difference from an upcall to adam: authority follows delegation chains (shell -> app -> plugin). Adam is only the root, not a broker every program depends on.

@@ -46,17 +46,18 @@ v1: nvme only, TailDoorbell + CqPhase, no pins / Copy / List.
 ## Next (user's order)
 
 1. Talk about proving what we wrote: ring, contracts, nvme, ifs. Tool: lib/modelcheck. The user decides the plan.
+   - Claude's idea: besides the contract interpreter, prove each contract program adam installs (e.g. Accept => LBA in window && PRP1 page aligned && HasPerm). The VM only jumps forward and the slot is <= 64 bytes, so checking every path is cheap.
 
 ## Later
 
 - Adam per core: nvme queue pair + ring with the nvme contract, grant clients W on authority + R on CQ.
 - nvme contract (contracts.md "nvme"): disk range via DISK_BASE perm window (updates.md 1.6), PRP lists need Copy/List.
 - lib/nvme client path through the ring (lib/nvme/io.odin).
-- Pins (updates.md 1.3). Perf: submit's O(depth) `owned` scan -> per-owner count (measure first).
+- Pins (updates.md 1.3) must cover PRP targets (os-design.md DMA safety). Perf: submit's O(depth) `owned` scan -> per-owner count (measure first).
 
 ## Open (undecided)
 
-- How programs get device access: spawn args struct with ptrs per device kind, or an upcall to adam that decides dynamically (user leans upcall).
+- How programs get device access: see os-design.md Undecided (spawn table + ask-the-delegator proposal there).
 - contracts.md says "caller owns with W"; now W only needed for wRules.
 - contract memory_access Volatile + len not 4/8 -> InvalidSize.
 - ifs forged-slot problem at boot scan.
