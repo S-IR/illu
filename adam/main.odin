@@ -58,6 +58,7 @@ adam_start :: proc "contextless" (pcies: []pci.Device) -> ! {
 	context.assertion_failure_proc = adam_assertion_failure_handler
 
 	ring_test()
+	memory_access_test()
 
 	for &device in pcies {
 		result, code := adam_dispatch_pci_device(&device)

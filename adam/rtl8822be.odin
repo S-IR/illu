@@ -266,7 +266,7 @@ import "core:mem"
 // 		regions := [1]syscalls.MMapRegion {
 // 			{pageSize = lmem.PageSize._4KB, count = pages + 2, flags = {.Present, .Write}},
 // 		}
-// 		mmapErr, dma := syscalls.syscall_mmap_userspace(regions[:])
+// 		dma, mmapErr := syscalls.syscall_mmap_userspace(regions[:])
 // 		if mmapErr != .None || dma == nil || u64(uintptr(dma)) > u64(max(u32)) do return .Failed, 8
 // 		defer syscalls.mem_free_userspace(u64(uintptr(dma)))
 // 		mem.copy(dma, rawptr(&RTL8822B_FIRMWARE[0]), len(RTL8822B_FIRMWARE))

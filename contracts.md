@@ -14,7 +14,7 @@ granted/split like ram via prot_domain_edit. one perm system for everything.
 
 CONTRACT (decided 2026-10-26, code: lib/syscalls/contracts.odin, kernel/contracts.odin)
 contracted memory = MemoryResource with rContractRules / wContractRules ([]ContractRule). byte granular, never mapped (flags = {}, no .Present).
-plain access (user_range_accessible, wait_on, DebugPrint) already rejects it because .Present is missing.
+plain access (user_mapped_range_accessible, wait_on, DebugPrint) already rejects it because .Present is missing.
 rules copied into the kernel per ContractCreate. one owner per copy, no refcount. freed when the resource dies (Delete, protdomain_free).
 regrant: open. today the grant paths refuse it only by accident (flags {}); add an explicit check + assert in resource_granted.
 contract_access must hold the caller's domain read lock for the whole run (Delete frees rules under domains_write_lock).

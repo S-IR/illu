@@ -83,15 +83,20 @@ syscall_contract_memory_access :: proc(dst, buf, bufLen, dirRaw: u64) -> (err: s
 		domain_read_lock(caller)
 
 		idx, found := resource_find_containing(caller.resources[:], dst)
-		if !found do return .NotContracted
+		if !found do return .NotOwned
 		res := caller.resources[idx]
-		if !resource_contracted(res) do return .NotContracted
 		end, overflow := intrinsics.overflow_add(dst, bufLen)
 		if overflow || end > res.phys + res.size do return .OutOfBounds
-		rules := res.contract.w if dir == .Write else res.contract.r
 
-		if len(rules) == 0 do return .Denied
-		if !contract_run_NO_LOCK(rules, slot, dst - res.phys, caller) do return .Denied
+
+		if resource_contracted(res) {
+			rules := res.contract.w if dir == .Write else res.contract.r
+			if len(rules) == 0 do return .Denied
+			if !contract_run_NO_LOCK(rules, slot, dst - res.phys, caller) do return .Denied
+		} else {
+			if dir == .Write && .Write not_in res.flags do return .Denied
+		}
+
 
 		ptr := pmm.phys_to_ptr(dst)
 		switch dir {
@@ -239,7 +244,7 @@ contract_run_NO_LOCK :: proc(
 			if r[rule.a] >= r[rule.b] do next = int(rule.imm)
 
 		case .HasPermR, .HasPermW:
-			if !user_range_accessible_NO_LOCK(domain, r[rule.a], r[rule.b], rule.op == .HasPermW) do return false
+			if !user_mapped_range_accessible_NO_LOCK(domain, r[rule.a], r[rule.b], rule.op == .HasPermW) do return false
 		case .Accept:
 			return true
 		case .Copy, .ListR, .ListW:

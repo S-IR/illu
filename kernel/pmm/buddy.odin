@@ -7,7 +7,6 @@ FreeBlock :: struct {
 	free:       bool,
 	order:      u8,
 }
-@(private)
 buddy_init :: proc(p: ^PMM) {
 	for i in 0 ..< PMM_BUDDY_MAX_ORDER {
 		p.freeLists[i].next = &p.freeLists[i]

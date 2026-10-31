@@ -384,7 +384,7 @@ parse_pe :: proc(
 }
 
 region_flags_for :: proc(characteristics: u32) -> (flags: lmem.PageFlags) {
-	flags += {.User}
+	flags += {.Present, .User}
 	if characteristics & u32(SectionCharacteristic.MemoryWrite) != 0 do flags += {.Write}
 	if characteristics & u32(SectionCharacteristic.MemoryExecute) == 0 do flags += {.NX}
 	return flags

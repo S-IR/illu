@@ -20,8 +20,8 @@ pe_load_into_memory :: proc(
 	if !alignOk do return 0, false
 	imagePages := imageBytes / shared.PAGE_SIZE
 
-	mmapRegions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = imagePages, flags = {.Write}}}
-	mmapErr, base := syscalls.syscall_mmap_userspace(mmapRegions[:])
+	mmapRegions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = imagePages, flags = {.Present, .Write}}}
+	base, mmapErr := syscalls.syscall_mmap_userspace(mmapRegions[:])
 	if mmapErr != .None || base == nil do return 0, false
 	defer if !ok do syscalls.mem_free_userspace(actualBase)
 
@@ -89,7 +89,7 @@ pe_run :: proc(
 
 
 	createErr: shared.Error
-	createErr, handle = syscalls.syscall_prot_domain_create_userspace(
+	handle, createErr = syscalls.syscall_prot_domain_create_userspace(
 		authorityPtr,
 		bc.image.regions[:],
 	)
@@ -106,12 +106,12 @@ pe_run :: proc(
 	defer for copyBase in parentCopies do syscalls.mem_free_userspace(copyBase)
 
 	mmapRegions := [4]syscalls.MMapRegion {
-		{pageSize = ._4KB, count = 1, flags = {}},
-		{pageSize = ._4KB, count = PE_STACK_SIZE / shared.PAGE_SIZE, flags = {.Write, .NX}},
-		{pageSize = ._4KB, count = 1, flags = {.Write, .NX}},
-		{pageSize = ._4KB, count = 1, flags = {.Write, .NX}},
+		{pageSize = ._4KB, count = 1, flags = {.Present}},
+		{pageSize = ._4KB, count = PE_STACK_SIZE / shared.PAGE_SIZE, flags = {.Present, .Write, .NX}},
+		{pageSize = ._4KB, count = 1, flags = {.Present, .Write, .NX}},
+		{pageSize = ._4KB, count = 1, flags = {.Present, .Write, .NX}},
 	}
-	mmapErr, base := syscalls.syscall_mmap_userspace(mmapRegions[:])
+	base, mmapErr := syscalls.syscall_mmap_userspace(mmapRegions[:])
 	if mmapErr != .None || base == nil do return handle, .StackAllocFailed
 	for _, i in mmapRegions {
 		append(&parentCopies, u64(uintptr(base)) + syscalls.descriptor_offset(mmapRegions[:], i))
@@ -132,21 +132,21 @@ pe_run :: proc(
 			logical = stackAddr,
 			size = PE_STACK_SIZE,
 			pageSize = ._4KB,
-			flags = {.User, .Write, .NX},
+			flags = {.Present, .User, .Write, .NX},
 		},
 		{
 			phys = tebLogical,
 			logical = tebLogical,
 			size = shared.PAGE_SIZE,
 			pageSize = ._4KB,
-			flags = {.User, .Write, .NX},
+			flags = {.Present, .User, .Write, .NX},
 		},
 		{
 			phys = saveAreaAddr,
 			logical = saveAreaAddr,
 			size = shared.PAGE_SIZE,
 			pageSize = ._4KB,
-			flags = {.User, .Write, .NX},
+			flags = {.Present, .User, .Write, .NX},
 		},
 	}
 	editErr := syscalls.syscall_prot_domain_edit_userspace(handle, memRegions[:], .Add)
@@ -187,7 +187,7 @@ pe_run :: proc(
 		}
 
 		if len(privateRegions) > 0 {
-			privErr, privBase := syscalls.syscall_mmap_userspace(privateRegions[:])
+			privBase, privErr := syscalls.syscall_mmap_userspace(privateRegions[:])
 			if privErr != .None || privBase == nil do return handle, .ImportGrantFailed
 			for _, i in privateRegions {
 				offset := syscalls.descriptor_offset(privateRegions[:], i)

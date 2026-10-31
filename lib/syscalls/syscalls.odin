@@ -112,13 +112,13 @@ when !ODIN_TEST {
 		syscall_mmap_userspace :: proc "contextless" (
 			regions: []MMapRegion,
 		) -> (
-			err: shared.Error,
 			addr: rawptr,
+			err: shared.Error,
 		) {
-			if regions == nil || len(regions) == 0 do return .InvalidSize, nil
+			if regions == nil || len(regions) == 0 do return nil, .InvalidSize
 
 			rawErr, rawAddr := syscall_mmap(u64(uintptr(raw_data(regions))), u64(len(regions)))
-			return shared.Error(rawErr), rawptr(uintptr(rawAddr))
+			return rawptr(uintptr(rawAddr)), shared.Error(rawErr)
 		}
 
 		mem_free_userspace :: proc "contextless" (phys: u64) -> shared.Error {
@@ -130,15 +130,15 @@ when !ODIN_TEST {
 			authorityPtr: rawptr,
 			regions: []MemRegion,
 		) -> (
-			err: shared.Error,
 			handle: int,
+			err: shared.Error,
 		) {
 			rawErr, rawHandle := syscall_prot_domain_create(
 				u64(uintptr(authorityPtr)),
 				u64(uintptr(raw_data(regions))),
 				u64(len(regions)),
 			)
-			return shared.Error(rawErr), rawHandle
+			return rawHandle, shared.Error(rawErr)
 		}
 
 		syscall_prot_domain_edit_userspace :: proc "contextless" (

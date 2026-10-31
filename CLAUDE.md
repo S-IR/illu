@@ -24,10 +24,16 @@ I do decisions about where to go. you only implement or help me implement. if yo
 - use odin lang's syntax features. use odin lang's core packages
 - no comments unless it is a must, even in asserts. code should read like comments. it should be abvious what you do based on the code
 - be very careful with assembly. write #assert where you are assuming an odin lang struct layout. when having kernel issues first check the alignment problems then the argument order passings
+- never leave bugs in
 - returned errors from fns imply either the returned variable or the modified input variables are undefined thus you should never read vars before checking errors
 - we don't really do tests. we buiild so that we can prove that software is not buggy through our tlb like lib/modelcheck library. when we finished wrting a component that we know wont change a lot anymore we prove that it doesn't have bugs.
+- assume hardware behaves until we write code specifically about hardware not behaving
+- we write code and design things to allow ease and thoroughness of proving it in the future. we'd like as much proof as possible.
 - STOP PUTTING u8 WHEN YOU MEAN BYTES. USE BYTE for BYTE TYPE
   DO NOT ADD THINGS UNLESS NEEDED
   DO NOT WRITE ANY CODE IN ANY FILES YOURSELF. PRINT HERE IN THIS CHAT STEP BY STEP CHANGES OF THE CODEBASE + CODE UNLESS I LITERALLY ASK YOU TO MODIFY FILES
   YOU PRESENT STEP BY STEP INSTRUCTIONS ON WHAT TO DO. SMALL BITE SIZED INSTRUCTIONS WITH PSEUDOCODE . YOU WILL BY DEFAULT GET ME TO UNDERSTAND THE PROBLEM AND WRITE THE CODE BY HAND AND ONLY PRINT CODE IF I ASK
   THE RULES AND THE NOTES THAT I WROTE HERE ARE EXTREMELY IMPORTANT DO NOT DARE TO IGNORE THEM
+  STOP TELLING ME ABOUT UNUSED IMPORTS AS IF THEY ARE BUGS THEY DO NOT MATTER THEY GET COMPILED AWAY
+
+THIS CONTEXT IN THIS FILE IS RELALY IMPORTANT ALWAYS FOLLOW IT TO THE TEETH

@@ -2,6 +2,7 @@ package nvme
 import ah "../../asm_helpers"
 import "../shared"
 import "base:intrinsics"
+import "core:container/bit_array"
 Device :: struct {
 	regs:        Controller,
 	cap:         CAP,
@@ -10,7 +11,7 @@ Device :: struct {
 	lbaSize:     u32,
 	queueDepth:  u32,
 	queueCount:  u32,
-	nextQid:     u32,
+	usedQids:    bit_array.Bit_Array,
 	maxTransfer: u64,
 	serial:      [20]u8,
 	model:       [40]u8,

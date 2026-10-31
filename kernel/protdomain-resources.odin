@@ -13,7 +13,7 @@ user_copy_in_NO_LOCK :: proc "contextless" (
 	src: u64,
 ) -> bool {
 	bytes := u64(len(dst) * size_of(T))
-	if !user_range_accessible_NO_LOCK(domain, src, bytes, false) do return false
+	if !user_mapped_range_accessible_NO_LOCK(domain, src, bytes, false) do return false
 	mem.copy(raw_data(dst), pmm.phys_to_ptr(src), int(bytes))
 	return true
 }
@@ -27,7 +27,7 @@ user_copy_out_NO_LOCK :: proc "contextless" (
 	src: []$T,
 ) -> bool {
 	bytes := u64(len(src) * size_of(T))
-	if !user_range_accessible_NO_LOCK(domain, dst, bytes, true) do return false
+	if !user_mapped_range_accessible_NO_LOCK(domain, dst, bytes, true) do return false
 	mem.copy(pmm.phys_to_ptr(dst), raw_data(src), int(bytes))
 	return true
 }
@@ -49,17 +49,21 @@ page_size_usable :: proc "contextless" (size: lmem.PageSize) -> bool {
 }
 
 mem_region_valid :: proc "contextless" (r: syscalls.MemRegion) -> bool {
-	if !page_size_usable(r.pageSize) || r.size == 0 do return false
+	if r.size == 0 do return false
 	if .PS in r.flags || .Global in r.flags do return false
+	_, physOverflow := intrinsics.overflow_add(r.phys, r.size)
+	if physOverflow do return false
+
+	if .Present not_in r.flags do return .User not_in r.flags && r.logical == r.phys
+
+	if !page_size_usable(r.pageSize) do return false
+	logicalEnd, logicalOverflow := intrinsics.overflow_add(r.logical, r.size)
+	if logicalOverflow || logicalEnd > USER_ADDR_END do return false
 	pageBytes := lmem.page_bytes(r.pageSize)
 	if r.phys % pageBytes != 0 || r.logical % pageBytes != 0 || r.size % pageBytes != 0 do return false
-	_, physOverflow := intrinsics.overflow_add(r.phys, r.size)
-	logicalEnd, logicalOverflow := intrinsics.overflow_add(r.logical, r.size)
-	if physOverflow || logicalOverflow || logicalEnd > USER_ADDR_END do return false
 	cpuInfoBytes := cpu_infos_bytes(int(CpuInfos.cpuCount))
 	return !resource_ranges_overlap(r.logical, r.size, userschedule.CPU_INFO_ADDR, cpuInfoBytes)
 }
-
 
 resources_backing_bytes :: proc "contextless" (resources: ^#soa[dynamic]MemoryResource) -> []u8 {
 	FIELDS :: intrinsics.type_struct_field_count(MemoryResource)
@@ -113,7 +117,7 @@ resource_find_containing :: proc "contextless" (
 // Callers dereference phys directly. Without meltdown isolation that happens on the
 // domain's page tables, so a domain's own logical mapping at phys can redirect the
 // access. Safe: domains can only map memory they own, so it only hits itself.
-user_range_accessible_NO_LOCK :: proc "contextless" (
+user_mapped_range_accessible_NO_LOCK :: proc "contextless" (
 	domain: ^ProtectionDomain,
 	phys, size: u64,
 	write: bool,
@@ -133,7 +137,47 @@ user_range_accessible_NO_LOCK :: proc "contextless" (
 	}
 	return true
 }
-
+user_range_accessible_NO_LOCK :: proc "contextless" (
+	domain: ^ProtectionDomain,
+	phys, size: u64,
+	write: bool,
+) -> bool {
+	if size == 0 || phys + size < phys do return false
+	end := phys + size
+	covered := phys
+	idx := resource_upper_bound(domain.resources[:], phys) - 1
+	for covered < end {
+		if idx < 0 || idx >= len(domain.resources) do return false
+		resource := domain.resources[idx]
+		if covered < resource.phys || covered >= resource.phys + resource.size do return false
+		if resource_contracted(resource) do return false
+		if write && .Write not_in resource.flags do return false
+		covered = resource.phys + resource.size
+		idx += 1
+	}
+	return true
+}
+user_range_covered_NO_LOCK :: proc "contextless" (
+	domain: ^ProtectionDomain,
+	phys, size: u64,
+	write: bool,
+) -> (
+	covered: u64,
+) {
+	if size == 0 || phys + size < phys do return 0
+	end := phys + size
+	for idx := max(resource_upper_bound(domain.resources[:], phys) - 1, 0);
+	    idx < len(domain.resources) && domain.resources[idx].phys < end;
+	    idx += 1 {
+		resource := domain.resources[idx]
+		if resource_contracted(resource) do continue
+		if write && .Write not_in resource.flags do continue
+		lo := max(phys, resource.phys)
+		hi := min(end, resource.phys + resource.size)
+		if hi > lo do covered += hi - lo
+	}
+	return covered
+}
 resource_ranges_overlap :: proc "contextless" (aPhys, aSize, bPhys, bSize: u64) -> bool {
 	return aPhys < bPhys + bSize && bPhys < aPhys + aSize
 }

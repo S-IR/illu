@@ -5,6 +5,7 @@ import "../clock"
 import "../pci"
 import "../shared"
 import "../syscalls"
+import "core:container/bit_array"
 
 #assert(ADMIN_QUEUE_DEPTH * size_of(Command) <= shared.PAGE_SIZE)
 
@@ -29,7 +30,12 @@ init :: proc(pciDevice: ^pci.Device) -> (device: Device, blockCount: u64, err: s
 	stride := doorbell_stride(cap)
 	if bar.size < u64(regDoorbells + 4 * stride) do return {}, 0, .NvmeBarTooSmall
 
-	pagesBuf, aErr := make_aligned([]byte, 3 * shared.PAGE_SIZE, shared.PAGE_SIZE, context.allocator)
+	pagesBuf, aErr := make_aligned(
+		[]byte,
+		3 * shared.PAGE_SIZE,
+		shared.PAGE_SIZE,
+		context.allocator,
+	)
 	if aErr != nil do return {}, 0, .OutOfMemory
 	pages := u64(uintptr(raw_data(pagesBuf)))
 	adminSq := pages
@@ -129,9 +135,9 @@ init :: proc(pciDevice: ^pci.Device) -> (device: Device, blockCount: u64, err: s
 	) or_return
 	byDevice := min(granted & 0xFFFF, granted >> 16) + 1
 	byBar := u32((bar.size - u64(regDoorbells)) / u64(2 * stride)) - 1
-	device.queueCount = min(byDevice, byBar)
+	device.queueCount = min(byDevice, byBar, u32(max(u16)))
 	if device.queueCount == 0 do return {}, 0, .NvmeNoIoQueues
-	device.nextQid = 1
+	if !bit_array.init(&device.usedQids, int(device.queueCount) + 1, 1) do return {}, 0, .OutOfMemory
 	return device, blockCount, .None
 }
 
@@ -149,27 +155,30 @@ controller_disable :: proc(regs: Controller, cap: CAP) -> shared.Error {
 }
 
 queue_pair_create :: proc(device: ^Device, msixRow: u16) -> (info: QueueInfo, err: shared.Error) {
-	assert(device.nextQid >= 1)
 	assert(device.queueDepth >= 2 && device.queueDepth <= QUEUE_DEPTH_SPEC_MAX)
-	if device.nextQid > device.queueCount do return {}, .NvmeIoQueuesExhausted
-	assert(device.nextQid <= u32(max(u16)))
-	qid := u16(device.nextQid)
+	assert(device.queueCount >= 1 && device.queueCount <= u32(max(u16)))
+	assert(bit_array.len(&device.usedQids) == int(device.queueCount))
+	qidIt := bit_array.make_iterator(&device.usedQids)
+	freeQid, found := bit_array.iterate_by_unset(&qidIt)
+	if !found do return {}, .NvmeIoQueuesExhausted
+	assert(freeQid >= 1 && freeQid <= int(device.queueCount))
+	qid := u16(freeQid)
 
-	sqPages :=
-		(u64(device.queueDepth) * size_of(Command) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
-	cqPages :=
-		(u64(device.queueDepth) * size_of(Completion) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
-	pagesBuf, aErr := make_aligned(
-		[]byte,
-		(sqPages + cqPages) * shared.PAGE_SIZE,
-		shared.PAGE_SIZE,
-		context.allocator,
-	)
-	if aErr != nil do return {}, .OutOfMemory
-	pages := u64(uintptr(raw_data(pagesBuf)))
-	defer if err != .None do delete(pagesBuf)
-	sq := pages
-	cq := pages + sqPages * shared.PAGE_SIZE
+	sqPages, cqPages := queue_pair_pages(device)
+
+	regions := [2]syscalls.MMapRegion {
+		{pageSize = ._4KB, count = sqPages, flags = {.Present, .Write, .NX}},
+		{pageSize = ._4KB, count = cqPages, flags = {.Present, .Write, .NX}},
+	}
+	base, mmapErr := syscalls.syscall_mmap_userspace(regions[:])
+	if mmapErr != .None do return {}, mmapErr
+	sq := u64(uintptr(base))
+	cq := sq + syscalls.descriptor_offset(regions[:], 1)
+	defer if err != .None {
+		sqFreeErr := syscalls.mem_free_userspace(sq)
+		cqFreeErr := syscalls.mem_free_userspace(cq)
+		assert(sqFreeErr == .None && cqFreeErr == .None)
+	}
 	sizeMinus1 := u16(device.queueDepth - 1)
 
 	_ = admin_execute_command(
@@ -214,7 +223,8 @@ queue_pair_create :: proc(device: ^Device, msixRow: u16) -> (info: QueueInfo, er
 		return {}, sqErr
 	}
 
-	device.nextQid += 1
+	marked := bit_array.set(&device.usedQids, qid)
+	assert(marked)
 	return {
 			sq = ([^]Command)(uintptr(sq)),
 			cq = ([^]Completion)(uintptr(cq)),
@@ -227,4 +237,37 @@ queue_pair_create :: proc(device: ^Device, msixRow: u16) -> (info: QueueInfo, er
 			maxTransfer = device.maxTransfer,
 		},
 		.None
+}
+queue_pair_destroy :: proc(device: ^Device, info: QueueInfo) -> shared.Error {
+	if !shared.assert(info.qid >= 1 && u32(info.qid) <= device.queueCount) do return .InvalidAPICall
+	if !shared.assert(bit_array.get(&device.usedQids, info.qid)) do return .InvalidAPICall
+	if !shared.assert(info.sq != nil && info.cq != nil) do return .InvalidAPICall
+	_ = admin_execute_command(
+		device,
+		{
+			header = {opcode = u8(ADMIN_COMMANDS.DELETE_IO_SQ)},
+			args = {deleteQueue = {queueId = info.qid}},
+		},
+	) or_return
+
+	_ = admin_execute_command(
+		device,
+		{
+			header = {opcode = u8(ADMIN_COMMANDS.DELETE_IO_CQ)},
+			args = {deleteQueue = {queueId = info.qid}},
+		},
+	) or_return
+	unmarked := bit_array.set(&device.usedQids, info.qid, false)
+	assert(unmarked)
+
+	syscalls.mem_free_userspace(u64(uintptr(info.sq))) or_return
+	syscalls.mem_free_userspace(u64(uintptr(info.cq))) or_return
+	return .None
+}
+
+queue_pair_pages :: proc(device: ^Device) -> (sqPages: u64, cqPages: u64) {
+	sqPages = (u64(device.queueDepth) * size_of(Command) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
+	cqPages =
+		(u64(device.queueDepth) * size_of(Completion) + shared.PAGE_SIZE - 1) / shared.PAGE_SIZE
+	return sqPages, cqPages
 }

@@ -1,5 +1,6 @@
 // THROWAWAY: ring test, kept for reference until the user decides.
 package adam
+import "../lib/shared"
 import "../lib/syscalls"
 import "base:intrinsics"
 
@@ -22,7 +23,7 @@ RingTestPage :: struct {
 	cq:         [4]RingTestCqe,
 	sqDoorbell: u32,
 	cqDoorbell: u32,
-	authority:  byte,
+	authority:  [3]byte,
 }
 #assert(offset_of(RingTestPage, cq) % 8 == 0)
 
@@ -33,7 +34,7 @@ ring_test_complete :: proc(cqe: ^RingTestCqe, token, status, phase: u16) {
 
 ring_test :: proc() {
 	regions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = 1, flags = {.Present, .Write}}}
-	mmapErr, addr := syscalls.syscall_mmap_userspace(regions[:])
+	addr, mmapErr := syscalls.syscall_mmap_userspace(regions[:])
 	assert(mmapErr == .None)
 	page := (^RingTestPage)(addr)
 
@@ -62,7 +63,7 @@ ring_test :: proc() {
 			phaseBit = 0,
 			statusOffset = u64(offset_of(RingTestCqe, status)),
 		},
-		domainCap = len(page.sq) - 1,
+		authoritySize = len(page.authority),
 		rulesPtr = u64(uintptr(&rules)),
 		rulesCount = len(rules),
 	}
@@ -119,4 +120,34 @@ ring_test :: proc() {
 
 	assert(syscalls.mem_free_userspace(u64(uintptr(addr))) == .None)
 	syscalls.syscall_debug_print_userspace("ring test ok")
+}
+
+memory_access_test :: proc() {
+	regions := [1]syscalls.MMapRegion{{pageSize = ._4KB, count = 1, flags = {.Present, .Write}}}
+	addr, mmapErr := syscalls.syscall_mmap_userspace(regions[:])
+	assert(mmapErr == .None)
+	page := u64(uintptr(addr))
+
+	written := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	assert(syscalls.syscall_contract_memory_access_userspace(page, written[:], .Write) == .None)
+	got: [8]byte
+	assert(syscalls.syscall_contract_memory_access_userspace(page, got[:], .Read) == .None)
+	assert(got == written)
+
+	pastEnd: [16]byte
+	pastEndErr := syscalls.syscall_contract_memory_access_userspace(
+		page + shared.PAGE_SIZE - 8,
+		pastEnd[:],
+		.Read,
+	)
+	assert(pastEndErr == .OutOfBounds)
+	notOwnedErr := syscalls.syscall_contract_memory_access_userspace(
+		~u64(shared.PAGE_SIZE - 1),
+		got[:],
+		.Read,
+	)
+	assert(notOwnedErr == .NotOwned)
+
+	assert(syscalls.mem_free_userspace(page) == .None)
+	syscalls.syscall_debug_print_userspace("memory access test ok")
 }

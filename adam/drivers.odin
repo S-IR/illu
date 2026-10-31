@@ -42,7 +42,11 @@ adam_dispatch_pci_device :: proc(
 			nvmeDisk: diskhelpers.NvmeDisk
 			blockCount: u64
 			nvmeDisk.dev, blockCount = nvme.init(device) or_return
-			defer if result != .Initialized do nvme.controller_disable(nvmeDisk.dev.regs, nvmeDisk.dev.cap)
+			defer if result != .Initialized {
+				nvme_rings_destroy(&nvmeDisk.dev, &nvmeDisk.rings)
+				nvme.controller_disable(nvmeDisk.dev.regs, nvmeDisk.dev.cap)
+
+			}
 
 			table, capOffset := pci.msix_table(device) or_return
 			cpus := userschedule.cpu_infos(
@@ -75,7 +79,7 @@ adam_dispatch_pci_device :: proc(
 
 			info := nvme.queue_pair_create(&nvmeDisk.dev, NVME_MSIX_ROW) or_return
 			nvmeDisk.queue = nvme.queue_init(info) or_return
-
+			nvmeDisk.rings = nvme_rings_create(&nvmeDisk.dev, blockCount) or_return
 			disk: diskhelpers.Disk
 			{
 				addrGuards := [][]u8{mem.ptr_to_bytes(&gs.nextMadeUpAddr)}

@@ -313,25 +313,27 @@ syscall_prot_domain_create :: proc(
 	authorityPtr: ^byte,
 	regionsPtr, count: u64,
 ) -> (
-	err: shared.Error,
 	handle: int,
+	err: shared.Error,
 ) {
 	callerDomain := gs_read_cpustate().currentGrant.domain
 	assert(callerDomain != nil)
-	if authorityPtr == nil do return .NoPermission, 0
+	if authorityPtr == nil do return 0, .NoPermission
 
-	if count == 0 || count > syscalls.MAX_REGIONS_PER_CALL do return .InvalidRegionCount, 0
+	if count == 0 || count > syscalls.MAX_REGIONS_PER_CALL do return 0, .InvalidRegionCount
 	regionsBuf: [syscalls.MAX_REGIONS_PER_CALL]syscalls.MemRegion
 	regions := regionsBuf[:count]
-	if !user_copy_in(callerDomain, regions, regionsPtr) do return .InvalidRegionCount, 0
-	for &r in regions do r.flags += {.Present, .User}
+	if !user_copy_in(callerDomain, regions, regionsPtr) do return 0, .InvalidRegionCount
+	for &r in regions {
+		if .Present in r.flags do r.flags += {.User}
+	}
 	{
 		domain_read_lock(callerDomain)
-		if !user_range_accessible_NO_LOCK(callerDomain, u64(uintptr(authorityPtr)), 1, true) do return .NoPermission, 0
+		if !user_range_accessible_NO_LOCK(callerDomain, u64(uintptr(authorityPtr)), 1, true) do return 0, .NoPermission
 	}
 
 	pd, allocErr := protdomain_new(authorityPtr)
-	if allocErr != nil do return .OutOfMemory, 0
+	if allocErr != nil do return 0, .OutOfMemory
 	defer if err != .None do protdomain_free(pd)
 
 	{
@@ -339,19 +341,24 @@ syscall_prot_domain_create :: proc(
 		defer domains_write_unlock(callerDomain, pd)
 
 		for r, i in regions {
-			if !mem_region_valid(r) || !region_mappable(pd.pml4, r) do return .InvalidRegion, 0
+			if !mem_region_valid(r) do return 0, .InvalidRegion
+			if .Present in r.flags {
+				if !region_mappable(pd.pml4, r) do return 0, .InvalidRegion
+			}
 			for other in regions[i + 1:] {
-				if resource_ranges_overlap(r.phys, r.size, other.phys, other.size) do return .InvalidRegion, 0
-				if resource_ranges_overlap(r.logical, r.size, other.logical, other.size) do return .InvalidRegion, 0
+				if resource_ranges_overlap(r.phys, r.size, other.phys, other.size) do return 0, .InvalidRegion
+				if .Present in r.flags && .Present in other.flags {
+					if resource_ranges_overlap(r.logical, r.size, other.logical, other.size) do return 0, .InvalidRegion
+				}
 			}
 			ownerIdx, owned := resource_find_containing(callerDomain.resources[:], r.phys)
-			if !owned do return .NotOwned, 0
+			if !owned do return 0, .NotOwned
 			owner := callerDomain.resources[ownerIdx]
-			if resource_contracted(owner) do return .NotOwned, 0
-			if r.phys + r.size > owner.phys + owner.size do return .NotOwned, 0
-			if !region_flags_grantable(r.flags, owner.flags) do return .NotOwned, 0
+			if resource_contracted(owner) do return 0, .NotOwned
+			if r.phys + r.size > owner.phys + owner.size do return 0, .NotOwned
+			if !region_flags_grantable(r.flags, owner.flags) do return 0, .NotOwned
 		}
-		if reserve_soa(&pd.resources, len(regions)) != nil do return .OutOfMemory, 0
+		if reserve_soa(&pd.resources, len(regions)) != nil do return 0, .OutOfMemory
 
 		detached: [dynamic]u64
 		defer detached_tables_free(&detached)
@@ -363,13 +370,15 @@ syscall_prot_domain_create :: proc(
 			_, inserted := resource_insert(&pd.resources, granted)
 			assert(inserted)
 			memory_underlay_increment(owner.underlay)
-			resource_map(pd.pml4, granted, &detached)
+			if .Present in granted.flags {
+				resource_map(pd.pml4, granted, &detached)
+			}
 		}
 	}
 
 	pdIdx, publishErr := protdomain_publish(pd)
-	if publishErr != nil do return .OutOfMemory, 0
-	return .None, pdIdx
+	if publishErr != nil do return 0, .OutOfMemory
+	return pdIdx, .None
 }
 
 
@@ -391,7 +400,9 @@ syscall_prot_domain_edit :: proc(
 	regionsBuf: [syscalls.MAX_REGIONS_PER_CALL]syscalls.MemRegion
 	regions := regionsBuf[:count]
 	if !user_copy_in(callerDomain, regions, regionsPtr) do return .InvalidRegionCount
-	for &r in regions do r.flags += {.Present, .User}
+	for &r in regions {
+		if .Present in r.flags do r.flags += {.User}
+	}
 
 	released: [syscalls.MAX_REGIONS_PER_CALL]^MemoryUnderlay
 	releasedCount := 0
@@ -422,7 +433,9 @@ syscall_prot_domain_edit :: proc(
 			if r.phys == other.phys do return .InvalidRegion
 			if op == .Add {
 				if resource_ranges_overlap(r.phys, r.size, other.phys, other.size) do return .InvalidRegion
-				if resource_ranges_overlap(r.logical, r.size, other.logical, other.size) do return .InvalidRegion
+				if .Present in r.flags && .Present in other.flags {
+					if resource_ranges_overlap(r.logical, r.size, other.logical, other.size) do return .InvalidRegion
+				}
 			}
 
 		}
@@ -430,7 +443,9 @@ syscall_prot_domain_edit :: proc(
 		switch op {
 		case .Add:
 			if !mem_region_valid(r) do return .InvalidRegion
-			if !region_mappable(target.pml4, r) do return .InvalidRegion
+			if .Present in r.flags {
+				if !region_mappable(target.pml4, r) do return .InvalidRegion
+			}
 			ownerIdx, found := resource_find_containing(callerDomain.resources[:], r.phys)
 			if !found do return .NotOwned
 			owner := callerDomain.resources[ownerIdx]
@@ -457,8 +472,10 @@ syscall_prot_domain_edit :: proc(
 			_, inserted := resource_insert(&target.resources, granted)
 			assert(inserted)
 			memory_underlay_increment(owner.underlay)
-			resource_map(target.pml4, granted, &detached)
-			if len(detached) > 0 && tlbGen == 0 do tlbGen = domain_tlb_invalidate(target)
+			if .Present in granted.flags {
+				resource_map(target.pml4, granted, &detached)
+				if len(detached) > 0 && tlbGen == 0 do tlbGen = domain_tlb_invalidate(target)
+			}
 
 		case .Delete:
 			removed, found := resource_remove(&target.resources, r.phys)
@@ -466,7 +483,7 @@ syscall_prot_domain_edit :: proc(
 			contract_rules_free(removed.contract)
 			released[releasedCount] = removed.underlay
 			releasedCount += 1
-			if removed.flags == {} do continue
+			if .Present not_in removed.flags do continue
 
 			resource_unmap(target.pml4, removed)
 			if tlbGen == 0 do tlbGen = domain_tlb_invalidate(target)

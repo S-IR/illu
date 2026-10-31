@@ -2,13 +2,23 @@ package diskhelpers
 import "../nvme"
 import "../shared"
 import "base:intrinsics"
-import "core:math"
 import "core:mem"
 
 NvmeDisk :: struct {
 	dev:   nvme.Device,
 	queue: nvme.Queue,
+	rings: NvmeRings,
 }
+NvmeRing :: struct {
+	handle:  int,
+	info:    nvme.QueueInfo,
+	cqBytes: u64,
+}
+NvmeRings :: struct {
+	authority: []byte,
+	v:         []NvmeRing,
+}
+
 DiskDriver :: union {
 	NvmeDisk,
 }

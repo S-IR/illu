@@ -19,14 +19,14 @@ RingSlot :: struct {
 }
 
 Ring :: struct {
-	lock:         spinlock.Spinlock,
-	authorityPtr: ^byte,
-	sq:           syscalls.RingSq,
-	cq:           syscalls.RingCq,
-	domainCap:    u64,
-	rules:        []syscalls.ContractRule,
-	underlays:    [4]^MemoryUnderlay,
-	mutable:      struct {
+	lock:          spinlock.Spinlock,
+	authorityPtr:  ^byte,
+	sq:            syscalls.RingSq,
+	cq:            syscalls.RingCq,
+	authoritySize: u64,
+	rules:         []syscalls.ContractRule,
+	underlays:     [4]^MemoryUnderlay,
+	mutable:       struct {
 		sqTail:     u64,
 		cqHead:     u64,
 		cqPhase:    u8,
@@ -112,7 +112,7 @@ syscall_ring_create :: proc(descPtr: u64) -> (handle: int, err: shared.Error) {
 	if !field_fits(rd.cq.phaseOffset, 1, rd.cq.entrySize) do return 0, .InvalidRing
 	if rd.cq.phaseBit >= 8 do return 0, .InvalidRing
 	if rd.sq.doorbell % 4 != 0 || rd.cq.doorbell % 4 != 0 do return 0, .InvalidRing
-	if rd.domainCap == 0 || rd.domainCap > rd.sq.depth - 1 do return 0, .InvalidRing
+	if rd.authoritySize == 0 || rd.authoritySize > rd.sq.depth - 1 do return 0, .InvalidRing
 	if rd.cq.phys % 8 != 0 || rd.cq.entrySize % 8 != 0 do return 0, .InvalidRing
 
 	sqBytes, sqOverflow := intrinsics.overflow_mul(rd.sq.depth, rd.sq.entrySize)
@@ -129,7 +129,8 @@ syscall_ring_create :: proc(descPtr: u64) -> (handle: int, err: shared.Error) {
 		domain_read_lock(caller)
 
 
-		if !user_range_accessible_NO_LOCK(caller, rd.authorityPtr, 1, true) do return 0, .NoPermission
+		if !user_range_accessible_NO_LOCK(caller, rd.authorityPtr, rd.authoritySize, true) do return 0, .NoPermission
+
 
 		Range :: struct {
 			phys, size: u64,
@@ -173,7 +174,7 @@ syscall_ring_create :: proc(descPtr: u64) -> (handle: int, err: shared.Error) {
 	ring.authorityPtr = (^byte)(uintptr(rd.authorityPtr))
 	ring.sq = rd.sq
 	ring.cq = rd.cq
-	ring.domainCap = rd.domainCap
+	ring.authoritySize = rd.authoritySize
 	ring.rules = rules
 	ring.underlays = underlays
 	ring.mutable.slots = slots
@@ -212,25 +213,24 @@ syscall_ring_submit :: proc(
 
 	domain_read_lock(caller)
 
-	ring := ring_resolve_NO_LOCK(handle, caller) or_return
+	ring, cap := ring_resolve_NO_LOCK(handle, caller) or_return
 	if n > ring.sq.depth do return 0, .InvalidSize
 
 	total, overflow := intrinsics.overflow_mul(n, ring.sq.entrySize)
 	_, wrap := intrinsics.overflow_add(entriesPtr, total)
 	if overflow || wrap do return 0, .InvalidAddress
-	if !user_range_accessible_NO_LOCK(caller, tokensOutPtr, n * size_of(u16), true) do return 0, .InvalidAddress
+	if !user_mapped_range_accessible_NO_LOCK(caller, tokensOutPtr, n * size_of(u16), true) do return 0, .InvalidAddress
 
 	ring_lock(ring)
 
 	owned: u64
 	for slot in ring.mutable.slots do if slot.owner == caller do owned += 1
-	assert(owned <= ring.domainCap)
 
 	entryErr: shared.Error
 	for i in 0 ..< n {
 		if ring.mutable.inFlight == ring.sq.depth - 1 ||
 		   ring.mutable.freeCount == 0 ||
-		   owned == ring.domainCap {
+		   owned >= cap {
 			entryErr = .RingFull; break
 		}
 		slotBuf: [syscalls.CONTRACT_ACCESS_MAX]byte
@@ -295,11 +295,11 @@ syscall_ring_reap :: proc(
 
 	domain_read_lock(caller)
 
-	ring := ring_resolve_NO_LOCK(handle, caller) or_return
+	ring, _ := ring_resolve_NO_LOCK(handle, caller) or_return
 	if n > ring.sq.depth do return 0, .InvalidSize
-	if !user_range_accessible_NO_LOCK(caller, tokensPtr, n * size_of(u16), false) do return 0, .InvalidAddress
-	if !user_range_accessible_NO_LOCK(caller, outPtr, n * size_of(syscalls.RingReapEntry), true) do return 0, .InvalidAddress
-	if !user_range_accessible_NO_LOCK(caller, waitPtr, size_of(syscalls.RingWait), true) do return 0, .InvalidAddress
+	if !user_mapped_range_accessible_NO_LOCK(caller, tokensPtr, n * size_of(u16), false) do return 0, .InvalidAddress
+	if !user_mapped_range_accessible_NO_LOCK(caller, outPtr, n * size_of(syscalls.RingReapEntry), true) do return 0, .InvalidAddress
+	if !user_mapped_range_accessible_NO_LOCK(caller, waitPtr, size_of(syscalls.RingWait), true) do return 0, .InvalidAddress
 
 	ring_lock(ring)
 
@@ -377,7 +377,7 @@ syscall_ring_destroy :: proc(handle: int) -> (err: shared.Error) {
 	ring_pool_write_lock()
 	domain_read_lock(caller)
 
-	ring := ring_resolve_NO_LOCK(handle, caller) or_return
+	ring, _ := ring_resolve_NO_LOCK(handle, caller) or_return
 	ring_cq_drain_NO_LOCK(ring)
 
 	if ring.mutable.inFlight > 0 do return .Busy
@@ -401,15 +401,22 @@ ring_resolve_NO_LOCK :: proc(
 	caller: ^ProtectionDomain,
 ) -> (
 	ring: ^Ring,
+	cap: u64,
 	err: shared.Error,
 ) {
 	assert(caller != nil)
-	if handle < 0 || handle >= len(kernelState.ringPool.rings) do return nil, .InvalidHandle
-	if kernelState.ringPool.rings[handle] == nil do return nil, .InvalidHandle
+	if handle < 0 || handle >= len(kernelState.ringPool.rings) do return nil, 0, .InvalidHandle
+	if kernelState.ringPool.rings[handle] == nil do return nil, 0, .InvalidHandle
 	ring = kernelState.ringPool.rings[handle]
 	assert(ring.authorityPtr != nil)
-	if !user_range_accessible_NO_LOCK(caller, u64(uintptr(ring.authorityPtr)), size_of(byte), true) do return nil, .NoPermission
-	return ring, .None
+	cap = user_range_covered_NO_LOCK(
+		caller,
+		u64(uintptr(ring.authorityPtr)),
+		ring.authoritySize,
+		true,
+	)
+	if cap == 0 do return nil, 0, .NoPermission
+	return ring, cap, .None
 }
 ring_cq_drain_NO_LOCK :: proc(ring: ^Ring) -> (wait: syscalls.RingWait) {
 	consumed: u64

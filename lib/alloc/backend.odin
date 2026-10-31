@@ -24,7 +24,7 @@ backend_alloc_pages :: proc(pmmState: ^pmm.PMM, count: u64) -> u64 {
 		regions := [1]syscalls.MMapRegion {
 			{pageSize = lmem.PageSize._4KB, count = count, flags = {.Present, .Write}},
 		}
-		err, addr := syscalls.syscall_mmap_userspace(regions[:])
+		addr, err := syscalls.syscall_mmap_userspace(regions[:])
 		if err != .None || addr == nil {
 			return 0
 		}

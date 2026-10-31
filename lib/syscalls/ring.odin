@@ -11,12 +11,12 @@ RingCq :: struct {
 }
 
 RingDesc :: struct {
-	authorityPtr: u64,
-	sq:           RingSq,
-	cq:           RingCq,
-	domainCap:    u64,
-	rulesPtr:     u64,
-	rulesCount:   u64,
+	authorityPtr:  u64,
+	sq:            RingSq,
+	cq:            RingCq,
+	authoritySize: u64,
+	rulesPtr:      u64,
+	rulesCount:    u64,
 }
 
 RingReapEntry :: struct {

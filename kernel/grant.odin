@@ -196,7 +196,7 @@ grant_spawn :: proc(
 	if bit_array.get(&domain.grantCpus, cpu_index(cpu)) do return .AlreadyOnCpu
 	if weight == 0 || weight > domain.weightFree do return .InsufficientWeight
 	saveAreaAddr := u64(uintptr(saveArea))
-	if !user_range_accessible_NO_LOCK(domain, saveAreaAddr, size_of(userschedule.UserSaveArea), true) do return .InvalidSaveArea
+	if !user_mapped_range_accessible_NO_LOCK(domain, saveAreaAddr, size_of(userschedule.UserSaveArea), true) do return .InvalidSaveArea
 	ownerIdx, owned := resource_find_containing(domain.resources[:], saveAreaAddr)
 	assert(owned)
 	ownerEnd := domain.resources.phys[ownerIdx] + domain.resources.size[ownerIdx]
@@ -494,7 +494,7 @@ syscall_wait_on :: proc(addr, oldValue, deadline: u64) -> shared.Error {
 	if addr % 8 != 0 do return .InvalidAddress
 	{
 		domain_read_lock(domain)
-		if !user_range_accessible_NO_LOCK(domain, addr, 8, false) do return .InvalidAddress
+		if !user_mapped_range_accessible_NO_LOCK(domain, addr, 8, false) do return .InvalidAddress
 	}
 	if intrinsics.atomic_load((^u64)(pmm.phys_to_ptr(addr))) != oldValue do return .None
 	if ah.rdtsc_asm() >= deadline do return .Timeout

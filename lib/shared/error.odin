@@ -51,7 +51,6 @@ Error :: enum u64 {
 	InvalidAddress,
 	InvalidRules,
 	InvalidDir,
-	NotContracted,
 	OutOfBounds,
 	Denied,
 	InvalidRing,
